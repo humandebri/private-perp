@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/hl-types",
+    "crates/hl-sign",
+    "crates/db",
+    "crates/policy",
+    "crates/funds-vault",
+    "crates/control-guard",
+    "crates/trading-core",
+]
+# ホストで実行できる純粋クレートのみを既定の対象にする。
+# Canisterクレートと `db` の実装は wasm32 ビルドでのみ検証する（Implementation.md 3.2、3.3）。
+default-members = ["crates/hl-types", "crates/hl-sign", "crates/db"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+# 依存は完全固定する（Implementation.md 4.1、14.1）。Cargo.lock をコミットする。
+[workspace.dependencies]
+candid = "=0.10.35"
+ic-cdk = "=0.20.3"
+ic-sqlite-vfs = { version = "=2.0.0", default-features = false, features = ["sqlite-precompiled"] }
+k256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa"] }
+sha3 = "=0.12.0"
+thiserror = "=2.0.20"

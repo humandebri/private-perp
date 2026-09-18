@@ -1,0 +1,12 @@
+[package]
+name = "hl-sign"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Hyperliquidのaction構築・署名対象ハッシュ（純粋・非async）"
+
+[dependencies]
+k256.workspace = true
+sha3.workspace = true
+thiserror.workspace = true

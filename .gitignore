@@ -8,3 +8,10 @@ playwright-report/
 .env*
 !.env.example
 *.log
+
+# Rust / icp-cli
+/target/
+/.icp/
+# サンドボックス内でCARGO_HOME / ICP_HOMEをワークスペースへ向けた場合のキャッシュ
+/.cargo-home/
+/.icp-home/
