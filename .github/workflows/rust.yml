@@ -1,0 +1,47 @@
+name: Rust verification
+# Phase 0 のworkspace雛形を検証する。リモートCIは未実行である
+# （docs/implementation-status.md を正とする）。
+on:
+  push:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'icp.yaml'
+      - 'scripts/**'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'icp.yaml'
+      - 'scripts/**'
+      - '.github/workflows/rust.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # rust-toolchain.toml と同じ版に固定する。
+          toolchain: '1.97.0'
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint (host)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test (host, default members)
+        run: cargo test
+      - name: Forbid async in hl-sign and db
+        run: bash scripts/check-no-await.sh
+      - name: Lint (wasm canisters)
+        run: cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -- -D warnings
+      - name: Build canister wasm
+        run: cargo build --release --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core
