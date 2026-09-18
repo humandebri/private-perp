@@ -1,0 +1,14 @@
+{
+  "semi": false,
+  "singleQuote": true,
+  "ignorePatterns": [
+    "src/routeTree.gen.ts",
+    "worker-configuration.d.ts",
+    "pnpm-lock.yaml",
+    "dist/**",
+    ".wrangler/**",
+    ".tanstack/**",
+    "test-results/**",
+    "playwright-report/**"
+  ]
+}

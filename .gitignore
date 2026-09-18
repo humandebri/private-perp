@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+.tanstack/
+dist/
+test-results/
+playwright-report/
+.playwright-cli/
+.env*
+!.env.example
+*.log
