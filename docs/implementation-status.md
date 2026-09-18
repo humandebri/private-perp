@@ -1,6 +1,43 @@
 # 実装状況：UI・サーバー基盤とADR
 
-更新：2026-09-18。対象はローカル開発用の合成デモ。全Phase完了ではない。
+更新：2026-09-19。対象はローカル開発用の合成デモとPhase 0の契約。全Phase完了ではない。
+
+## Phase 0（契約・画面仕様・Rust雛形）
+
+2026-09-19に、ロードマップ4章の実装契約と画面仕様を `docs/phase-0/` に固定し、12章-2のRust workspace雛形とローカル試験環境を用意した。
+
+### 用意したもの
+
+- 契約文書8本（`docs/phase-0/`）：権限表、API契約とエラー型、状態遷移、金額と一意性、環境分離、脅威と試験の対応、プライバシー評価の入力、画面仕様。
+- Rust workspace：`Cargo.toml`（依存を `=` で完全固定、`Cargo.lock` をコミット）、`rust-toolchain.toml`、`icp.yaml`、`crates/`（`hl-types`、`hl-sign`、`db`、`policy`、`funds-vault`、`control-guard`、`trading-core`）、`scripts/check-no-await.sh`。
+- Canisterは `version` と `db::init`（`ic-sqlite-vfs 2.0.0`、Migrationは空）のみ。資金・署名・注文・照合は未実装。
+- CI：`.github/workflows/rust.yml`（fmt / clippy（ホスト・wasm）/ test / no-await検査 / wasmビルド）。**リモートCIは未実行**。
+- ホストで実行するテスト12件（`hl-types` 4、`hl-sign` 3、`db` 5）。
+
+### 検証結果（ローカル実行）
+
+- ツールチェーン：`rustc`/`cargo` 1.97.0（`rust-toolchain.toml` で固定）。
+- `cargo fmt --all --check`：成功。
+- `cargo clippy --all-targets -- -D warnings`（ホスト既定メンバー）：成功。
+- `cargo test`：12件成功。
+- `bash scripts/check-no-await.sh`：ok（`hl-sign`・`db` に非async規則違反なし）。
+- `cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -- -D warnings`：成功。
+- `cargo build --release --target wasm32-unknown-unknown`（4 Canister）：成功。各約1.25 MB（`ic-sqlite-vfs` 2.0.0をリンク）。
+- `icp project show`：`icp.yaml` のrecipe展開を確認。
+- `icp build`：4 Canister成功。`candid-extractor` と `ic-wasm` で `candid:service` を埋め込む（`.did` はビルド時生成で、契約として未コミット）。
+- `icp network start -d` → `icp deploy` → `icp canister call <name> version --query`：4 Canisterが `("0.1.0")` を返し、`init` のDB初期化がtrapしないことを確認。`icp network stop` で停止し、停止も確認。
+
+### この環境での実行上の注意
+
+- このセッションのサンドボックスはHOME配下へ書き込めないため、`CARGO_HOME=<repo>/.cargo-home` と `ICP_HOME=<repo>/.icp-home` を指定して実行した（両方とも `.gitignore` 済み）。通常の開発環境では不要。
+- 当初 `channel = "1.93.0"` を指定したが、`ic-sqlite-vfs 2.0.0` のMSRVが1.95.0であり、かつtoolchainの追加インストールがサンドボックス制約で失敗したため、要件を満たす導入済みの1.97.0を固定した。リリース用の完全固定はPhase 4で行う。
+- ローカルのCanister IDはicpが払い出した開発用の値である（`.icp/` 配下、未コミット）。testnet・mainnetの値は未確定。
+
+### Phase 0で残るもの
+
+- 実Candid（`.did`）、レート制限と上限値、HL固有の価格精度・手数料・確定イベント、Agent世代の実挙動。いずれもPhase 1の実測で確定する。
+- 実テーブルとMigration（Phase 2-1）。PocketICの失敗試験基盤（Rust版 `pocket-ic` のApple Silicon対応は未確認）。
+- 脅威・試験表（`docs/phase-0/threat-test-matrix.md`）の試験は1件も実行していない。
 
 ## 完了したもの
 
@@ -29,7 +66,7 @@
 
 ## 未実装・次工程を止めている条件
 
-対象ディレクトリにCanisterコード、Cargo workspace、Candid、testnet Canister IDがない。そのため本番APIを推測して作らず、ICP接続段階を保留している。
+対象ディレクトリのCanisterコードは `version` とDB初期化だけの雛形であり、資金・署名・認証・注文の業務ロジックはない。Candidはビルド時に生成するもので、契約として固定していない。testnet Canister IDもない。そのため本番APIを推測して作らず、ICP接続段階を保留している。
 
 必要な次の成果物：
 

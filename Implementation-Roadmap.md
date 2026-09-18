@@ -64,23 +64,25 @@ UIの目標は「HL利用者が違和感なく使える、機能を絞った高�
 
 ## 4. Phase 0：実装契約・画面仕様
 
+2026-09-19：契約と画面仕様、Rust workspace雛形を用意した（**実装は未着手**）。成果物は `docs/phase-0/` に置く。以下のチェックは「契約を固定した」ことを示し、Canisterの実装・検証完了を意味しない。
+
 ### 実装前に固定するもの
 
-- [ ] 各Canisterの責務、許可caller、署名できるactionを表にする。
-- [ ] 認証・注文・資金・変更予約のAPIとエラー型を定義する。
-- [ ] 出金予約、移動中資金、unknown、注文取消の状態遷移を固定する。
-- [ ] 金額の整数単位、丸め、最大値、重複イベントの扱いを定義する。
-- [ ] ローカル・testnet・mainnetのID、鍵、endpoint、mock issuerを分離する。
-- [ ] 脅威と試験を対応付ける。二重送金、認可迂回、古いcallback、悪意あるupgradeを含める。
-- [ ] プライバシー比較の入力、攻撃者に渡す情報、合格基準を固定する。
+- [x] 各Canisterの責務、許可caller、署名できるactionを表にする。（`docs/phase-0/authority-matrix.md`）
+- [x] 認証・注文・資金・変更予約のAPIとエラー型を定義する。（`docs/phase-0/api-contract.md`）
+- [x] 出金予約、移動中資金、unknown、注文取消の状態遷移を固定する。（`docs/phase-0/state-machines.md`）
+- [x] 金額の整数単位、丸め、最大値、重複イベントの扱いを定義する。（`docs/phase-0/money-and-units.md`）
+- [x] ローカル・testnet・mainnetのID、鍵、endpoint、mock issuerを分離する。（`docs/phase-0/environments.md`。実値はPhase 1で確定）
+- [x] 脅威と試験を対応付ける。二重送金、認可迂回、古いcallback、悪意あるupgradeを含める。（`docs/phase-0/threat-test-matrix.md`。試験は未実行）
+- [x] プライバシー比較の入力、攻撃者に渡す情報、合格基準を固定する。（`docs/phase-0/privacy-evaluation.md`）
 
 ### UI設計
 
-- [ ] デスクトップの取引画面、資金画面、履歴画面の構成を決める。
-- [ ] 正常時だけでなく、未接続、残高不足、送信中、結果不明、データ遅延、停止中の画面を定義する。
-- [ ] 「保管残高」「取引口座equity」「出金可能額」を別の値として扱う。
-- [ ] 機密性の説明、Canister保管、EOA紛失、停止時の回収制約の文言を作る。
-- [ ] チャートの必要機能と利用条件を確認し、採用候補を絞る。
+- [x] デスクトップの取引画面、資金画面、履歴画面の構成を決める。（`docs/phase-0/ui-spec.md` 2〜4節）
+- [x] 正常時だけでなく、未接続、残高不足、送信中、結果不明、データ遅延、停止中の画面を定義する。（同5節）
+- [x] 「保管残高」「取引口座equity」「出金可能額」を別の値として扱う。（同6節）
+- [x] 機密性の説明、Canister保管、EOA紛失、停止時の回収制約の文言を作る。（同7節）
+- [x] チャートの必要機能と利用条件を確認し、採用候補を絞る。（同8節。Lightweight Chartsを継続、Advanced Chartsは未評価の残件）
 
 ### 成果物・完了条件
 
