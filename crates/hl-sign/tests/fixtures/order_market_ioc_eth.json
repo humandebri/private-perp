@@ -1,0 +1,42 @@
+{
+  "name": "order_market_ioc_eth",
+  "sdk": {
+    "name": "@nktkas/hyperliquid",
+    "version": "0.33.3"
+  },
+  "network": "testnet",
+  "private_key_hex": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+  "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+  "is_agent": false,
+  "vault_address": null,
+  "expires_after": null,
+  "nonce": 1758000001000,
+  "action": {
+    "type": "order",
+    "orders": [
+      {
+        "a": 4,
+        "b": true,
+        "p": "3210.5",
+        "s": "1.25",
+        "r": false,
+        "t": {
+          "limit": {
+            "tif": "Ioc"
+          }
+        }
+      }
+    ],
+    "grouping": "na"
+  },
+  "msgpack_hex": null,
+  "payload_hex": null,
+  "connection_id_hex": "0x31de2f241b8ae7fd0cf73ecc7e2fa42ba94867f23ceb93dce582fcaad4bead83",
+  "digest_hex": null,
+  "signature_hex": "0x0abe14d9ef995603c9299fb93368545832737f19dc976e485af48dcaae4749bf48fd67bd6edc4a585d4bed5272acd57246fa811e66f3d9920e338a720ae54ddc1b",
+  "signature": {
+    "r": "0x0abe14d9ef995603c9299fb93368545832737f19dc976e485af48dcaae4749bf",
+    "s": "0x48fd67bd6edc4a585d4bed5272acd57246fa811e66f3d9920e338a720ae54ddc",
+    "v": 27
+  }
+}

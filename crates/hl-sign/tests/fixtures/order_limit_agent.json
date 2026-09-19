@@ -1,0 +1,42 @@
+{
+  "name": "order_limit_agent",
+  "sdk": {
+    "name": "@nktkas/hyperliquid",
+    "version": "0.33.3"
+  },
+  "network": "testnet",
+  "private_key_hex": "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
+  "address": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+  "is_agent": true,
+  "vault_address": null,
+  "expires_after": null,
+  "nonce": 1758000008000,
+  "action": {
+    "type": "order",
+    "orders": [
+      {
+        "a": 3,
+        "b": true,
+        "p": "95001",
+        "s": "0.02",
+        "r": false,
+        "t": {
+          "limit": {
+            "tif": "Gtc"
+          }
+        }
+      }
+    ],
+    "grouping": "na"
+  },
+  "msgpack_hex": null,
+  "payload_hex": null,
+  "connection_id_hex": "0x1de09e5c979dbef93d74a3b50a93fe413b1729453c6c1345554d7f5cc8976dd0",
+  "digest_hex": null,
+  "signature_hex": "0x83019dfdafabec724275ed4e5de49a1dbe7fa3a73b48f6d4326b7be54ffecf581196979d5679c0d17d3639a696382e67c89eeb49ef5fb85f45f453c9cb0514d61b",
+  "signature": {
+    "r": "0x83019dfdafabec724275ed4e5de49a1dbe7fa3a73b48f6d4326b7be54ffecf58",
+    "s": "0x1196979d5679c0d17d3639a696382e67c89eeb49ef5fb85f45f453c9cb0514d6",
+    "v": 27
+  }
+}

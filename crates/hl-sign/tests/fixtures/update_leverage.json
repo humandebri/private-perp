@@ -1,0 +1,30 @@
+{
+  "name": "update_leverage",
+  "sdk": {
+    "name": "@nktkas/hyperliquid",
+    "version": "0.33.3"
+  },
+  "network": "testnet",
+  "private_key_hex": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+  "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+  "is_agent": false,
+  "vault_address": null,
+  "expires_after": null,
+  "nonce": 1758000004000,
+  "action": {
+    "type": "updateLeverage",
+    "asset": 3,
+    "isCross": true,
+    "leverage": 10
+  },
+  "msgpack_hex": null,
+  "payload_hex": null,
+  "connection_id_hex": "0x3fa6e66ded7cb0fc2b73342cadb0ca11c21e9a126a5816ac14ec857c800488b1",
+  "digest_hex": null,
+  "signature_hex": "0xeeaf6a30495abe5cafa6485d434c172ffa33b4f9255a81dd08d89904ccbb02d23815634f88304b163735a6d0e8bd3e88f2ad8f7f41950a4b9644132c7b5d47051c",
+  "signature": {
+    "r": "0xeeaf6a30495abe5cafa6485d434c172ffa33b4f9255a81dd08d89904ccbb02d2",
+    "s": "0x3815634f88304b163735a6d0e8bd3e88f2ad8f7f41950a4b9644132c7b5d4705",
+    "v": 28
+  }
+}

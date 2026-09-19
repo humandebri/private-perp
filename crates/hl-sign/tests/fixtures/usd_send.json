@@ -1,0 +1,32 @@
+{
+  "name": "usd_send",
+  "sdk": {
+    "name": "@nktkas/hyperliquid",
+    "version": "0.33.3"
+  },
+  "network": "testnet",
+  "private_key_hex": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+  "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+  "is_agent": false,
+  "vault_address": null,
+  "expires_after": null,
+  "nonce": 1758000007000,
+  "action": {
+    "type": "usdSend",
+    "signatureChainId": "0x66eee",
+    "hyperliquidChain": "Testnet",
+    "destination": "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
+    "amount": "12.5",
+    "time": 1758000007000
+  },
+  "msgpack_hex": null,
+  "payload_hex": null,
+  "connection_id_hex": null,
+  "digest_hex": null,
+  "signature_hex": "0xbd7a5136a89cbcb28ed50534ad67a60ef6c4951acf893746cad51bcd82b4bf1a002bf3cd388f6d7ae2ff6ffbfe20d273ebb3addc36fd23b971b61a2e887d3e2c1b",
+  "signature": {
+    "r": "0xbd7a5136a89cbcb28ed50534ad67a60ef6c4951acf893746cad51bcd82b4bf1a",
+    "s": "0x002bf3cd388f6d7ae2ff6ffbfe20d273ebb3addc36fd23b971b61a2e887d3e2c",
+    "v": 27
+  }
+}

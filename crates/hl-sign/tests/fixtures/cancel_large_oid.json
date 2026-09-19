@@ -1,0 +1,33 @@
+{
+  "name": "cancel_large_oid",
+  "sdk": {
+    "name": "@nktkas/hyperliquid",
+    "version": "0.33.3"
+  },
+  "network": "testnet",
+  "private_key_hex": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+  "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+  "is_agent": false,
+  "vault_address": null,
+  "expires_after": null,
+  "nonce": 1758000009000,
+  "action": {
+    "type": "cancel",
+    "cancels": [
+      {
+        "a": 3,
+        "o": 4294967297
+      }
+    ]
+  },
+  "msgpack_hex": null,
+  "payload_hex": null,
+  "connection_id_hex": "0x9c8632695c288dbe0a21cf5d24a31f0ae18b50c1efb17d18443b4dc13b75b740",
+  "digest_hex": null,
+  "signature_hex": "0xe0b39638d5effca06787330400df538d46f6aff94c616230f1bf65de10066b6115acf947d424a9ef5e544c828a3513b57a4bd45c18f7c0fbac0986e67de1b6f41c",
+  "signature": {
+    "r": "0xe0b39638d5effca06787330400df538d46f6aff94c616230f1bf65de10066b61",
+    "s": "0x15acf947d424a9ef5e544c828a3513b57a4bd45c18f7c0fbac0986e67de1b6f4",
+    "v": 28
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "approve_agent",
+  "sdk": {
+    "name": "@nktkas/hyperliquid",
+    "version": "0.33.3"
+  },
+  "network": "testnet",
+  "private_key_hex": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+  "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+  "is_agent": false,
+  "vault_address": null,
+  "expires_after": null,
+  "nonce": 1758000006000,
+  "action": {
+    "type": "approveAgent",
+    "signatureChainId": "0x66eee",
+    "hyperliquidChain": "Testnet",
+    "agentAddress": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+    "agentName": "pp-test-agent",
+    "nonce": 1758000006000
+  },
+  "msgpack_hex": null,
+  "payload_hex": null,
+  "connection_id_hex": null,
+  "digest_hex": null,
+  "signature_hex": "0x9e544fc7f3e9464f278180c164f85c5f96b7a1edc68dcb317ec5a516229ccd64479c4e5a9186cd64b4455f3171d16885d5b5ee8cc7d0608002434247c75fcf861b",
+  "signature": {
+    "r": "0x9e544fc7f3e9464f278180c164f85c5f96b7a1edc68dcb317ec5a516229ccd64",
+    "s": "0x479c4e5a9186cd64b4455f3171d16885d5b5ee8cc7d0608002434247c75fcf86",
+    "v": 27
+  }
+}

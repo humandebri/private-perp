@@ -1,0 +1,33 @@
+{
+  "name": "cancel_by_cloid",
+  "sdk": {
+    "name": "@nktkas/hyperliquid",
+    "version": "0.33.3"
+  },
+  "network": "testnet",
+  "private_key_hex": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+  "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+  "is_agent": false,
+  "vault_address": null,
+  "expires_after": null,
+  "nonce": 1758000003000,
+  "action": {
+    "type": "cancelByCloid",
+    "cancels": [
+      {
+        "asset": 4,
+        "cloid": "0x0102030405060708090a0b0c0d0e0f10"
+      }
+    ]
+  },
+  "msgpack_hex": null,
+  "payload_hex": null,
+  "connection_id_hex": "0x6cb641b58354f44d668751e03483ac0e7e3e60a6ab914da635f21975dda39393",
+  "digest_hex": null,
+  "signature_hex": "0x39b1b5cc857afebdc449bb9fcdb480e32eebdd0aabf43d529f9280dd8986e69609a168163c62b2916db8a90aad438005d966d2f9deecc8fdb1a00e1ccaf1ebfe1b",
+  "signature": {
+    "r": "0x39b1b5cc857afebdc449bb9fcdb480e32eebdd0aabf43d529f9280dd8986e696",
+    "s": "0x09a168163c62b2916db8a90aad438005d966d2f9deecc8fdb1a00e1ccaf1ebfe",
+    "v": 27
+  }
+}

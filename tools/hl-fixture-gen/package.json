@@ -1,0 +1,13 @@
+{
+  "name": "private-perp-hl-fixture-gen",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node generate.mjs"
+  },
+  "dependencies": {
+    "@nktkas/hyperliquid": "0.33.3",
+    "viem": "2.56.8"
+  },
+  "packageManager": "pnpm@12.4.2"
+}
