@@ -7,6 +7,12 @@ publish.workspace = true
 description = "Hyperliquidのaction構築・署名対象ハッシュ（純粋・非async）"
 
 [dependencies]
+hl-types = { path = "../hl-types" }
 k256.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
+
+# fixtureのJSONはフィールド順がそのままmsgpackの順序になるため、順序を保持して読む。
+[dev-dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
