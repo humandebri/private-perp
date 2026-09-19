@@ -39,6 +39,8 @@
 
 - 計算過程の途中値も整数または十進文字列で扱い、丸めは1箇所に限定する。
 - 数量・価格の変換に失敗した注文は受付段階で拒否する（`BadRequest.PrecisionExceeded`／`QuantityOutOfRange`／`PriceOutOfRange`）。
+- 署名対象のmsgpackでは、金額・数量・価格を**必ず文字列**（msgpack str）として渡す。整数は最小表現で符号化し、`|値|` がint32範囲外の整数は符号付きで最小の表現（非負は `0xcf` uint64、負は `0xd3` int64）になる（公式SDK `_l1.js` の `adjust()` と `@std/msgpack` の挙動）。2026-09-19に公式SDKのfixture（`cancel_large_oid`）で一致を確認した（`docs/phase-1/README.md` 6節）。
+- asset indexはnetworkごとに異なるため、`meta.universe`から解決する（testnetはBTC=3・ETH=4、mainnetはBTC=0・ETH=1）。
 
 ## 4. 台帳の整数規則
 

@@ -1,6 +1,32 @@
 # 実装状況：UI・サーバー基盤とADR
 
-更新：2026-09-19。対象はローカル開発用の合成デモとPhase 0の契約。全Phase完了ではない。
+更新：2026-09-19。対象はローカル開発用の合成デモ、Phase 0の契約、Phase 1のS1（署名fixture）とPocketIC基盤。全Phase完了ではない。
+
+## Phase 1（S1・PocketIC基盤）
+
+2026-09-19に、Phase 1のうちローカルで完結する署名部分（S1）と統合試験基盤を実装・検証した。**資金台帳・モックHL往復・guardは未着手**である（`docs/phase-1/README.md` の台帳を正とする）。
+
+### 完了したもの
+
+- `hl-types`：正規化十進（`decimal`）、canonical msgpack（`msgpack`）、action構築（`action`、order/cancel/cancelByCloid/updateLeverage）。
+- `hl-sign`：Keccak-256、EIP-712（phantom agent、`Exchange`/`1`/`1337`/`0x0`）、actionハッシュ（`msgpack ‖ nonce(8B BE) ‖ vault ‖ expires`）、決定的署名と復元、`v` の候補復元、user-signed EIP-712（`HyperliquidSignTransaction`、`ApproveAgent`/`UsdSend`）。
+- `api-types`：`docs/phase-0/api-contract.md` のCandid型（CanisterとPocketIC試験で共有）。
+- `tools/hl-fixture-gen/`（公式SDK `@nktkas/hyperliquid@0.33.3` を固定）と、`crates/hl-sign/tests/fixtures/` の11件。
+- PocketIC基盤：`scripts/fetch-pocket-ic.sh`、`scripts/pocket-ic-test.sh`、`crates/pocket-ic-tests`。
+
+### 検証結果（ローカル実行）
+
+- `cargo test`：50件成功（`api-types` 4、`db` 5、`hl-sign` 24、`hl-types` 17）。`hl-sign` には公式SDK fixtureとの比較試験（11件）を含む。
+- 公式SDKとの一致：actionハッシュ（`createL1ActionHash`）・署名（r/s/v、決定的）・復元アドレスのすべてが11件で一致。中間値（msgpack・digest）はSDKが公開しないためfixtureには入れず、署名一致で検証している。
+- `cargo clippy --all-targets -- -D warnings`、`cargo fmt --all --check`、`bash scripts/check-no-await.sh`：成功。
+- `cargo build --release --target wasm32-unknown-unknown`（4 Canister）：成功。
+- `bash scripts/pocket-ic-test.sh`：PocketIC 16.0.0（arm64-darwin）で4 Canisterをdeployし、`version` queryが応答（`init` のDB初期化がtrapしないことを含む）。
+
+### Phase 1で残るもの
+
+- `db` のスキーマ・Migration・複式台帳・予約・nonce・epoch CAS、`funds_vault` の認証・outbox・HPKE・API、`trading_core` の注文パイプラインとモックHL照合、`control_guard` の7日猶予。
+- ローカルECDSAスパイク（`sign_with_ecdsa` のkey id確定）、PocketICの障害注入、T-xxx試験（`docs/phase-0/threat-test-matrix.md`）。
+- testnet往復と実測（別途の環境・承認が必要）。
 
 ## Phase 0（契約・画面仕様・Rust雛形）
 

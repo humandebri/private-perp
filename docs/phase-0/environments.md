@@ -28,6 +28,8 @@
 | 実資金 | 扱わない | test USDCのみ | **Phase 0では扱わない** |
 
 - `key_1`／`pzp6e` は `Implementation.md` 2.1の記載であり、本契約で再確認はしていない。Phase 1で実測して確定する。
+- asset indexは`meta.universe`から解決し、固定値を埋め込まない。2026-09-19のtestnet実測ではBTC=3・ETH=4（mainnetはBTC=0・ETH=1）であり、network間で添字が異なる（`docs/phase-1/README.md` 6節）。
+- ローカルの統合試験はPocketICサーバ（`.pocket-ic/`、16.0.0）で行う。ローカルネットワーク（`icp network start`）とは別のハーネスである。
 - mainnetの署名鍵・subnetは本番リリース候補のビルドで再確認する（Phase 4）。
 - Builder feeの上限同意・徴収アドレスは暗黙に決めない。`api-contract.md` のAgent承認とは別のmaster署名（`approveBuilderFee`）を要求する。
 

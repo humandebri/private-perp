@@ -219,6 +219,7 @@ type CancelAllArgs = record {
 - Cancel Allと建玉決済を同じ操作にしない。Cancel Allが保護用SL/TPも消す場合は、UIで明示した`include_protective_orders = true`を要求する。
 - MarketはHLのスリッページ上限付きIOC指値として構築する。板に残る注文として扱わない。
 - `expires_after`はactionの受付期限であり、板に残る注文の取消期限ではない（`state-machines.md` 4節）。
+- 署名方式は2系統ある。取引action（order/cancel/cancelByCloid/updateLeverage）はphantom agent方式（EIP-712 domain `Exchange`／`1`／`1337`／`0x0`）、資金・アカウント操作（`approveAgent`・`usdSend`）はuser-signed EIP-712（domain `HyperliquidSignTransaction`／version `1`／chainIdはactionの`signatureChainId`）。2026-09-19に公式SDKのfixtureと一致を確認した（`docs/phase-1/README.md` 6節）。Agent承認は`funds_vault`がmaster鍵で行い、`trading_core`は行わない（`authority-matrix.md` 4節）。
 
 ### 3.2 参照
 
