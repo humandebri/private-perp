@@ -1,5 +1,5 @@
 name: Rust verification
-# Phase 0 のworkspace雛形を検証する。リモートCIは未実行である
+# Phase 0/1 のworkspaceを検証する。リモートCIは未実行である
 # （docs/implementation-status.md を正とする）。
 on:
   push:
@@ -10,6 +10,7 @@ on:
       - 'rust-toolchain.toml'
       - 'icp.yaml'
       - 'scripts/**'
+      - 'tools/**'
       - '.github/workflows/rust.yml'
   pull_request:
     paths:
@@ -19,6 +20,7 @@ on:
       - 'rust-toolchain.toml'
       - 'icp.yaml'
       - 'scripts/**'
+      - 'tools/**'
       - '.github/workflows/rust.yml'
 permissions:
   contents: read
@@ -45,3 +47,21 @@ jobs:
         run: cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -- -D warnings
       - name: Build canister wasm
         run: cargo build --release --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core
+  pocket-ic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97.0'
+          targets: wasm32-unknown-unknown
+      - name: Install pnpm
+        run: corepack enable
+      # PocketICサーバ（pocket-ic-x86_64-linux.gz）を取得し、
+      # wasmビルド → crates/pocket-ic-tests の試験を実行する。
+      - name: PocketIC integration tests
+        run: bash scripts/pocket-ic-test.sh
+      # 公式SDKのfixtureはコミット済み。生成器はネットワークとpnpmを要するため
+      # CIでは再生成せず、固定したfixtureとの一致だけを検証する。
+      - name: Official SDK fixture comparison
+        run: cargo test -p hl-sign --test fixtures
