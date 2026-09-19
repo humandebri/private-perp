@@ -37,12 +37,15 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Format
         run: cargo fmt --all --check
-      - name: Lint (host)
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Lint (host, whole workspace)
+        # 既定メンバーだけでは crates/pocket-ic-tests が漏れるため --workspace を使う。
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test (host, default members)
         run: cargo test
       - name: Forbid async in hl-sign and db
         run: bash scripts/check-no-await.sh
+      - name: Forbid raw-key signing in canister crates
+        run: bash scripts/check-signing-boundary.sh
       - name: Lint (wasm canisters)
         run: cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -- -D warnings
       - name: Build canister wasm
@@ -55,8 +58,6 @@ jobs:
         with:
           toolchain: '1.97.0'
           targets: wasm32-unknown-unknown
-      - name: Install pnpm
-        run: corepack enable
       # PocketICサーバ（pocket-ic-x86_64-linux.gz）を取得し、
       # wasmビルド → crates/pocket-ic-tests の試験を実行する。
       - name: PocketIC integration tests
