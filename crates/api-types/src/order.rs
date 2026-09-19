@@ -1,6 +1,7 @@
 //! 注文。`docs/phase-0/api-contract.md` 3節、`state-machines.md` 4節。
 
 use crate::auth::SessionHandle;
+use crate::fund::ActionState;
 use crate::{Blob, Micros, Timestamp};
 use candid::CandidType;
 use serde::{Deserialize, Serialize};
@@ -111,21 +112,9 @@ pub struct PendingOrderView {
     pub request_id: Blob,
     pub cloid: Option<Blob>,
     pub order_id: Option<Blob>,
-    pub action_state: ActionStateView,
+    pub action_state: ActionState,
     pub since: Timestamp,
     pub last_error: Option<String>,
-}
-
-/// action状態（`api-types::fund::ActionState` と同じ値を注文一覧用に持つ）。
-#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActionStateView {
-    Queued,
-    Signing,
-    Signed,
-    Dispatching,
-    Reconciled,
-    Unknown,
-    Aborted,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
