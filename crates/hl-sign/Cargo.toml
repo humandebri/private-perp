@@ -12,7 +12,9 @@ k256.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
 
-# fixtureのJSONはフィールド順がそのままmsgpackの順序になるため、順序を保持して読む。
+# fixtureのJSONはフィールド順がそのままmsgpackの順序になる。順序保持は
+# `preserve_order` feature ではなく tests/fixtures.rs の `OrderedJson` で行う
+# （featureはワークスペース全体の `serde_json` へ伝播するため）。
 [dev-dependencies]
 serde.workspace = true
-serde_json = { workspace = true, features = ["preserve_order"] }
+serde_json.workspace = true

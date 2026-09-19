@@ -20,12 +20,138 @@
 
 use hl_sign::user_signed::{TypedField, TypedValue};
 use hl_sign::{
-    ActionHashInput, Signature, action_hash, address_from_secret, recover_address, sign_action,
-    signing_digest, user_signed,
+    ActionHashInput, Signature, action_hash, address_from_secret, recover_address,
+    sign_action_for_tests, signing_digest, user_signed,
 };
 use hl_types::msgpack::Value;
 use serde::Deserialize;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use std::path::{Path, PathBuf};
+
+/// JSONのオブジェクト順序を保持した値。
+///
+/// `serde_json` の `preserve_order` feature はワークスペース全体の `serde_json` に
+/// 伝播するため使わない。`serde_json` のパーサはマップのエントリをドキュメント順に
+/// 渡すので、独自のVisitorで順序を保つ。浮動小数点はここで拒否する
+/// （`docs/phase-0/money-and-units.md` 2節）。
+#[derive(Debug, PartialEq, Eq)]
+enum OrderedJson {
+    Null,
+    Bool(bool),
+    U64(u64),
+    I64(i64),
+    Str(String),
+    Array(Vec<OrderedJson>),
+    Object(Vec<(String, OrderedJson)>),
+}
+
+impl OrderedJson {
+    fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            Self::Object(entries) => entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::U64(value) => Some(*value),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OrderedJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct OrderedJsonVisitor;
+
+        impl<'de> Visitor<'de> for OrderedJsonVisitor {
+            type Value = OrderedJson;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("オブジェクトの順序を保持したJSON値")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(OrderedJson::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(OrderedJson::I64(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(OrderedJson::U64(value))
+            }
+
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                Err(E::custom(format!(
+                    "actionに浮動小数点数が含まれています: {value}"
+                )))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(OrderedJson::Str(value.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(OrderedJson::Str(value))
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(OrderedJson::Null)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(OrderedJson::Null)
+            }
+
+            fn visit_some<D2>(self, deserializer: D2) -> Result<Self::Value, D2::Error>
+            where
+                D2: serde::Deserializer<'de>,
+            {
+                Deserialize::deserialize(deserializer)
+            }
+
+            fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut items = Vec::new();
+                while let Some(item) = access.next_element()? {
+                    items.push(item);
+                }
+                Ok(OrderedJson::Array(items))
+            }
+
+            fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut entries = Vec::new();
+                while let Some((key, value)) = access.next_entry::<String, OrderedJson>()? {
+                    entries.push((key, value));
+                }
+                Ok(OrderedJson::Object(entries))
+            }
+        }
+
+        deserializer.deserialize_any(OrderedJsonVisitor)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct FixtureSignature {
@@ -44,7 +170,7 @@ struct Fixture {
     vault_address: Option<String>,
     expires_after: Option<u64>,
     nonce: u64,
-    action: serde_json::Value,
+    action: OrderedJson,
     /// SDKの `createL1ActionHash` の結果。user-signedでは `null`。
     connection_id_hex: Option<String>,
     signature_hex: Option<String>,
@@ -85,6 +211,10 @@ fn load_fixtures() -> Vec<(PathBuf, Fixture)> {
 /// `0x` 付きhexを固定長バイト列へ。
 fn hex_bytes<const N: usize>(value: &str, what: &str) -> [u8; N] {
     let trimmed = value.strip_prefix("0x").unwrap_or(value);
+    assert!(
+        trimmed.len().is_multiple_of(2),
+        "{what} のhex長が偶数ではありません: {value}"
+    );
     let bytes = (0..trimmed.len() / 2)
         .map(|index| u8::from_str_radix(&trimmed[index * 2..index * 2 + 2], 16))
         .collect::<Result<Vec<u8>, _>>()
@@ -97,25 +227,17 @@ fn hex_bytes<const N: usize>(value: &str, what: &str) -> [u8; N] {
 /// JSONのオブジェクト順序を保ったままmsgpack値へ変換する。
 ///
 /// 浮動小数点は受け付けない（`docs/phase-0/money-and-units.md` 2節）。
-fn json_to_msgpack(value: &serde_json::Value) -> Value {
+fn json_to_msgpack(value: &OrderedJson) -> Value {
     match value {
-        serde_json::Value::Null => Value::Nil,
-        serde_json::Value::Bool(flag) => Value::Bool(*flag),
-        serde_json::Value::Number(number) => {
-            if let Some(unsigned) = number.as_u64() {
-                Value::UInt(unsigned)
-            } else if let Some(signed) = number.as_i64() {
-                Value::Int(signed)
-            } else {
-                panic!("actionに浮動小数点数が含まれています: {number}");
-            }
-        }
-        serde_json::Value::String(text) => Value::owned(text.clone()),
-        serde_json::Value::Array(items) => {
-            Value::Array(items.iter().map(json_to_msgpack).collect())
-        }
-        serde_json::Value::Object(map) => Value::Map(
-            map.iter()
+        OrderedJson::Null => Value::Nil,
+        OrderedJson::Bool(flag) => Value::Bool(*flag),
+        OrderedJson::U64(number) => Value::UInt(*number),
+        OrderedJson::I64(number) => Value::Int(*number),
+        OrderedJson::Str(text) => Value::owned(text.clone()),
+        OrderedJson::Array(items) => Value::Array(items.iter().map(json_to_msgpack).collect()),
+        OrderedJson::Object(entries) => Value::Map(
+            entries
+                .iter()
                 .map(|(key, value)| (Value::owned(key.clone()), json_to_msgpack(value)))
                 .collect(),
         ),
@@ -142,7 +264,7 @@ fn expected_signature(fixture: &Fixture) -> Signature {
     Signature::from_bytes65(&bytes).expect("65バイトの署名")
 }
 
-fn json_string(value: &serde_json::Value, key: &str) -> String {
+fn json_string(value: &OrderedJson, key: &str) -> String {
     value
         .get(key)
         .and_then(|entry| entry.as_str())
@@ -150,7 +272,7 @@ fn json_string(value: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
-fn json_u64(value: &serde_json::Value, key: &str) -> u64 {
+fn json_u64(value: &OrderedJson, key: &str) -> u64 {
     value
         .get(key)
         .and_then(|entry| entry.as_u64())
@@ -159,7 +281,7 @@ fn json_u64(value: &serde_json::Value, key: &str) -> u64 {
 
 /// user-signed actionの型・値へ変換する。
 fn user_signed_fields(
-    action: &serde_json::Value,
+    action: &OrderedJson,
 ) -> (&'static str, &'static [TypedField], Vec<TypedValue>) {
     let action_type = action
         .get("type")
@@ -197,6 +319,27 @@ fn user_signed_fields(
             ],
         ),
         other => panic!("未対応のuser-signed action: {other}"),
+    }
+}
+
+#[test]
+fn ordered_json_rejects_floats_and_keeps_key_order() {
+    let error =
+        serde_json::from_str::<OrderedJson>(r#"{"a":1.5}"#).expect_err("浮動小数点は拒否する");
+    assert!(
+        error.to_string().contains("浮動小数点数"),
+        "実際のエラー: {error}"
+    );
+
+    let value: OrderedJson =
+        serde_json::from_str(r#"{"b":2,"a":"x"}"#).expect("整数と文字列は受理する");
+    assert_eq!(value.get("b").and_then(OrderedJson::as_u64), Some(2));
+    match &value {
+        OrderedJson::Object(entries) => {
+            assert_eq!(entries[0].0, "b", "キー順はドキュメント順を保つ");
+            assert_eq!(entries[1].0, "a");
+        }
+        other => panic!("object ではありません: {other:?}"),
     }
 }
 
@@ -253,7 +396,7 @@ fn fixtures_match_the_official_sdk() {
             }
 
             let mainnet = fixture.network == "mainnet";
-            let signature = sign_action(&input, &secret_key, mainnet).expect("sign");
+            let signature = sign_action_for_tests(&input, &secret_key, mainnet).expect("sign");
             assert_eq!(signature, expected, "{label}: 署名が公式SDKと一致しません");
 
             let digest = signing_digest(hash, mainnet);
