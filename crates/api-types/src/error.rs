@@ -1,0 +1,171 @@
+//! 共通エラー型。`docs/phase-0/api-contract.md` 7節。
+
+use candid::CandidType;
+use serde::{Deserialize, Serialize};
+
+/// 入力不正の理由コード。
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BadRequestCode {
+    MalformedPayload,
+    TooLarge,
+    MissingField,
+    UnsupportedAsset,
+    UnsupportedMarket,
+    PrecisionExceeded,
+    QuantityOutOfRange,
+    PriceOutOfRange,
+    InvalidSignature,
+    ChallengeReused,
+    ChallengeExpired,
+    NetworkMismatch,
+    OriginMismatch,
+    DestinationNotAllowed,
+    NonceReused,
+    ExpiredIntent,
+    AmountZero,
+}
+
+/// 権限・状態に起因する拒否の理由コード。
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotAllowedCode {
+    OrderNotFound,
+    OrderNotCancellable,
+    AssetNotAllowed,
+    AccountNotOwned,
+    CallerMismatch,
+    SessionIssuedByUnregisteredVault,
+    UpgradeNotScheduled,
+    UpgradeContentMismatch,
+    UpgradeTooEarly,
+    UpgradeAlreadyExecuted,
+    OperationNotAvailable,
+}
+
+/// API全体のエラー。
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ErrorCode {
+    Unauthenticated {
+        reason: String,
+    },
+    SessionExpired,
+    SessionRevoked,
+    NotEligible {
+        policy_version: u64,
+    },
+    PolicyUnavailable,
+    BadRequest {
+        code: BadRequestCode,
+        detail: String,
+    },
+    IdempotencyConflict {
+        request_id: crate::Blob,
+    },
+    DuplicateIgnored {
+        request_id: crate::Blob,
+    },
+    InsufficientFunds {
+        available: crate::Micros,
+        requested: crate::Micros,
+    },
+    ReservationConflict,
+    RiskLimitExceeded {
+        limit: crate::Micros,
+    },
+    StaleAccountState {
+        observed_at: crate::Timestamp,
+        max_age_ms: u64,
+    },
+    UpstreamUnavailable {
+        venue: String,
+    },
+    VenueRateLimited {
+        retry_after_ms: Option<u64>,
+    },
+    UpstreamRejected {
+        code: String,
+        retryable: bool,
+    },
+    UnknownPending {
+        action_id: crate::Blob,
+    },
+    SigningQueueFull,
+    NotAllowed {
+        code: NotAllowedCode,
+    },
+    Internal {
+        code: String,
+    },
+}
+
+impl ErrorCode {
+    /// 同一の冪等性キーで再試行してよいか（`api-contract.md` 7節の分類）。
+    pub fn retry_same_request(&self) -> bool {
+        matches!(
+            self,
+            Self::UpstreamUnavailable { .. }
+                | Self::VenueRateLimited { .. }
+                | Self::SigningQueueFull
+                | Self::Internal { .. }
+        )
+    }
+
+    /// 状態を再取得してから再判断すべきか。
+    pub fn retry_after_state_refresh(&self) -> bool {
+        matches!(
+            self,
+            Self::StaleAccountState { .. } | Self::PolicyUnavailable | Self::ReservationConflict
+        )
+    }
+
+    /// 自動再送が禁止され、照合のみを行う状態か。
+    pub fn reconcile_only(&self) -> bool {
+        matches!(self, Self::UnknownPending { .. })
+    }
+
+    /// 自動再送してはならないか。
+    pub fn must_not_auto_resend(&self) -> bool {
+        !self.retry_same_request() && !self.retry_after_state_refresh()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BadRequestCode, ErrorCode, NotAllowedCode};
+
+    #[test]
+    fn unknown_pending_is_reconcile_only() {
+        let error = ErrorCode::UnknownPending {
+            action_id: Vec::new().into(),
+        };
+        assert!(error.reconcile_only());
+        assert!(error.must_not_auto_resend());
+    }
+
+    #[test]
+    fn upstream_unavailable_is_retryable_with_same_key() {
+        let error = ErrorCode::UpstreamUnavailable {
+            venue: "hyperliquid".to_string(),
+        };
+        assert!(error.retry_same_request());
+        assert!(!error.must_not_auto_resend());
+    }
+
+    #[test]
+    fn bad_request_is_never_retried() {
+        let error = ErrorCode::BadRequest {
+            code: BadRequestCode::PrecisionExceeded,
+            detail: "too many decimals".to_string(),
+        };
+        assert!(!error.retry_same_request());
+        assert!(!error.retry_after_state_refresh());
+        assert!(error.must_not_auto_resend());
+    }
+
+    #[test]
+    fn not_allowed_is_never_retried() {
+        let error = ErrorCode::NotAllowed {
+            code: NotAllowedCode::UpgradeTooEarly,
+        };
+        assert!(error.must_not_auto_resend());
+    }
+}

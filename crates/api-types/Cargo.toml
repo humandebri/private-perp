@@ -1,0 +1,12 @@
+[package]
+name = "api-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Canister APIのCandid型（純粋・共有）"
+
+[dependencies]
+candid.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true

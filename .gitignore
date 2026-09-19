@@ -15,3 +15,5 @@ playwright-report/
 # サンドボックス内でCARGO_HOME / ICP_HOMEをワークスペースへ向けた場合のキャッシュ
 /.cargo-home/
 /.icp-home/
+# PocketICサーババイナリ（テスト専用のダウンロード）
+/.pocket-ic/
