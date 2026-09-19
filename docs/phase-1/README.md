@@ -79,3 +79,21 @@
 - asset indexは `meta.universe` から解決する。testnetは BTC=3・ETH=4、mainnetは BTC=0・ETH=1（`docs/phase-0/money-and-units.md` 3節の方針どおり、indexを固定値として埋め込まない）。
 
 これらは `docs/phase-0/api-contract.md`・`state-machines.md` の契約と矛盾しない。実装上の確定値として `docs/phase-0/environments.md`・`money-and-units.md` に追記する。
+
+## 7. レビュー指摘への対応（2026-09-19）
+
+S1のコミット差分に対する読み取り専用レビューの指摘（P3×8件）への対応。資金・署名の挙動は変えていない。
+
+| 指摘 | 対応 | 検証 |
+|---|---|---|
+| CIの未使用 `corepack enable` | pocket-icジョブから削除 | `bash -n` とworkflowの目視 |
+| `pocket-ic-tests` がlint対象外 | ホストlintを `cargo clippy --workspace --all-targets` へ拡大 | workspace全体でクリーン（この拡大で `manual_is_multiple_of` を1件検出・修正） |
+| 取得バイナリの版・完全性検証なし | `POCKET_IC_SERVER_MAJOR`／`POCKET_IC_SHA256` を追加し、キャッシュ利用時と取得後の両方で検証 | 旧版スタブで非0終了、改竄相当（digest不一致）で非0終了、実バイナリで成功 |
+| `ActionStateView` の二重定義 | 削除し `fund::ActionState` へ統合 | `cargo test -p api-types` |
+| 生鍵署名ヘルパの公開 | `sign_digest_for_tests`／`sign_action_for_tests` へ改名し、`scripts/check-signing-boundary.sh` で canisterクレートからの参照を禁止 | 境界チェックの正常系0件・違反時に非0終了 |
+| `preserve_order` の機能統合伝播 | dev-dependencyのfeatureを外し、テスト側の `OrderedJson`（Visitorでドキュメント順を保持）へ置換 | `cargo tree -e features -p hl-sign` に `preserve_order` なし。fixture比較は11件一致のまま |
+| テストヘルパのhex長未検証 | 偶数長チェックを追加 | 既存fixture11件で成功 |
+| デッドvariant `SigningFailed` | 削除 | `clippy --workspace` クリーン |
+
+追加した回帰テスト：`ordered_json_rejects_floats_and_keeps_key_order`（浮動小数点の拒否とキー順の保持）。
+
