@@ -7,3 +7,4 @@ publish.workspace = true
 description = "Hyperliquid共有型（純粋・非async）"
 
 [dependencies]
+thiserror.workspace = true

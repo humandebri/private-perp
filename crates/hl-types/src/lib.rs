@@ -5,6 +5,10 @@
 //! `docs/phase-0/environments.md`）に対応する。
 #![forbid(unsafe_code)]
 
+pub mod action;
+pub mod decimal;
+pub mod msgpack;
+
 /// IC network。`docs/phase-0/environments.md` の環境分離の単位。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Network {
