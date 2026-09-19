@@ -11,8 +11,6 @@ pub enum SignError {
     InvalidSignature,
     #[error("invalid recovery id")]
     InvalidRecoveryId,
-    #[error("failed to sign the digest")]
-    SigningFailed,
     #[error("failed to recover the public key")]
     RecoveryFailed,
     #[error("recovered public key does not match the expected key")]

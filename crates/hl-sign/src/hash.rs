@@ -9,7 +9,7 @@
 use crate::eip712::{Domain, agent_digest};
 use crate::error::SignError;
 use crate::keccak::keccak256;
-use crate::signature::{Signature, sign_digest};
+use crate::signature::{Signature, sign_digest_for_tests};
 
 /// actionハッシュの入力。
 #[derive(Debug, Clone, Copy)]
@@ -53,21 +53,22 @@ pub fn signing_digest(action_hash: [u8; 32], mainnet: bool) -> [u8; 32] {
 
 /// actionをハッシュし、そのダイジェストへ署名する。
 ///
-/// 本番の署名はtECDSA（管理Canister）で行う。この関数はテストベクトル比較と
-/// 決定的なローカル検証のために秘密鍵を直接受け取る。
-pub fn sign_action(
+/// **テスト専用。** 本番の署名はtECDSA（管理Canister）で行い、canisterクレートから
+/// この関数を呼ばない（`docs/phase-0/authority-matrix.md` 4節）。
+/// テストベクトル比較と決定的なローカル検証のために秘密鍵を直接受け取る。
+pub fn sign_action_for_tests(
     input: &ActionHashInput<'_>,
     secret_key: &[u8; 32],
     mainnet: bool,
 ) -> Result<Signature, SignError> {
     let digest = signing_digest(action_hash(input), mainnet);
-    sign_digest(&digest, secret_key)
+    sign_digest_for_tests(&digest, secret_key)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionHashInput, action_hash, sign_action, signing_digest};
-    use crate::signature::{address_from_secret, recover_address, sign_digest};
+    use super::{ActionHashInput, action_hash, sign_action_for_tests, signing_digest};
+    use crate::signature::{address_from_secret, recover_address, sign_digest_for_tests};
 
     fn secret(seed: u8) -> [u8; 32] {
         let mut bytes = [0u8; 32];
@@ -135,7 +136,7 @@ mod tests {
             vault_address: None,
             expires_after: None,
         };
-        let signature = sign_action(&input, &secret_key, false).expect("sign action");
+        let signature = sign_action_for_tests(&input, &secret_key, false).expect("sign action");
         let digest = signing_digest(action_hash(&input), false);
         assert_eq!(
             recover_address(&digest, &signature, None).expect("recover"),
@@ -143,7 +144,7 @@ mod tests {
         );
         // 同じ入力なら同じ署名（決定的）。
         assert_eq!(
-            sign_digest(&digest, &secret_key).expect("sign digest"),
+            sign_digest_for_tests(&digest, &secret_key).expect("sign digest"),
             signature
         );
     }

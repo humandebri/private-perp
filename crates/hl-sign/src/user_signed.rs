@@ -11,7 +11,7 @@
 use crate::eip712::{Domain, domain_separator};
 use crate::error::SignError;
 use crate::keccak::{keccak256, keccak256_concat};
-use crate::signature::{Signature, sign_digest};
+use crate::signature::{Signature, sign_digest_for_tests};
 
 /// EIP-712のフィールド型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +135,7 @@ pub fn digest(
     Ok(keccak256(&input))
 }
 
-/// user-signed actionへ署名する。
+/// user-signed actionへ署名する（**テスト専用**。本番は管理CanisterのtECDSAを使う）。
 pub fn sign(
     chain_id: u64,
     primary_type: &str,
@@ -144,7 +144,7 @@ pub fn sign(
     secret_key: &[u8; 32],
 ) -> Result<Signature, SignError> {
     let digest = digest(chain_id, primary_type, fields, values)?;
-    sign_digest(&digest, secret_key)
+    sign_digest_for_tests(&digest, secret_key)
 }
 
 #[cfg(test)]

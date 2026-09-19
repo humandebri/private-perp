@@ -88,8 +88,15 @@ pub fn address_from_secret(secret_key: &[u8; 32]) -> Result<[u8; 20], SignError>
     address_from_public_key(&compressed)
 }
 
-/// ダイジェストへ決定的に署名する（RFC 6979。テストとfixture比較に使う）。
-pub fn sign_digest(digest: &[u8; 32], secret_key: &[u8; 32]) -> Result<Signature, SignError> {
+/// ダイジェストへ決定的に署名する（RFC 6979）。
+///
+/// **テスト専用。** 本番の署名は管理CanisterのtECDSA（`sign_with_ecdsa`）で行い、
+/// canisterクレートからこの関数を呼ばない（`docs/phase-0/authority-matrix.md` 4節の
+/// 「任意digest署名を設けない」不変条件）。`scripts/check-signing-boundary.sh` で検査する。
+pub fn sign_digest_for_tests(
+    digest: &[u8; 32],
+    secret_key: &[u8; 32],
+) -> Result<Signature, SignError> {
     let signing_key = signing_key_from_bytes(secret_key)?;
     let (signature, recovery_id) = signing_key.sign_prehash_recoverable(digest);
     let bytes = signature.to_bytes();
@@ -165,7 +172,7 @@ fn secret_key_from_bytes(secret_key: &[u8; 32]) -> Result<k256::SecretKey, SignE
 mod tests {
     use super::{
         address_from_public_key, address_from_secret, public_key_compressed, recover_address,
-        recover_v, sign_digest,
+        recover_v, sign_digest_for_tests,
     };
     use crate::error::SignError;
 
@@ -199,7 +206,7 @@ mod tests {
     fn signature_recovers_to_the_signer_address() {
         let secret_key = secret(7);
         let digest = crate::keccak::keccak256(b"private-perp");
-        let signature = sign_digest(&digest, &secret_key).expect("sign");
+        let signature = sign_digest_for_tests(&digest, &secret_key).expect("sign");
         assert!(signature.v == 27 || signature.v == 28);
 
         let expected = address_from_secret(&secret_key).expect("address");
@@ -217,8 +224,8 @@ mod tests {
         let secret_key = secret(9);
         let digest = crate::keccak::keccak256(b"deterministic");
         assert_eq!(
-            sign_digest(&digest, &secret_key).expect("sign"),
-            sign_digest(&digest, &secret_key).expect("sign")
+            sign_digest_for_tests(&digest, &secret_key).expect("sign"),
+            sign_digest_for_tests(&digest, &secret_key).expect("sign")
         );
     }
 
@@ -226,7 +233,7 @@ mod tests {
     fn recover_v_finds_the_recovery_id_without_v() {
         let secret_key = secret(11);
         let digest = crate::keccak::keccak256(b"threshold");
-        let signature = sign_digest(&digest, &secret_key).expect("sign");
+        let signature = sign_digest_for_tests(&digest, &secret_key).expect("sign");
         let public_key = public_key_compressed(&secret_key).expect("public key");
 
         let v = recover_v(&digest, signature.r, signature.s, &public_key).expect("recover v");
@@ -236,7 +243,7 @@ mod tests {
     #[test]
     fn recover_v_rejects_a_wrong_public_key() {
         let digest = crate::keccak::keccak256(b"mismatch");
-        let signature = sign_digest(&digest, &secret(13)).expect("sign");
+        let signature = sign_digest_for_tests(&digest, &secret(13)).expect("sign");
         let other_public_key = public_key_compressed(&secret(14)).expect("public key");
         assert_eq!(
             recover_v(&digest, signature.r, signature.s, &other_public_key),
@@ -247,7 +254,7 @@ mod tests {
     #[test]
     fn wrong_public_key_is_rejected_on_recovery() {
         let digest = crate::keccak::keccak256(b"guard");
-        let signature = sign_digest(&digest, &secret(15)).expect("sign");
+        let signature = sign_digest_for_tests(&digest, &secret(15)).expect("sign");
         let other_public_key = public_key_compressed(&secret(16)).expect("public key");
         assert_eq!(
             recover_address(&digest, &signature, Some(&other_public_key)),

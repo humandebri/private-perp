@@ -18,9 +18,9 @@ pub mod user_signed;
 
 pub use eip712::Domain;
 pub use error::SignError;
-pub use hash::{ActionHashInput, action_hash, sign_action, signing_digest};
+pub use hash::{ActionHashInput, action_hash, sign_action_for_tests, signing_digest};
 pub use keccak::{keccak256, keccak256_concat};
 pub use signature::{
     Signature, address_from_public_key, address_from_secret, public_key_compressed,
-    recover_address, recover_v, sign_digest,
+    recover_address, recover_v, sign_digest_for_tests,
 };
