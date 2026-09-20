@@ -153,6 +153,12 @@ CREATE TABLE core_config (
 );
 ";
 
+/// 銘柄解決に使うnetwork・dex（固定値を埋め込まないため設定から解決する）。
+const MARKET_CONTEXT: &str = "
+ALTER TABLE core_config ADD COLUMN network TEXT;
+ALTER TABLE core_config ADD COLUMN dex TEXT;
+";
+
 /// `trading_core` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -166,5 +172,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 3,
         sql: CONFIG,
+    },
+    Migration {
+        version: 4,
+        sql: MARKET_CONTEXT,
     },
 ];

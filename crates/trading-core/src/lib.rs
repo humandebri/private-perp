@@ -100,6 +100,21 @@ async fn whoami(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
     Ok(status.user_id)
 }
 
+/// 銘柄解決に使うnetwork・dexを設定する（controllerのみ）。
+#[ic_cdk::update]
+fn set_market_context(network: String, dex: String) -> Result<(), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can set the market context".to_string(),
+        });
+    }
+    db::tx::update(|connection| {
+        db::repo::core_config::set_market_context(connection, &network, &dex)
+    })
+    .map_err(map_db)
+}
+
 /// `meta`の`universe`を登録する（ローカルのブートストラップ。本番はHL `/info` から取得する）。
 #[ic_cdk::update]
 fn set_meta_cache(network: String, dex: String, universe: String) -> Result<(), ErrorCode> {
@@ -430,11 +445,14 @@ fn vault_principal() -> Result<Principal, ErrorCode> {
 
 /// metaからasset indexを解決する（未取得はfail-closed）。
 fn resolve_asset_index(market: &str) -> Result<u32, ErrorCode> {
-    let universe = db::tx::query(|connection| {
-        db::repo::meta::universe_json(connection, "local", "hyperliquid")
-    })
-    .map_err(map_db)?
-    .ok_or(ErrorCode::PolicyUnavailable)?;
+    // network・dexは設定から解決する（固定値を埋め込まない）。未設定はfail-closed。
+    let (network, dex) = db::tx::query(db::repo::core_config::market_context)
+        .map_err(map_db)?
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    let universe =
+        db::tx::query(|connection| db::repo::meta::universe_json(connection, &network, &dex))
+            .map_err(map_db)?
+            .ok_or(ErrorCode::PolicyUnavailable)?;
     let entries: Vec<serde_json::Value> =
         serde_json::from_str(&universe).map_err(|error| internal(error.to_string()))?;
     for (index, entry) in entries.iter().enumerate() {

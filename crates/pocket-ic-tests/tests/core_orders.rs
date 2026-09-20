@@ -157,6 +157,33 @@ fn orders_are_accepted_idempotently_after_authorization() {
     .expect("call");
     allocated.expect("allocation");
 
+    // 銘柄解決の設定が無い状態ではfail-closedで拒否する（固定値を使わない）。
+    let no_context: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"order-ctx", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    assert_eq!(
+        no_context.expect_err("must fail closed"),
+        ErrorCode::PolicyUnavailable
+    );
+
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .expect("call");
+    context.expect("set_market_context");
+
     // 受付できる（ETHはmetaの添字1）。
     let accepted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
