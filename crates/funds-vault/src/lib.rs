@@ -439,6 +439,15 @@ fn credit_venue_deposit(
     .map_err(|error| auth::map_db(error, None))
 }
 
+/// 入金先（準備口座）を用意する。`get_funding_instructions` の前提を作る。
+#[ic_cdk::update]
+async fn provision_reserve_account(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    let now = clock::now_ms();
+    let address = outbox::provision_reserve_account(&verified.user_id, now).await?;
+    Ok(address.to_vec().into())
+}
+
 fn init_db() {
     if let Err(error) = db::init(MEMORY_ID, db::schema::vault::MIGRATIONS) {
         ic_cdk::trap(format!("db init failed: {error}"));

@@ -269,3 +269,40 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
 
     Ok(())
 }
+
+/// 準備口座（入金先）を導出・登録する。`funding_instructions` の前提を作る。
+pub(crate) async fn provision_reserve_account(
+    user_id: &[u8; 32],
+    now: u64,
+) -> Result<[u8; 20], ErrorCode> {
+    if let Some(existing) = db::tx::query(|connection| {
+        db::repo::ledger::custody_account(connection, user_id, api_types::AccountKind::Reserve)
+    })
+    .map_err(|error| map_db(error, None))?
+    {
+        return Ok(existing.master_address);
+    }
+
+    let account_id = crate::random::random32().await?;
+    let path = crypto::derivation_path(&[
+        b"private-perp",
+        b"reserve",
+        hex::encode(account_id).as_bytes(),
+    ]);
+    let public_key = crypto::public_key(path).await?;
+    let address = hl_sign::address_from_public_key(&public_key)
+        .map_err(|error| internal(error.to_string()))?;
+    let account = NewCustodyAccount {
+        account_id: &account_id,
+        user_id,
+        kind: api_types::AccountKind::Reserve,
+        derivation_path: "private-perp/reserve",
+        master_address: &address,
+        network: config::network_name(config::NETWORK),
+    };
+    db::tx::update(|connection| {
+        db::repo::ledger::ensure_custody_account(connection, &account, now)
+    })
+    .map_err(|error| map_db(error, None))?;
+    Ok(address)
+}
