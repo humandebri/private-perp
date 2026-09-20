@@ -1,12 +1,106 @@
-//! 取引所の入金の取り込み（`/info`照合の受信側）。
+//! 取引所の入金の取得（replicatedな`/info`）と取り込み。
 //!
-//! 正規化したイベントID（`keccak256("deposit" ‖ tx_hash)`）で二重計上を防ぐ。
-//! 宛先が導出口座（`custody_accounts.master_address`）と一致すれば本人へ計上し、
-//! 未知の宛先は記録のみとする（写像が無い入金を誰かへ付けない）。
+//! 取得はreplicated outcall＋決定論的な変換関数で行い、取り込みは正規化した
+//! イベントID（`keccak256("deposit" ‖ tx_hash)`）で二重計上を防ぐ。宛先が導出口座
+//! （`custody_accounts.master_address`）と一致すれば本人へ計上し、未知の宛先は記録のみ。
 
 use crate::clock;
+use api_types::error::ErrorCode;
 use db::error::Error as DbError;
+use ic_cdk_management_canister::{HttpMethod, HttpRequest, transform_context_from_query};
 use ic_sqlite_vfs::db::UpdateConnection;
+
+/// Hyperliquidの`/info`（testnet）。本番はnetwork設定から解決する。
+const INFO_URL: &str = "https://api.hyperliquid-testnet.xyz/info";
+
+/// 変換関数：必要な要素だけを決定論的に残す（順序・付随フィールドの揺れを除く）。
+#[ic_cdk::query]
+fn transform_info(
+    args: ic_cdk_management_canister::TransformArgs,
+) -> ic_cdk_management_canister::HttpRequestResult {
+    let canonical = serde_json::from_slice::<serde_json::Value>(&args.response.body)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .map(|entries| {
+            let trimmed: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "hash": entry.get("hash").cloned().unwrap_or(serde_json::Value::Null),
+                        "time": entry.get("time").cloned().unwrap_or(serde_json::Value::Null),
+                        "usdc": entry
+                            .get("delta")
+                            .and_then(|delta| delta.get("usdc"))
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    })
+                })
+                .collect();
+            serde_json::Value::Array(trimmed)
+        });
+    let body = canonical
+        .map(|value| value.to_string().into_bytes())
+        .unwrap_or_default();
+    ic_cdk_management_canister::HttpRequestResult {
+        status: args.response.status,
+        headers: Vec::new(),
+        body,
+    }
+}
+
+/// 入金（non-funding ledger updates）をreplicated outcallで取得する。
+pub async fn fetch_ledger_updates(user: &str) -> Result<Vec<u8>, ErrorCode> {
+    let body = serde_json::json!({
+        "type": "userNonFundingLedgerUpdates",
+        "user": user,
+    })
+    .to_string();
+    let response = HttpRequest::new(INFO_URL)
+        .with_method(HttpMethod::POST)
+        .with_header("Content-Type", "application/json")
+        .with_body(body.into_bytes())
+        .with_max_response_bytes(16 * 1024)
+        .with_transform(transform_context_from_query(
+            "transform_info".to_string(),
+            Vec::new(),
+        ))
+        .send()
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: error.to_string(),
+        })?;
+    Ok(response.body)
+}
+
+/// 十進文字列をマイクロUSDCへ（丸めない）。
+pub fn decimal_micros(text: &str) -> Result<u64, ErrorCode> {
+    let (integer, fraction) = match text.split_once('.') {
+        Some((integer, fraction)) => (integer, fraction),
+        None => (text, ""),
+    };
+    let integer: u128 = integer.parse().map_err(|_| ErrorCode::BadRequest {
+        code: api_types::error::BadRequestCode::MalformedPayload,
+        detail: "invalid amount".to_string(),
+    })?;
+    if fraction.len() > 6 {
+        return Err(ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "more than 6 decimals".to_string(),
+        });
+    }
+    let mut padded = fraction.to_string();
+    while padded.len() < 6 {
+        padded.push('0');
+    }
+    let fraction: u128 = padded.parse().map_err(|_| ErrorCode::BadRequest {
+        code: api_types::error::BadRequestCode::MalformedPayload,
+        detail: "invalid amount".to_string(),
+    })?;
+    u64::try_from(integer * 1_000_000 + fraction).map_err(|_| ErrorCode::BadRequest {
+        code: api_types::error::BadRequestCode::MalformedPayload,
+        detail: "amount out of range".to_string(),
+    })
+}
 
 /// 入金を取り込む。既知の`tx_hash`なら`false`。
 pub fn credit(

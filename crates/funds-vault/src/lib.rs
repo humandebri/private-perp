@@ -448,6 +448,59 @@ async fn provision_reserve_account(session: SessionHandle) -> Result<api_types::
     Ok(address.to_vec().into())
 }
 
+/// 取引所の入金を取得して取り込む（controllerのみ）。
+///
+/// 取得はreplicated outcall（変換関数で決定論化）、取り込みは検証済みの`deposits::credit`。
+#[ic_cdk::update]
+async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can reconcile deposits".to_string(),
+        });
+    }
+    let address: [u8; 20] = address
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "address must be 20 bytes".to_string(),
+        })?;
+    let body = deposits::fetch_ledger_updates(&format!("0x{}", hex::encode(address))).await?;
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_slice(&body).map_err(|_| ErrorCode::UpstreamRejected {
+            code: "unexpected info response".to_string(),
+            retryable: false,
+        })?;
+    let now = clock::now_ms();
+    let mut credited = 0;
+    for entry in entries {
+        let Some(hash) = entry.get("hash").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(usdc) = entry.get("usdc").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let hash = hash.strip_prefix("0x").unwrap_or(hash);
+        let Ok(tx_hash) = hex::decode(hash) else {
+            continue;
+        };
+        let amount = deposits::decimal_micros(usdc)?;
+        let at = entry
+            .get("time")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(now);
+        let inserted = db::tx::update(|connection| {
+            deposits::credit(connection, &tx_hash, amount, &address, "usdc", at)
+        })
+        .map_err(|error| auth::map_db(error, None))?;
+        if inserted {
+            credited += 1;
+        }
+    }
+    Ok(credited)
+}
+
 fn init_db() {
     if let Err(error) = db::init(MEMORY_ID, db::schema::vault::MIGRATIONS) {
         ic_cdk::trap(format!("db init failed: {error}"));
