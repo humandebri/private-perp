@@ -30,7 +30,8 @@
 - `key_1`／`pzp6e` は `Implementation.md` 2.1の記載であり、本契約で再確認はしていない。Phase 1で実測して確定する。
 - asset indexは`meta.universe`から解決し、固定値を埋め込まない。2026-09-19のtestnet実測ではBTC=3・ETH=4（mainnetはBTC=0・ETH=1）であり、network間で添字が異なる（`docs/phase-1/README.md` 6節）。
 - ローカルの統合試験はPocketICサーバ（`.pocket-ic/`、16.0.0）で行う。ローカルネットワーク（`icp network start`）とは別のハーネスである。
-- **PocketIC 16.0.0の既定トポロジには閾値ECDSAの鍵が無い**（`ecdsa_public_key` が `existing keys: []` で拒否することを2026-09-19に実測）。RustクライアントはsubnetのECDSA設定を公開していないため、ローカルで実tECDSAは検証できない。outboxの検証は `test-venue` featureの決定的テスト署名器で行い、**実tECDSAの検証はtestnetへ繰り延べる**（未達として記録）。
+- ローカルの閾値ECDSAは、PocketICの**テスト用閾値鍵サブネット**で有効になる。`PocketIc::new()`（既定トポロジ）には鍵が無いため `existing keys: []` で拒否される。`PocketIcBuilder::new().with_application_subnet().with_test_threshold_keys_subnet().build()` を使う（`crates/pocket-ic-tests/src/lib.rs`）。
+- ローカルのkey idは **`test_key_1`**（2026-09-19に実測）。本番は `key_1`（`pzp6e`）。PocketIC上の署名往復は約17.9msだが、これはtestnet・本番subnetの性能値ではない。
 - mainnetの署名鍵・subnetは本番リリース候補のビルドで再確認する（Phase 4）。
 - Builder feeの上限同意・徴収アドレスは暗黙に決めない。`api-contract.md` のAgent承認とは別のmaster署名（`approveBuilderFee`）を要求する。
 

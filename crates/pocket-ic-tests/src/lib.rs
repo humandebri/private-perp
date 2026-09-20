@@ -7,7 +7,7 @@
 //! 本クレートはテスト専用であり、Canisterへは含めない。
 
 use candid::{CandidType, Principal};
-use pocket_ic::{CanisterSettings, PocketIc};
+use pocket_ic::{CanisterSettings, PocketIc, PocketIcBuilder};
 use serde::de::DeserializeOwned;
 use std::path::PathBuf;
 
@@ -20,9 +20,16 @@ pub const TRADING_CORE_WASM: &str = "trading_core.wasm";
 /// Canisterへ供給するcycles（テスト用）。
 pub const TEST_CYCLES: u128 = 10_000_000_000_000_000;
 
-/// PocketICインスタンスを1つ作る（単一アプリケーションサブネット）。
+/// PocketICインスタンスを1つ作る。
+///
+/// アプリケーションサブネット（Canister用）に加えて**テスト用閾値鍵サブネット**を
+/// 作る。これが無いと `ecdsa_public_key` / `sign_with_ecdsa` は
+/// `existing keys: []` で拒否される（`PocketIc::new()` の既定トポロジ）。
 pub fn pic() -> PocketIc {
-    PocketIc::new()
+    PocketIcBuilder::new()
+        .with_application_subnet()
+        .with_test_threshold_keys_subnet()
+        .build()
 }
 
 /// テスト用のPrincipal（呼び出し主体の取り違え試験に使う）。

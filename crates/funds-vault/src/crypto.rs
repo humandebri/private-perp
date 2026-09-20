@@ -33,48 +33,20 @@ pub fn derivation_path(parts: &[&[u8]]) -> Vec<Vec<u8>> {
     parts.iter().map(|part| part.to_vec()).collect()
 }
 
-/// テスト用の決定的鍵（`test-venue` featureでのみ有効）。
-///
-/// PocketIC 16.0.0の既定トポロジには閾値ECDSAの鍵が無く（`existing keys: []`）、
-/// ローカルでは実tECDSAを検証できない。outboxの状態機械をローカルで検証するための
-/// 代替であり、**本番ビルド（feature無し）では使われない**。
-#[cfg(feature = "test-venue")]
-fn test_signing_key(path: &[Vec<u8>]) -> [u8; 32] {
-    let parts: Vec<&[u8]> = path.iter().map(|part| part.as_slice()).collect();
-    hl_sign::keccak256_concat(&parts)
-}
-
-#[cfg(feature = "test-venue")]
-fn test_public_key(path: &[Vec<u8>]) -> Result<[u8; 33], ErrorCode> {
-    hl_sign::public_key_compressed(&test_signing_key(path))
-        .map_err(|error| internal(&error.to_string()))
-}
-
 /// 圧縮公開鍵（33バイト）を導出する。
 pub async fn public_key(path: Vec<Vec<u8>>) -> Result<[u8; 33], ErrorCode> {
-    match ecdsa_public_key(&EcdsaPublicKeyArgs {
+    let result = ecdsa_public_key(&EcdsaPublicKeyArgs {
         canister_id: None,
-        derivation_path: path.clone(),
+        derivation_path: path,
         key_id: key_id(),
     })
     .await
-    {
-        Ok(result) => result
-            .public_key
-            .try_into()
-            .map_err(|_| internal("unexpected public key length")),
-        Err(error) => {
-            #[cfg(feature = "test-venue")]
-            {
-                let _ = error;
-                test_public_key(&path)
-            }
-            #[cfg(not(feature = "test-venue"))]
-            {
-                Err(internal(&error.to_string()))
-            }
-        }
-    }
+    .map_err(|error| internal(&error.to_string()))?;
+
+    result
+        .public_key
+        .try_into()
+        .map_err(|_| internal("unexpected public key length"))
 }
 
 /// ダイジェストへ署名し、`v`を復元した65バイト署名を返す（公開鍵を照会する）。
@@ -91,27 +63,13 @@ pub async fn sign_with_key(
     path: Vec<Vec<u8>>,
     expected_public_key: &[u8; 33],
 ) -> Result<hl_sign::Signature, ErrorCode> {
-    let result = match sign_with_ecdsa(&SignWithEcdsaArgs {
+    let result = sign_with_ecdsa(&SignWithEcdsaArgs {
         message_hash: digest.to_vec(),
-        derivation_path: path.clone(),
+        derivation_path: path,
         key_id: key_id(),
     })
     .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            #[cfg(feature = "test-venue")]
-            {
-                let _ = error;
-                return hl_sign::sign_digest_for_tests(digest, &test_signing_key(&path))
-                    .map_err(|error| internal(&error.to_string()));
-            }
-            #[cfg(not(feature = "test-venue"))]
-            {
-                return Err(internal(&error.to_string()));
-            }
-        }
-    };
+    .map_err(|error| internal(&error.to_string()))?;
 
     let bytes: [u8; 64] = result
         .signature
