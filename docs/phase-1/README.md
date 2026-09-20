@@ -24,12 +24,14 @@
 |---|---|---|
 | 2A | 完了 | `crates/db` に vault/core のスキーマ（バージョン付きMigration）、複式台帳（仕訳合計0・符号付きpostings・残高導出）、資金要求の冪等な受付、予約、challenge/セッション、epoch CASを実装。PocketICで `Db::init`→`migrate` がCanister install時に通ることを確認。 |
 | 2B | 一部完了 | EOA challenge・セッション・失効（`auth.rs`）、資金の参照APIと配分・出金の受付＋予約（`fund.rs`）を実装。送信するactionの構築・署名（2C）が未実装 |
-| 2C | 一部完了 | ECDSAスパイク完了（`P1-005`）。テスト用閾値鍵サブネットの追加で**ローカルで実tECDSA（`test_key_1`）が動作**する。署名送信・照合は未着手 |
+| 2C | 一部完了 | ECDSAスパイク完了（`P1-005`、ローカルで実tECDSA動作）。配分actionのoutbox（claim→署名→dispatching永続化→非replicated POST→照合）と `unknown` の再送禁止を実装・検証（`P1-006`）。払出し・回収のaction、入金の本番経路、照合による解消は未着手 |
 | 2D | 未着手 | HPKE要求・応答封筒 |
 | 2E | 未着手 | PocketIC失敗試験（T-1xx／T-2xxのローカル分） |
 | — | 未着手 | outbox/events repo（`fund_actions`・`external_events` の操作）。表は2Aで作成済み |
 
 出金intentの型は `PrivatePerpWithdrawal(address eoa,uint64 amount,string asset,string destination,string network,uint64 nonce,uint64 expiresAt,bytes canister)` とする。クライアントが知り得ない内部ID（user_id・account_id）を署名対象に含めず、認証済みEOAへ束縛するため（`hl-sign::private_perp`）。
+
+outboxの証跡: `crates/pocket-ic-tests/tests/vault_outbox.rs`（3件成功。配分の移動中への計上、応答喪失時の再送禁止、取引所拒否時の予約解放）。
 
 資金APIの証跡: `crates/pocket-ic-tests/tests/vault_funds.rs`（4件成功。残高不足の拒否、冪等な再送と本文相違の拒否、予約による出金可能額の減少、別鍵・宛先相違・期限切れintentの拒否、別callerのセッション拒否）。
 

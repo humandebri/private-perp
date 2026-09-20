@@ -37,6 +37,8 @@
 
 実行済み（2026-09-19、`crates/pocket-ic-tests/tests/vault_auth.rs`）: T-101（別鍵の署名を拒否）、T-103（期限切れを拒否）、T-104（challenge再使用を拒否）、T-105（別origin/networkの署名を拒否）。T-102は未実行。
 
+実行済み（2026-09-19、`crates/pocket-ic-tests/tests/vault_outbox.rs`）: T-205（送金成功後の応答喪失で自動再送しない）。T-206は「未解決actionを再送しない」部分のみ確認（時間経過での解放は未実装）。
+
 ## 4. 資金・台帳・出金
 
 | ID | 脅威・失敗条件 | 対策 | 層 | 期待結果 | 証跡 | Phase |
