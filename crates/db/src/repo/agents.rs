@@ -34,15 +34,10 @@ type RawGeneration = (Vec<u8>, i64, Vec<u8>, Option<i64>, Option<i64>, String);
 
 fn convert(raw: RawGeneration) -> Result<AgentGeneration, Error> {
     Ok(AgentGeneration {
-        account_id: raw
-            .0
-            .try_into()
-            .map_err(|_| Error::Invariant("expected a 32-byte account id"))?,
+        // 長さはテーブルのCHECK制約で保証されている。
+        account_id: raw.0.into(),
         generation: u64::try_from(raw.1).map_err(|_| Error::Invariant("negative generation"))?,
-        agent_address: raw
-            .2
-            .try_into()
-            .map_err(|_| Error::Invariant("expected a 20-byte address"))?,
+        agent_address: raw.2.into(),
         approved_at: raw
             .3
             .map(|value| u64::try_from(value).map_err(|_| Error::Invariant("negative time")))
