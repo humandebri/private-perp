@@ -583,6 +583,17 @@ fn resolve_unknown_action(action_id: api_types::Blob, executed: bool) -> Result<
     .map_err(|error| auth::map_db(error, None))
 }
 
+/// 回収（trading口座→準備口座）を要求する。
+#[ic_cdk::update]
+async fn request_recovery(
+    session: SessionHandle,
+    client_request_id: api_types::Blob,
+    amount: u64,
+) -> Result<api_types::fund::FundRequestAccepted, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    fund::request_recovery(&verified, client_request_id.as_ref(), amount).await
+}
+
 fn init_db() {
     if let Err(error) = db::init(MEMORY_ID, db::schema::vault::MIGRATIONS) {
         ic_cdk::trap(format!("db init failed: {error}"));

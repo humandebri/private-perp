@@ -78,7 +78,7 @@ pub(crate) async fn provision_trading_account(
 
 /// 1つのactionを実行する。
 async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
-    if action.kind != "allocation" && action.kind != "withdrawal" {
+    if action.kind != "allocation" && action.kind != "withdrawal" && action.kind != "recovery" {
         // 未対応の種別は安全側で中止する。
         db::tx::update(|connection| {
             db::repo::actions::abort_unsent(
@@ -105,6 +105,9 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
 
     if action.kind == "withdrawal" {
         return dispatch_withdrawal(action, &request, &request_id, now).await;
+    }
+    if action.kind == "recovery" {
+        return dispatch_recovery(action, &request, &request_id, now).await;
     }
 
     let (account_id, path, public_key, address) =
@@ -466,6 +469,166 @@ async fn dispatch_withdrawal(
                     connection,
                     "system",
                     "payout_unknown",
+                    None,
+                    Some("result_unknown"),
+                    now,
+                )
+            })
+            .map_err(|error| map_db(error, None))?;
+        }
+    }
+    Ok(())
+}
+
+/// 回収（trading口座→準備口座）を送出する。
+async fn dispatch_recovery(
+    action: &FundActionRow,
+    request: &db::repo::funds::FundRequestRow,
+    request_id: &[u8],
+    now: u64,
+) -> Result<(), ErrorCode> {
+    let trading_account_id = request
+        .account_id
+        .ok_or_else(|| internal("recovery without a trading account".to_string()))?;
+    let reserve = db::tx::query(|connection| {
+        db::repo::ledger::custody_account(
+            connection,
+            &action.user_id,
+            api_types::AccountKind::Reserve,
+        )
+    })
+    .map_err(|error| map_db(error, None))?
+    .ok_or_else(|| internal("reserve account is missing".to_string()))?;
+    let destination = format!("0x{}", hex::encode(reserve.master_address));
+
+    let path = crypto::derivation_path(&[
+        b"private-perp",
+        b"trading",
+        hex::encode(trading_account_id).as_bytes(),
+    ]);
+    let public_key = crypto::public_key(path.clone()).await?;
+    let payload = venue::UsdSend {
+        destination,
+        amount_micros: request.amount,
+        time: action.nonce,
+    };
+    let digest = payload.digest()?;
+    if digest != action.digest {
+        db::tx::update(|connection| {
+            db::repo::events::insert_audit(
+                connection,
+                "system",
+                "action_digest_mismatch",
+                None,
+                Some("aborted"),
+                now,
+            )
+        })
+        .map_err(|error| map_db(error, None))?;
+        return Err(ErrorCode::Internal {
+            code: "action digest mismatch".to_string(),
+        });
+    }
+    let signature = crypto::sign_with_key(&digest, path, &public_key).await?;
+    let wire_payload = payload.body(&signature)?;
+    db::tx::update(|connection| {
+        db::repo::actions::mark_signed(
+            connection,
+            &action.action_id,
+            action.worker_epoch,
+            &signature.to_bytes65(),
+            &wire_payload,
+            now,
+        )
+    })
+    .map_err(|error| map_db(error, None))?;
+    db::tx::update(|connection| {
+        db::repo::actions::mark_dispatching(
+            connection,
+            &action.action_id,
+            action.worker_epoch,
+            now,
+        )
+    })
+    .map_err(|error| map_db(error, None))?;
+
+    match venue::post_usd_send(&payload, &signature).await {
+        Ok((ExchangeOutcome::Accepted, _response)) => {
+            let mut evidence = b"recovery".to_vec();
+            evidence.extend_from_slice(&action.digest);
+            let event_id = hl_sign::keccak256(&evidence);
+            db::tx::update(|connection| {
+                db::repo::ledger::recovery_confirm(
+                    connection,
+                    &action.user_id,
+                    &trading_account_id,
+                    request.amount,
+                    now,
+                    &event_id,
+                )?;
+                db::repo::funds::set_request_state(
+                    connection,
+                    &action.user_id,
+                    request_id,
+                    FundRequestState::Settled,
+                    now,
+                )?;
+                db::repo::actions::mark_reconciled(
+                    connection,
+                    &action.action_id,
+                    action.worker_epoch,
+                    now,
+                )
+            })
+            .map_err(|error| map_db(error, None))?;
+        }
+        Ok((ExchangeOutcome::Rejected { message }, _response)) => {
+            db::tx::update(|connection| {
+                db::repo::funds::set_request_state(
+                    connection,
+                    &action.user_id,
+                    request_id,
+                    FundRequestState::Rejected,
+                    now,
+                )?;
+                db::repo::events::insert_audit(
+                    connection,
+                    "system",
+                    "recovery_rejected",
+                    None,
+                    Some(&message),
+                    now,
+                )?;
+                db::repo::actions::mark_reconciled(
+                    connection,
+                    &action.action_id,
+                    action.worker_epoch,
+                    now,
+                )
+            })
+            .map_err(|error| map_db(error, None))?;
+        }
+        Err(error) => {
+            let reason = format!("{error:?}");
+            db::tx::update(|connection| {
+                db::repo::actions::mark_unknown(
+                    connection,
+                    &action.action_id,
+                    action.worker_epoch,
+                    &reason,
+                    now,
+                )?;
+                db::repo::funds::set_request_state(
+                    connection,
+                    &action.user_id,
+                    request_id,
+                    FundRequestState::Unknown,
+                    now,
+                )?;
+                db::repo::events::insert_audit(
+                    connection,
+                    "system",
+                    "recovery_unknown",
                     None,
                     Some("result_unknown"),
                     now,

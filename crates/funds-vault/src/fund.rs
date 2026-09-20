@@ -578,3 +578,103 @@ pub async fn approve_agent_generation(
         Err(error) => Err(error),
     }
 }
+
+/// 回収（trading口座→準備口座）を要求する（受付時にactionを登録する）。
+pub async fn request_recovery(
+    session: &VerifiedSession,
+    client_request_id: &[u8],
+    amount: u64,
+) -> Result<FundRequestAccepted, ErrorCode> {
+    let now = clock::now_ms();
+    let trading = db::tx::query(|connection| {
+        db::repo::ledger::custody_account(connection, &session.user_id, AccountKind::Trading)
+    })
+    .map_err(|error| map_db(error, None))?
+    .ok_or(ErrorCode::NotAllowed {
+        code: api_types::error::NotAllowedCode::OperationNotAvailable,
+    })?;
+    let reserve = db::tx::query(|connection| {
+        db::repo::ledger::custody_account(connection, &session.user_id, AccountKind::Reserve)
+    })
+    .map_err(|error| map_db(error, None))?
+    .ok_or(ErrorCode::NotAllowed {
+        code: api_types::error::NotAllowedCode::OperationNotAvailable,
+    })?;
+    let destination = format!("0x{}", hex::encode(reserve.master_address));
+
+    let fingerprint = body_hash(&[b"recovery", &amount.to_be_bytes(), client_request_id]);
+    let outcome = db::tx::update(|connection| {
+        let accepted = db::repo::funds::accept_fund_request(
+            connection,
+            &NewFundRequest {
+                user_id: &session.user_id,
+                client_request_id,
+                body_hash: &fingerprint,
+                kind: RequestKind::Recovery,
+                account_id: Some(&trading.account_id),
+                amount,
+                destination: Some(destination.as_str()),
+            },
+            now,
+        )?;
+        if accepted == AcceptOutcome::Accepted {
+            db::repo::funds::set_request_state(
+                connection,
+                &session.user_id,
+                client_request_id,
+                FundRequestState::Reserved,
+                now,
+            )?;
+            db::repo::events::insert_audit(
+                connection,
+                "user",
+                "request_recovery",
+                None,
+                Some("reserved"),
+                now,
+            )?;
+        }
+        Ok(accepted)
+    })
+    .map_err(|error| map_accept(error, client_request_id))?;
+
+    let state = match outcome {
+        AcceptOutcome::Accepted => FundRequestState::Reserved,
+        AcceptOutcome::Duplicate => FundRequestState::Accepted,
+        AcceptOutcome::Conflict => {
+            return Err(ErrorCode::IdempotencyConflict {
+                request_id: client_request_id.to_vec().into(),
+            });
+        }
+    };
+
+    if state == FundRequestState::Reserved {
+        let nonce = db::tx::update(|connection| {
+            db::repo::actions::allocate_master_nonce(connection, "trading", now)
+        })
+        .map_err(|error| map_db(error, None))?;
+        let payload = crate::venue::UsdSend {
+            destination,
+            amount_micros: amount,
+            time: nonce,
+        };
+        let digest = payload.digest()?;
+        let action_id = crate::random::random32().await?;
+        let action = db::repo::actions::NewFundAction {
+            action_id,
+            user_id: session.user_id,
+            client_request_id: Some(client_request_id.to_vec()),
+            kind: "recovery".to_string(),
+            signer_id: "trading".to_string(),
+            canonical_action: payload.body(&test_signature_placeholder())?,
+            digest,
+            nonce,
+        };
+        db::tx::update(|connection| {
+            db::repo::actions::insert_fund_action(connection, &action, now)
+        })
+        .map_err(|error| map_accept(error, client_request_id))?;
+    }
+
+    Ok(accepted(client_request_id, state, now))
+}
