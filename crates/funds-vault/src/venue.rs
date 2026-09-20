@@ -4,6 +4,9 @@
 //! **非replicated** outcallで送る。`max_response_bytes`は生のヘッダ+本文から見積もる
 //! （変換後本文だけで見積もらない）。応答は照合の手掛かりとして保存し、成功応答の
 //! 解釈に失敗した場合は「未実行」と扱わない（呼び出し側が`unknown`へ進める）。
+//!
+//! outboxへ接続するまでの間は未使用の警告を抑止する。
+#![allow(dead_code)]
 
 use crate::config;
 use crate::crypto;
