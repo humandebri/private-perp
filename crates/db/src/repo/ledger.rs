@@ -494,3 +494,54 @@ pub fn custody_account(
     })
     .transpose()
 }
+
+/// 登録する保管口座の内容。
+#[derive(Debug, Clone, Copy)]
+pub struct NewCustodyAccount<'a> {
+    pub account_id: &'a [u8; 32],
+    pub user_id: &'a [u8; 32],
+    pub kind: api_types::AccountKind,
+    pub derivation_path: &'a str,
+    pub master_address: &'a [u8; 20],
+    pub network: &'a str,
+}
+
+/// 保管口座を登録する（既にあればそのまま）。導出鍵の公開アドレスを保存する。
+pub fn ensure_custody_account(
+    connection: &mut UpdateConnection<'_>,
+    account: &NewCustodyAccount<'_>,
+    now: u64,
+) -> Result<CustodyAccount, Error> {
+    let NewCustodyAccount {
+        account_id,
+        user_id,
+        kind,
+        derivation_path,
+        master_address,
+        network,
+    } = *account;
+    if let Some(existing) = custody_account(connection, user_id, kind)? {
+        return Ok(existing);
+    }
+    let kind_name = match kind {
+        api_types::AccountKind::Reserve => "reserve",
+        api_types::AccountKind::Trading => "trading",
+    };
+    connection
+        .execute(
+            "INSERT INTO custody_accounts
+               (account_id, user_id, kind, derivation_path, master_address, network, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7)",
+            params![
+                account_id.as_slice(),
+                user_id.as_slice(),
+                kind_name,
+                derivation_path,
+                master_address.as_slice(),
+                network,
+                now as i64
+            ],
+        )
+        .map_err(sql)?;
+    custody_account(connection, user_id, kind)?.ok_or(Error::NotFound)
+}

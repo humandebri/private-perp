@@ -30,6 +30,15 @@ pub const MAX_PAGE_SIZE: u32 = 100;
 /// 本番は `key_1`（`pzp6e`）を使う。値は `docs/phase-0/environments.md` に記録する。
 pub const ECDSA_KEY_ID: &str = "test_key_1";
 
+/// Hyperliquidの`/exchange` endpoint（network別）。
+pub const HL_EXCHANGE_URL: &str = "https://api.hyperliquid-testnet.xyz/exchange";
+
+/// EIP-712の`hyperliquidChain`値（ローカル・testnetは`Testnet`）。
+pub const HL_CHAIN_NAME: &str = "Testnet";
+
+/// EIP-712の`signatureChainId`（16進、testnetは0x66eee）。
+pub const HL_SIGNATURE_CHAIN_ID: &str = "0x66eee";
+
 /// Hyperliquidのuser-signed EIP-712に使うchain id（testnet/localは421614）。
 /// 払出しのwire payload構築（署名段階）で使う。
 #[allow(dead_code)]

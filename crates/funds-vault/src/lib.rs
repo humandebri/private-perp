@@ -16,6 +16,7 @@ mod config;
 mod crypto;
 mod fund;
 mod random;
+mod venue;
 
 use api_types::auth::{ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle};
 use api_types::error::ErrorCode;
