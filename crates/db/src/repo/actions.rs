@@ -530,3 +530,56 @@ pub fn overwrite_queued_digest(
     let changed = crate::cas::changes(connection)?;
     u64::try_from(changed).map_err(|_| Error::Invariant("negative change count"))
 }
+
+/// `action_id`から引く所有者情報（user_id・要求ID・epoch・種別）。
+pub type ActionOwner = ([u8; 32], Option<Vec<u8>>, u64, String);
+
+/// `action_id`から所有者・要求ID・epoch・種別を引く（不明actionの解消に使う）。
+pub fn action_owner(
+    connection: &Connection,
+    action_id: &[u8; 32],
+) -> Result<Option<ActionOwner>, Error> {
+    let row = connection
+        .query_optional(
+            "SELECT user_id, client_request_id, worker_epoch, kind FROM fund_actions WHERE action_id = ?1",
+            params![action_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<Option<Vec<u8>>>(1)?,
+                    row.get::<i64>(2)?,
+                    row.get::<String>(3)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    row.map(|(user_id, request_id, epoch, kind)| {
+        Ok((
+            user_id
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte user id"))?,
+            request_id,
+            u64::try_from(epoch).map_err(|_| Error::Invariant("negative epoch"))?,
+            kind,
+        ))
+    })
+    .transpose()
+}
+
+/// `unknown`のactionを解消済み（`reconciled`）へ遷移させる。
+pub fn mark_resolved(
+    connection: &mut UpdateConnection<'_>,
+    action_id: &[u8; 32],
+    epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    cas_transition(
+        connection,
+        action_id,
+        epoch,
+        ActionState::Unknown,
+        ActionState::Reconciled,
+        None,
+        now,
+    )
+}

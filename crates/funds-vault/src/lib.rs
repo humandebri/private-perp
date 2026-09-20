@@ -516,6 +516,73 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
     Ok(credited)
 }
 
+/// 不明なactionを「未実行」として解消する（controllerのみ）。
+///
+/// 取引所が実行済みと確認できた場合の消込は、証跡（tx）を伴う別経路で行うため
+/// ここでは受け付けない（`OperationNotAvailable`）。
+#[ic_cdk::update]
+fn resolve_unknown_action(action_id: api_types::Blob, executed: bool) -> Result<(), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can resolve unknown actions".to_string(),
+        });
+    }
+    if executed {
+        return Err(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::OperationNotAvailable,
+        });
+    }
+    let action_id: [u8; 32] = action_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "action_id must be 32 bytes".to_string(),
+        })?;
+    let now = clock::now_ms();
+    db::tx::update(|connection| {
+        let (user_id, request_id, epoch, kind) =
+            db::repo::actions::action_owner(connection, &action_id)?
+                .ok_or(db::error::Error::NotFound)?;
+        let state = db::repo::actions::action_state(connection, &action_id)?
+            .ok_or(db::error::Error::NotFound)?;
+        if state != api_types::fund::ActionState::Unknown {
+            return Err(db::error::Error::Invariant("action is not unknown"));
+        }
+        let request_id = request_id.ok_or(db::error::Error::Invariant("action without request"))?;
+        let request = db::repo::funds::fund_request(connection, &user_id, &request_id)?
+            .ok_or(db::error::Error::NotFound)?;
+        db::repo::funds::release_reservation(connection, &user_id, &request_id, now)?;
+        if kind == "withdrawal" {
+            db::repo::ledger::withdrawal_release(
+                connection,
+                &user_id,
+                request.amount,
+                now,
+                &request_id,
+            )?;
+        }
+        db::repo::funds::set_request_state(
+            connection,
+            &user_id,
+            &request_id,
+            api_types::fund::FundRequestState::Rejected,
+            now,
+        )?;
+        db::repo::actions::mark_resolved(connection, &action_id, epoch, now)?;
+        db::repo::events::insert_audit(
+            connection,
+            "system",
+            "resolve_unknown_action",
+            None,
+            Some("not_executed"),
+            now,
+        )
+    })
+    .map_err(|error| auth::map_db(error, None))
+}
+
 fn init_db() {
     if let Err(error) = db::init(MEMORY_ID, db::schema::vault::MIGRATIONS) {
         ic_cdk::trap(format!("db init failed: {error}"));
