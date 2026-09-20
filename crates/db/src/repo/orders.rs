@@ -315,59 +315,12 @@ pub struct SignableOrder {
     pub price: Option<String>,
     pub quantity: String,
     pub kind: String,
+    pub client_request_id: Vec<u8>,
     pub reduce_only: bool,
     pub cloid: [u8; 16],
     pub created_at: u64,
 }
 
-/// 注文を署名用に取得する。
-pub fn signable(
-    connection: &Connection,
-    order_id: &[u8; 32],
-) -> Result<Option<SignableOrder>, Error> {
-    let raw = connection
-        .query_optional(
-            "SELECT account_id, asset_index, side, price, quantity, kind, reduce_only, cloid, created_at
-               FROM orders WHERE order_id = ?1",
-            params![order_id.as_slice()],
-            |row| {
-                Ok((
-                    row.get::<Vec<u8>>(0)?,
-                    row.get::<i64>(1)?,
-                    row.get::<String>(2)?,
-                    row.get::<Option<String>>(3)?,
-                    row.get::<String>(4)?,
-                    row.get::<String>(5)?,
-                    row.get::<i64>(6)?,
-                    row.get::<Vec<u8>>(7)?,
-                    row.get::<i64>(8)?,
-                ))
-            },
-        )
-        .map_err(sql)?;
-    raw.map(|row| {
-        Ok(SignableOrder {
-            account_id: row
-                .0
-                .try_into()
-                .map_err(|_| Error::Invariant("expected a 32-byte account id"))?,
-            asset_index: u32::try_from(row.1).map_err(|_| Error::Invariant("bad index"))?,
-            is_buy: row.2 == "buy",
-            price: row.3,
-            quantity: row.4,
-            kind: row.5,
-            reduce_only: row.6 != 0,
-            cloid: row
-                .7
-                .try_into()
-                .map_err(|_| Error::Invariant("expected a 16-byte cloid"))?,
-            created_at: u64::try_from(row.8).map_err(|_| Error::Invariant("bad time"))?,
-        })
-    })
-    .transpose()
-}
-
-/// 送信待ちの注文（古い順）。
 pub fn queued_orders(connection: &Connection, limit: u32) -> Result<Vec<[u8; 32]>, Error> {
     let rows = connection
         .query_all(
@@ -621,4 +574,71 @@ pub fn apply_order_status(
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
     Ok(changed > 0)
+}
+
+/// リスク予約を解放する（取引所が拒否・結果不明のとき）。
+pub fn release_risk(
+    connection: &mut UpdateConnection<'_>,
+    account_id: &[u8; 32],
+    client_request_id: &[u8],
+) -> Result<bool, Error> {
+    connection
+        .execute(
+            "UPDATE risk_reservations SET state = 'released'
+              WHERE account_id = ?1 AND client_request_id = ?2 AND state = 'held'",
+            params![account_id.as_slice(), client_request_id],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    Ok(changed > 0)
+}
+
+/// 注文を署名用に取得する（列順はこの関数内で完結させる）。
+pub fn signable(
+    connection: &Connection,
+    order_id: &[u8; 32],
+) -> Result<Option<SignableOrder>, Error> {
+    let raw = connection
+        .query_optional(
+            "SELECT account_id, asset_index, side, price, quantity, kind, client_request_id,
+                    reduce_only, cloid, created_at
+               FROM orders WHERE order_id = ?1",
+            params![order_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<Option<String>>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<Vec<u8>>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<Vec<u8>>(8)?,
+                    row.get::<i64>(9)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    raw.map(|row| {
+        Ok(SignableOrder {
+            account_id: row
+                .0
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte account id"))?,
+            asset_index: u32::try_from(row.1).map_err(|_| Error::Invariant("bad index"))?,
+            is_buy: row.2 == "buy",
+            price: row.3,
+            quantity: row.4,
+            kind: row.5,
+            client_request_id: row.6,
+            reduce_only: row.7 != 0,
+            cloid: row
+                .8
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 16-byte cloid"))?,
+            created_at: u64::try_from(row.9).map_err(|_| Error::Invariant("bad time"))?,
+        })
+    })
+    .transpose()
 }

@@ -256,6 +256,7 @@ async fn submit_order(
     let fingerprint = body_fingerprint(&body);
 
     let account_id = trading_account(&session).await?;
+    let notional = notional_micros(args.limit_price.as_deref().unwrap_or("0"), &args.quantity)?;
 
     let cloid = ic_cdk_management_canister::raw_rand()
         .await
@@ -284,6 +285,13 @@ async fn submit_order(
         if accepted != db::repo::core_requests::AcceptOutcome::Accepted {
             return Ok(accepted);
         }
+        db::repo::orders::reserve_risk(
+            connection,
+            &account_id,
+            args.client_request_id.as_ref(),
+            notional,
+            now,
+        )?;
         db::repo::orders::insert_pending_order(
             connection,
             &db::repo::orders::NewOrder {
@@ -582,7 +590,10 @@ async fn get_account_snapshot(
     Ok(api_types::order::AccountSnapshot {
         account_id: account_id.to_vec().into(),
         equity: trading,
-        margin_used: 0,
+        margin_used: db::tx::query(|connection| {
+            db::repo::orders::held_risk(connection, &account_id)
+        })
+        .map_err(map_db)?,
         withdrawable,
         unrealized_pnl: 0,
         positions: Vec::new(),
@@ -639,6 +650,43 @@ async fn list_orders(
         observed_at: now,
         revision: 1,
     })
+}
+
+/// 十進文字列をマイクロ（1e-6）単位の整数へ変換する（丸めない）。
+fn decimal_micros(text: &str) -> Result<i128, ErrorCode> {
+    let (integer, fraction) = match text.split_once('.') {
+        Some((integer, fraction)) => (integer, fraction),
+        None => (text, ""),
+    };
+    if integer.is_empty() && fraction.is_empty() {
+        return Err(bad(BadRequestCode::MalformedPayload, "empty decimal"));
+    }
+    if fraction.len() > 6 {
+        return Err(bad(
+            BadRequestCode::MalformedPayload,
+            "more than 6 decimals",
+        ));
+    }
+    let integer: i128 = integer
+        .parse()
+        .map_err(|_| bad(BadRequestCode::MalformedPayload, "invalid decimal"))?;
+    let mut padded = fraction.to_string();
+    while padded.len() < 6 {
+        padded.push('0');
+    }
+    let fraction: i128 = padded
+        .parse()
+        .map_err(|_| bad(BadRequestCode::MalformedPayload, "invalid decimal"))?;
+    Ok(integer * 1_000_000 + fraction)
+}
+
+/// 価格と数量から想定元本（マイクロUSDC）を求める。
+fn notional_micros(price: &str, quantity: &str) -> Result<u64, ErrorCode> {
+    let notional = decimal_micros(price)?
+        .checked_mul(decimal_micros(quantity)?)
+        .ok_or_else(|| internal("notional overflow".to_string()))?
+        / 1_000_000;
+    u64::try_from(notional).map_err(|_| internal("notional out of range".to_string()))
 }
 
 fn bad(code: BadRequestCode, detail: &str) -> ErrorCode {
@@ -1032,13 +1080,25 @@ async fn test_sweep_now() -> Result<u32, ErrorCode> {
             }
             Ok((ExchangeOutcome::Rejected, _)) => {
                 db::tx::update(|connection| {
-                    db::repo::orders::mark_venue_rejected(connection, &order_id, now)
+                    db::repo::orders::mark_venue_rejected(connection, &order_id, now)?;
+                    db::repo::orders::release_risk(
+                        connection,
+                        &order.account_id,
+                        &order.client_request_id,
+                    )?;
+                    Ok(())
                 })
                 .map_err(map_db)?;
             }
             Err(_) => {
                 db::tx::update(|connection| {
-                    db::repo::orders::mark_unknown(connection, &order_id, now)
+                    db::repo::orders::mark_unknown(connection, &order_id, now)?;
+                    db::repo::orders::release_risk(
+                        connection,
+                        &order.account_id,
+                        &order.client_request_id,
+                    )?;
+                    Ok(())
                 })
                 .map_err(map_db)?;
             }
