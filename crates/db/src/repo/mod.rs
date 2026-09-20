@@ -4,6 +4,7 @@
 //! 完結させる。`repo` の関数はトランザクションを開かない。
 
 pub mod actions;
+pub mod agents;
 pub mod auth;
 pub mod events;
 pub mod funds;

@@ -55,6 +55,22 @@ fn revoke_session(session: SessionHandle) -> Result<(), ErrorCode> {
     auth::revoke_session(&session, ic_cdk::api::msg_caller())
 }
 
+/// Agent世代を要求する（未承認の世代があればそれを返す）。
+#[ic_cdk::update]
+async fn request_agent_generation(
+    session: SessionHandle,
+) -> Result<api_types::fund::AgentGeneration, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    fund::request_agent_generation(&verified).await
+}
+
+/// Agent世代の状態。
+#[ic_cdk::query]
+fn get_agent_status(session: SessionHandle) -> Result<api_types::fund::AgentStatus, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    fund::agent_status(&verified)
+}
+
 /// セッションの有効性（canister間の検証経路。呼び出し元は返却されたprincipalを検証する）。
 #[ic_cdk::query]
 fn session_status(session: SessionHandle) -> Result<api_types::auth::SessionStatus, ErrorCode> {

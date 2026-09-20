@@ -8,8 +8,8 @@ use crate::clock;
 use crate::config;
 use api_types::error::{BadRequestCode, ErrorCode, NotAllowedCode};
 use api_types::fund::{
-    AllocationRequest, FundEvent, FundRequestAccepted, FundRequestState, FundStatus,
-    FundingInstructions, WithdrawalRequest,
+    AgentGeneration, AgentState, AgentStatus, AllocationRequest, FundEvent, FundRequestAccepted,
+    FundRequestState, FundStatus, FundingInstructions, WithdrawalRequest,
 };
 use api_types::{AccountKind, Blob, Paged};
 use db::error::Error as DbError;
@@ -477,4 +477,103 @@ pub fn test_credit_deposit(
         Ok(())
     })
     .map_err(|error| map_db(error, None))
+}
+
+/// Agent世代を要求する（`Implementation.md` 7章）。
+///
+/// 未承認の世代が既にあればそれを返す（世代を無駄に増やさない）。承認（master署名と
+/// HL照合）は署名段階の実装であり、ここでは`requested`として登録するに留める。
+pub async fn request_agent_generation(
+    session: &VerifiedSession,
+) -> Result<AgentGeneration, ErrorCode> {
+    let now = clock::now_ms();
+    let (account_id, _path, _public_key, _address) =
+        crate::outbox::provision_trading_account(&session.user_id, now).await?;
+
+    if let Some(latest) =
+        db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
+            .map_err(|error| map_db(error, None))?
+        && latest.state == AgentState::Requested
+    {
+        return Ok(latest);
+    }
+
+    let generation = db::tx::update(|connection| {
+        let latest = db::repo::agents::latest_generation(connection, &account_id)?;
+        Ok(latest.saturating_add(1))
+    })
+    .map_err(|error| map_db(error, None))?;
+
+    let path = crate::crypto::derivation_path(&[
+        b"private-perp",
+        b"agent",
+        hex::encode(account_id).as_bytes(),
+        &generation.to_be_bytes(),
+    ]);
+    let public_key = crate::crypto::public_key(path.clone()).await?;
+    let address =
+        hl_sign::address_from_public_key(&public_key).map_err(|error| ErrorCode::Internal {
+            code: error.to_string(),
+        })?;
+
+    db::tx::update(|connection| {
+        db::repo::agents::insert_generation(
+            connection,
+            &account_id,
+            generation,
+            &address,
+            "private-perp/agent",
+            now,
+        )?;
+        db::repo::events::insert_audit(
+            connection,
+            "user",
+            "request_agent_generation",
+            None,
+            Some("requested"),
+            now,
+        )
+    })
+    .map_err(|error| map_db(error, None))?;
+
+    Ok(AgentGeneration {
+        account_id: account_id.to_vec().into(),
+        generation,
+        agent_address: address.to_vec().into(),
+        approved_at: None,
+        expires_at: None,
+        state: AgentState::Requested,
+    })
+}
+
+/// Agent世代の状態（承認済みは`current`、要求中は`next`）。
+pub fn agent_status(session: &VerifiedSession) -> Result<AgentStatus, ErrorCode> {
+    let now = clock::now_ms();
+    let account = db::tx::query(|connection| {
+        db::repo::ledger::custody_account(connection, &session.user_id, AccountKind::Trading)
+    })
+    .map_err(|error| map_db(error, None))?;
+
+    let (current, next) = match account {
+        Some(account) => {
+            let latest = db::tx::query(|connection| {
+                db::repo::agents::latest(connection, &account.account_id)
+            })
+            .map_err(|error| map_db(error, None))?;
+            match latest {
+                Some(generation) if generation.state == AgentState::Active => {
+                    (Some(generation), None)
+                }
+                other => (None, other),
+            }
+        }
+        None => (None, None),
+    };
+
+    Ok(AgentStatus {
+        current,
+        next,
+        revocation_pending: false,
+        observed_at: now,
+    })
 }

@@ -198,6 +198,23 @@ CREATE TABLE audit (
 );
 ";
 
+/// Agent世代（`Implementation.md` 7章）。承認はmaster署名で行い、状態をここに持つ。
+const AGENTS: &str = "
+CREATE TABLE agent_generations (
+    account_id BLOB NOT NULL CHECK (length(account_id) = 32),
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    agent_address BLOB NOT NULL CHECK (length(agent_address) = 20),
+    derivation_path TEXT NOT NULL,
+    approved_at INTEGER,
+    expires_at INTEGER,
+    revoked_at INTEGER,
+    state TEXT NOT NULL CHECK (state IN ('requested', 'approving', 'active', 'expiring', 'revoked', 'failed')),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (account_id, generation),
+    UNIQUE (agent_address)
+);
+";
+
 /// `funds_vault` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -215,5 +232,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 4,
         sql: EXTERNAL,
+    },
+    Migration {
+        version: 5,
+        sql: AGENTS,
     },
 ];
