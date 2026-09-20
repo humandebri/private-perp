@@ -16,7 +16,7 @@
 |---|---|---|
 | S1 | hl-sign（action構築・msgpack・EIP-712・v復元）＋公式SDK比較 | 完了 |
 | S2 | PocketIC基盤、ic-sqlite-vfs疎通、複式台帳・予約・outbox・nonce・fencing | 2A完了（dbスキーマ・台帳・予約・CAS）。2B以降は未着手 |
-| S3 | モックHL往復・障害注入、ローカルECDSA、guard迂回拒否 | 一部完了（`control_guard`の予約・7日猶予・内容不一致拒否は`P1-009`。実行経路と`trading_core`・`policy_registry`は未着手） |
+| S3 | モックHL往復・障害注入、ローカルECDSA、guard迂回拒否 | 一部完了（`control_guard`の予約・7日猶予・実行・内容不一致拒否は`P1-009`、`policy_registry`のfail-closedと停止操作は`P1-010`。`trading_core`の注文パイプラインは未着手） |
 
 ## 2.1 S2の進捗（2026-09-19）
 

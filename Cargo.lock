@@ -1591,6 +1591,7 @@ dependencies = [
 name = "policy"
 version = "0.1.0"
 dependencies = [
+ "api-types",
  "candid",
  "db",
  "ic-cdk",

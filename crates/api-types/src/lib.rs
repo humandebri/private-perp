@@ -11,6 +11,7 @@ pub mod error;
 pub mod fund;
 pub mod guard;
 pub mod order;
+pub mod policy;
 
 use candid::CandidType;
 use serde::{Deserialize, Serialize};

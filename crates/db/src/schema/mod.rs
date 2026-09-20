@@ -6,4 +6,5 @@
 
 pub mod core;
 pub mod guard;
+pub mod policy;
 pub mod vault;

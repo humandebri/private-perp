@@ -9,6 +9,7 @@ pub mod events;
 pub mod funds;
 pub mod guard;
 pub mod ledger;
+pub mod policy;
 
 use crate::error::Error;
 
