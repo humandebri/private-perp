@@ -1,0 +1,244 @@
+//! `trading_core` の注文受付（認可・allowlist・精度・冪等性）の試験。
+
+use api_types::auth::{
+    ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
+};
+use api_types::error::{ErrorCode, NotAllowedCode};
+use api_types::fund::AllocationRequest;
+use api_types::order::{OrderKind, Side, SubmitOrderArgs, SubmitOrderResult};
+use api_types::{AccountKind, Blob, Network};
+use candid::Principal;
+use hl_sign::private_perp;
+use hl_sign::signature::address_from_secret;
+use pocket_ic::PocketIc;
+use pocket_ic_tests::{
+    FUNDS_VAULT_WASM, TRADING_CORE_WASM, deploy, deploy_default, pic, principal, update,
+    update_args,
+};
+
+const ORIGIN: &str = "https://app.example.test";
+const UNIVERSE: &str = r#"[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]"#;
+
+fn secret(seed: u8) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[31] = seed;
+    bytes
+}
+
+fn blob(value: &[u8]) -> Blob {
+    value.to_vec().into()
+}
+
+fn open_session(
+    pic: &PocketIc,
+    vault: Principal,
+    caller: Principal,
+    key: &[u8; 32],
+) -> SessionHandle {
+    let eoa = address_from_secret(key).expect("address");
+    let issued: Result<ChallengeResponse, ErrorCode> = update(
+        pic,
+        vault,
+        caller,
+        "issue_challenge",
+        ChallengeRequest {
+            eoa_address: eoa.to_vec().into(),
+            principal: caller,
+            purpose: ChallengePurpose::Login,
+            network: Network::Local,
+            origin: ORIGIN.to_string(),
+        },
+    )
+    .expect("call");
+    let issued = issued.expect("challenge");
+    let challenge = private_perp::Challenge {
+        purpose: "login".to_string(),
+        eoa,
+        principal: caller.as_slice().to_vec(),
+        canister: vault.as_slice().to_vec(),
+        network: "local".to_string(),
+        origin: ORIGIN.to_string(),
+        nonce: issued.nonce.as_ref().try_into().expect("nonce"),
+        expires_at: issued.expires_at,
+    };
+    let signature = challenge.sign_for_tests(key).expect("sign");
+    let session: Result<SessionHandle, ErrorCode> = update(
+        pic,
+        vault,
+        caller,
+        "open_session",
+        OpenSessionRequest {
+            challenge_id: issued.challenge_id,
+            eoa_signature: signature.to_bytes65().to_vec().into(),
+        },
+    )
+    .expect("call");
+    session.expect("session")
+}
+
+fn order_args(
+    session: &SessionHandle,
+    request_id: &[u8],
+    market: &str,
+    quantity: &str,
+    price: &str,
+) -> SubmitOrderArgs {
+    SubmitOrderArgs {
+        session: session.clone(),
+        client_request_id: blob(request_id),
+        account_id: blob(&[0u8; 32]),
+        market: market.to_string(),
+        side: Side::Buy,
+        kind: OrderKind::LimitGtc,
+        quantity: quantity.to_string(),
+        limit_price: Some(price.to_string()),
+        slippage_tolerance_bps: None,
+        reduce_only: false,
+        leverage: Some(3),
+        trigger: None,
+        expires_after: None,
+    }
+}
+
+#[test]
+fn orders_are_accepted_idempotently_after_authorization() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(110);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+    let meta: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_meta_cache",
+        (
+            "local".to_string(),
+            "hyperliquid".to_string(),
+            UNIVERSE.to_string(),
+        ),
+    )
+    .expect("call");
+    meta.expect("set_meta_cache");
+
+    // 本人のセッションと取引口座を用意する（配分の受付で口座が導出される）。
+    let caller = principal(111);
+    let key = secret(181);
+    let session = open_session(&pic, vault, caller, &key);
+    let credit: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (session.clone(), 1_000_000u64, blob(&[31u8; 32])),
+    )
+    .expect("call");
+    credit.expect("credit");
+    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_allocation",
+        AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(b"alloc-for-orders"),
+            amount: 500_000,
+            target: AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .expect("call");
+    allocated.expect("allocation");
+
+    // 受付できる（ETHはmetaの添字1）。
+    let accepted: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"order-1", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    let accepted = accepted.expect("accepted");
+    assert_eq!(accepted.order_id.len(), 32);
+    assert_eq!(accepted.cloid.len(), 16);
+
+    // 同一ID・同一本文の再送は同じ結果（order_idとcloidが一致）。
+    let duplicate: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"order-1", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    let duplicate = duplicate.expect("duplicate");
+    assert_eq!(duplicate.order_id, accepted.order_id);
+    assert_eq!(duplicate.cloid, accepted.cloid);
+
+    // 同一ID・異なる本文は拒否する。
+    let conflict: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"order-1", "ETH", "0.06", "2500"),
+        ),
+    )
+    .expect("call");
+    assert!(
+        matches!(conflict, Err(ErrorCode::IdempotencyConflict { .. })),
+        "{conflict:?}"
+    );
+
+    // allowlist外（SOL）は拒否する。
+    let denied: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"order-2", "SOL", "1", "100"),
+        ),
+    )
+    .expect("call");
+    assert_eq!(
+        denied.expect_err("denied"),
+        ErrorCode::NotAllowed {
+            code: NotAllowedCode::AssetNotAllowed
+        }
+    );
+
+    // 別principalのセッションでは受付できない。
+    let other: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        principal(112),
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"order-3", "BTC", "0.01", "60000"),
+        ),
+    )
+    .expect("call");
+    assert!(
+        matches!(other, Err(ErrorCode::Unauthenticated { .. })),
+        "{other:?}"
+    );
+}

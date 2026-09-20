@@ -55,6 +55,27 @@ fn revoke_session(session: SessionHandle) -> Result<(), ErrorCode> {
     auth::revoke_session(&session, ic_cdk::api::msg_caller())
 }
 
+/// 本人の取引口座ID（`trading_core` が所有権の確認に使う）。
+#[ic_cdk::query]
+fn get_trading_account(session: SessionHandle) -> Result<Option<api_types::Blob>, ErrorCode> {
+    // canister間（trading_core）からの呼び出しを想定し、caller束縛は呼び出し側で行う
+    // （coreは先に session_status で本人のprincipalを確認する）。
+    let status = auth::session_status(&session)?;
+    let user_id: [u8; 32] =
+        status
+            .user_id
+            .as_ref()
+            .try_into()
+            .map_err(|_| ErrorCode::Internal {
+                code: "user_id must be 32 bytes".to_string(),
+            })?;
+    let account = db::tx::query(|connection| {
+        db::repo::ledger::custody_account(connection, &user_id, api_types::AccountKind::Trading)
+    })
+    .map_err(|error| auth::map_db(error, None))?;
+    Ok(account.map(|account| account.account_id.to_vec().into()))
+}
+
 /// Agent世代を要求する（未承認の世代があればそれを返す）。
 #[ic_cdk::update]
 async fn request_agent_generation(

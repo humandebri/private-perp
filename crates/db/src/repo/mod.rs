@@ -7,10 +7,12 @@ pub mod actions;
 pub mod agents;
 pub mod auth;
 pub mod core_config;
+pub mod core_requests;
 pub mod events;
 pub mod funds;
 pub mod guard;
 pub mod ledger;
+pub mod meta;
 pub mod orders;
 pub mod policy;
 

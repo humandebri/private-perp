@@ -169,3 +169,29 @@ pub fn held_risk(connection: &Connection, account_id: &[u8; 32]) -> Result<u64, 
         .map_err(sql)?;
     u64::try_from(total).map_err(|_| Error::Invariant("negative notional"))
 }
+
+/// 受付IDに対応する既存注文（再送時に同じ結果を返すため）。
+pub fn order_by_request(
+    connection: &Connection,
+    user_id: &[u8; 32],
+    client_request_id: &[u8],
+) -> Result<Option<([u8; 32], [u8; 16])>, Error> {
+    let raw = connection
+        .query_optional(
+            "SELECT order_id, cloid FROM orders WHERE user_id = ?1 AND client_request_id = ?2",
+            params![user_id.as_slice(), client_request_id],
+            |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<Vec<u8>>(1)?)),
+        )
+        .map_err(sql)?;
+    raw.map(|(order_id, cloid)| {
+        Ok((
+            order_id
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte order id"))?,
+            cloid
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 16-byte cloid"))?,
+        ))
+    })
+    .transpose()
+}

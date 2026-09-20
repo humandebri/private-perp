@@ -2799,7 +2799,12 @@ dependencies = [
  "api-types",
  "candid",
  "db",
+ "hex",
+ "hl-sign",
+ "hl-types",
  "ic-cdk",
+ "ic-cdk-management-canister",
+ "serde_json",
 ]
 
 [[package]]
