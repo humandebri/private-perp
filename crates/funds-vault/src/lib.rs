@@ -80,6 +80,50 @@ async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
     Ok(public.to_vec().into())
 }
 
+/// 取引所の入金（ledger update）を記録する（controllerのみ）。
+///
+/// 正規化したイベントID（`keccak256("deposit" ‖ tx_hash)`）で**二重計上を防ぐ**。
+/// 本番ではreplicatedな`/info`照合がこの経路を呼ぶ。ユーザーへの紐付け（宛先アドレス→
+/// 利用者）と`deposit_confirmed`の起票は次段階（アドレス写像の実装後）に行う。
+#[ic_cdk::update]
+fn ingest_venue_deposit(
+    tx_hash: api_types::Blob,
+    amount: u64,
+    asset: String,
+) -> Result<bool, ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can ingest venue deposits".to_string(),
+        });
+    }
+    if tx_hash.as_ref().is_empty() {
+        return Err(ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "tx_hash must not be empty".to_string(),
+        });
+    }
+    let mut input = b"deposit".to_vec();
+    input.extend_from_slice(tx_hash.as_ref());
+    let event_id = hl_sign::keccak256(&input);
+    let now = clock::now_ms();
+    db::tx::update(|connection| {
+        let event = db::repo::events::ExternalEvent {
+            event_id,
+            network: config::network_name(config::NETWORK).to_string(),
+            account_address: [0u8; 20],
+            counterparty: [0u8; 20],
+            asset: asset.clone(),
+            amount,
+            kind: "deposit".to_string(),
+            at: now,
+            evidence_ref: Some(hex::encode(tx_hash.as_ref())),
+        };
+        db::repo::events::ingest_external_event(connection, &event, now)
+    })
+    .map_err(|error| auth::map_db(error, None))
+}
+
 /// テスト専用：queuedなactionのダイジェストを壊す（`test-venue` featureでのみ存在）。
 #[cfg(feature = "test-venue")]
 #[ic_cdk::update]
