@@ -23,8 +23,11 @@ fi
 
 echo "pocket-ic-test: POCKET_IC_BIN=$POCKET_IC_BIN"
 echo "pocket-ic-test: wasmをビルドします"
+# funds-vault はテスト専用の入金計上（test-venue）を有効にしてビルドする。
+# 本番ビルド（icp build / CIのwasmビルド）は feature 無しでビルドする。
 cargo build --release --target wasm32-unknown-unknown \
-  -p policy -p funds-vault -p control-guard -p trading-core
+  -p policy -p control-guard -p trading-core
+cargo build --release --target wasm32-unknown-unknown -p funds-vault --features test-venue
 
 echo "pocket-ic-test: 試験を実行します"
 cargo test -p pocket-ic-tests "$@"

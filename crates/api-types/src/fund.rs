@@ -91,7 +91,8 @@ pub enum Destination {
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FundRequestAccepted {
     pub request_id: Blob,
-    pub fund_action_id: Blob,
+    /// 送信するactionのID。wire payloadを構築する段階（署名時）に確定するため未確定は`None`。
+    pub fund_action_id: Option<Blob>,
     pub state: FundRequestState,
     pub accepted_at: Timestamp,
 }

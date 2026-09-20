@@ -59,7 +59,7 @@ fn get_funding_instructions(
 #[ic_cdk::query]
 fn get_fund_status(session: SessionHandle) -> Result<api_types::fund::FundStatus, ErrorCode> {
     let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
-    fund::fund_status(&verified)
+    fund::fund_status_with_holds(&verified)
 }
 
 /// 資金履歴（認証済みセッションが必要）。
@@ -71,6 +71,43 @@ fn list_fund_events(
 ) -> Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> {
     let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
     fund::fund_events(&verified, cursor, limit)
+}
+
+/// 配分を要求する（受付＋予約）。
+#[ic_cdk::update]
+fn request_allocation(
+    request: api_types::fund::AllocationRequest,
+) -> Result<api_types::fund::FundRequestAccepted, ErrorCode> {
+    let verified = auth::verify_session(&request.session, ic_cdk::api::msg_caller())?;
+    fund::request_allocation(&verified, &request)
+}
+
+/// 出金を要求する（本人署名の検証＋受付＋予約）。
+#[ic_cdk::update]
+fn request_withdrawal(
+    request: api_types::fund::WithdrawalRequest,
+) -> Result<api_types::fund::FundRequestAccepted, ErrorCode> {
+    let verified = auth::verify_session(&request.session, ic_cdk::api::msg_caller())?;
+    fund::request_withdrawal(&verified, &request)
+}
+
+/// テスト専用の入金計上（`test-venue` featureでのみ存在）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+fn test_credit_deposit(
+    session: SessionHandle,
+    amount: u64,
+    event_id: api_types::Blob,
+) -> Result<(), ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    let event_id: [u8; 32] = event_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "event_id must be 32 bytes".to_string(),
+        })?;
+    fund::test_credit_deposit(&verified, amount, &event_id)
 }
 
 /// 呼び出し元のPrincipal（診断用。認可の判断は各メソッド内で行う）。

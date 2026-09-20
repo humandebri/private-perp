@@ -412,3 +412,26 @@ pub fn session_row(
         .map_err(sql)?;
     raw.map(convert_session).transpose()
 }
+
+/// ユーザーIDから本人を引く。
+pub fn identity_by_user(
+    connection: &Connection,
+    user_id: &[u8; 32],
+) -> Result<Option<Identity>, Error> {
+    let raw = connection
+        .query_optional(
+            "SELECT user_id, eoa_address, status, revocation_generation
+               FROM identities WHERE user_id = ?1",
+            params![user_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<Vec<u8>>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<i64>(3)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    raw.map(convert_identity).transpose()
+}

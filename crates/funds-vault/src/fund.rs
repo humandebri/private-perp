@@ -6,9 +6,14 @@
 use crate::auth::{VerifiedSession, map_db};
 use crate::clock;
 use crate::config;
-use api_types::error::{ErrorCode, NotAllowedCode};
-use api_types::fund::{FundEvent, FundStatus, FundingInstructions};
+use api_types::error::{BadRequestCode, ErrorCode, NotAllowedCode};
+use api_types::fund::{
+    AllocationRequest, FundEvent, FundRequestAccepted, FundRequestState, FundStatus,
+    FundingInstructions, WithdrawalRequest,
+};
 use api_types::{AccountKind, Blob, Paged};
+use db::error::Error as DbError;
+use db::repo::funds::{AcceptOutcome, NewFundRequest, RequestKind};
 
 /// 入金案内。共通保管口座が未作成の間は利用できない（鍵導出は2C）。
 pub fn funding_instructions(session: &VerifiedSession) -> Result<FundingInstructions, ErrorCode> {
@@ -122,4 +127,314 @@ fn decode_cursor(blob: &[u8]) -> Result<u64, ErrorCode> {
         detail: "cursor must be 8 bytes".to_string(),
     })?;
     Ok(u64::from_be_bytes(bytes))
+}
+
+/// 受付の結果をAPI型へ写す。
+fn accepted(request_id: &[u8], state: FundRequestState, now: u64) -> FundRequestAccepted {
+    FundRequestAccepted {
+        request_id: request_id.to_vec().into(),
+        fund_action_id: None,
+        state,
+        accepted_at: now,
+    }
+}
+
+/// 要求本文のfingerprint（冪等性の判定に使う）。
+fn body_hash(parts: &[&[u8]]) -> [u8; 32] {
+    hl_sign::keccak256_concat(parts)
+}
+
+fn map_accept(error: DbError, request_id: &[u8]) -> ErrorCode {
+    match error {
+        DbError::Conflict => ErrorCode::IdempotencyConflict {
+            request_id: request_id.to_vec().into(),
+        },
+        other => map_db(other, Some(request_id)),
+    }
+}
+
+/// 配分を要求する（受付＋予約。送信は署名段階）。
+pub fn request_allocation(
+    session: &VerifiedSession,
+    request: &AllocationRequest,
+) -> Result<FundRequestAccepted, ErrorCode> {
+    if request.amount == 0 {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::AmountZero,
+            detail: "amount must be positive".to_string(),
+        });
+    }
+    if !matches!(request.target, AccountKind::Trading) {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "allocation target must be the trading account".to_string(),
+        });
+    }
+
+    let request_id = request.client_request_id.as_ref();
+    if request_id.is_empty() || request_id.len() > 64 {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "client_request_id must be 1..=64 bytes".to_string(),
+        });
+    }
+    let now = clock::now_ms();
+    let fingerprint = body_hash(&[b"allocation", &request.amount.to_be_bytes(), request_id]);
+
+    let outcome = db::tx::update(|connection| {
+        let accepted = db::repo::funds::accept_fund_request(
+            connection,
+            &NewFundRequest {
+                user_id: &session.user_id,
+                client_request_id: request_id,
+                body_hash: &fingerprint,
+                kind: RequestKind::Allocation,
+                account_id: None,
+                amount: request.amount,
+                destination: None,
+            },
+            now,
+        )?;
+        match accepted {
+            AcceptOutcome::Accepted => {
+                db::repo::funds::reserve_funds(
+                    connection,
+                    &session.user_id,
+                    request_id,
+                    &db::repo::ledger::user_reserve(&session.user_id),
+                    request.amount,
+                    now,
+                )?;
+                db::repo::funds::set_request_state(
+                    connection,
+                    &session.user_id,
+                    request_id,
+                    FundRequestState::Reserved,
+                    now,
+                )?;
+                db::repo::events::insert_audit(
+                    connection,
+                    "user",
+                    "request_allocation",
+                    None,
+                    Some("reserved"),
+                    now,
+                )?;
+                Ok(AcceptOutcome::Accepted)
+            }
+            other => Ok(other),
+        }
+    })
+    .map_err(|error| map_accept(error, request_id))?;
+
+    let state = match outcome {
+        AcceptOutcome::Accepted => FundRequestState::Reserved,
+        AcceptOutcome::Duplicate => FundRequestState::Accepted,
+        AcceptOutcome::Conflict => {
+            return Err(ErrorCode::IdempotencyConflict {
+                request_id: request_id.to_vec().into(),
+            });
+        }
+    };
+    Ok(accepted(request_id, state, now))
+}
+
+/// 出金を要求する（本人署名の検証＋受付＋予約。払出しは署名段階）。
+pub fn request_withdrawal(
+    session: &VerifiedSession,
+    request: &WithdrawalRequest,
+) -> Result<FundRequestAccepted, ErrorCode> {
+    if request.amount == 0 {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::AmountZero,
+            detail: "amount must be positive".to_string(),
+        });
+    }
+    let request_id = request.client_request_id.as_ref();
+    if request_id.is_empty() || request_id.len() > 64 {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "client_request_id must be 1..=64 bytes".to_string(),
+        });
+    }
+    if !matches!(
+        request.destination,
+        api_types::fund::Destination::AuthenticatedEoaHlAccount
+    ) {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::DestinationNotAllowed,
+            detail: "destination must be the authenticated EOA's Hyperliquid account".to_string(),
+        });
+    }
+    let now = clock::now_ms();
+    if request.expires_at <= now {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::ExpiredIntent,
+            detail: "intent has expired".to_string(),
+        });
+    }
+    if request.network != config::NETWORK {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::NetworkMismatch,
+            detail: "intent network does not match".to_string(),
+        });
+    }
+
+    // 本人のEOAを解決し、EOA束縛のintentを検証する。
+    let eoa =
+        db::tx::query(|connection| db::repo::auth::identity_by_user(connection, &session.user_id))
+            .map_err(|error| map_db(error, None))?
+            .ok_or(ErrorCode::Unauthenticated {
+                reason: "identity not found".to_string(),
+            })?
+            .eoa_address;
+
+    let intent = hl_sign::private_perp::Withdrawal {
+        user_id: session.user_id,
+        account_id: [0u8; 32],
+        amount: request.amount,
+        asset: "usdc".to_string(),
+        destination: format!("0x{}", hex::encode(eoa)),
+        network: config::network_name(request.network).to_string(),
+        nonce: request.nonce,
+        expires_at: request.expires_at,
+        canister: ic_cdk::api::canister_self().as_slice().to_vec(),
+    };
+    let digest = intent.digest().map_err(|error| ErrorCode::BadRequest {
+        code: BadRequestCode::MalformedPayload,
+        detail: error.to_string(),
+    })?;
+    let signature_bytes: [u8; 65] =
+        request
+            .intent_signature
+            .as_ref()
+            .try_into()
+            .map_err(|_| ErrorCode::BadRequest {
+                code: BadRequestCode::InvalidSignature,
+                detail: "intent_signature must be 65 bytes".to_string(),
+            })?;
+    let signature = hl_sign::Signature::from_bytes65(&signature_bytes).map_err(|error| {
+        ErrorCode::BadRequest {
+            code: BadRequestCode::InvalidSignature,
+            detail: error.to_string(),
+        }
+    })?;
+    let recovered = hl_sign::recover_address(&digest, &signature, None).map_err(|error| {
+        ErrorCode::BadRequest {
+            code: BadRequestCode::InvalidSignature,
+            detail: error.to_string(),
+        }
+    })?;
+    if recovered != eoa {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::InvalidSignature,
+            detail: "intent signature does not match the EOA".to_string(),
+        });
+    }
+
+    let fingerprint = body_hash(&[
+        b"withdrawal",
+        &request.amount.to_be_bytes(),
+        &request.nonce.to_be_bytes(),
+        &request.expires_at.to_be_bytes(),
+        &eoa,
+        request_id,
+    ]);
+
+    let outcome = db::tx::update(|connection| {
+        let accepted = db::repo::funds::accept_fund_request(
+            connection,
+            &NewFundRequest {
+                user_id: &session.user_id,
+                client_request_id: request_id,
+                body_hash: &fingerprint,
+                kind: RequestKind::Withdrawal,
+                account_id: None,
+                amount: request.amount,
+                destination: Some("authenticated_eoa"),
+            },
+            now,
+        )?;
+        match accepted {
+            AcceptOutcome::Accepted => {
+                db::repo::funds::reserve_funds(
+                    connection,
+                    &session.user_id,
+                    request_id,
+                    &db::repo::ledger::user_reserve(&session.user_id),
+                    request.amount,
+                    now,
+                )?;
+                db::repo::funds::set_request_state(
+                    connection,
+                    &session.user_id,
+                    request_id,
+                    FundRequestState::Reserved,
+                    now,
+                )?;
+                db::repo::events::insert_audit(
+                    connection,
+                    "user",
+                    "request_withdrawal",
+                    None,
+                    Some("reserved"),
+                    now,
+                )?;
+                Ok(AcceptOutcome::Accepted)
+            }
+            other => Ok(other),
+        }
+    })
+    .map_err(|error| map_accept(error, request_id))?;
+
+    let state = match outcome {
+        AcceptOutcome::Accepted => FundRequestState::Reserved,
+        AcceptOutcome::Duplicate => FundRequestState::Accepted,
+        AcceptOutcome::Conflict => {
+            return Err(ErrorCode::IdempotencyConflict {
+                request_id: request_id.to_vec().into(),
+            });
+        }
+    };
+    Ok(accepted(request_id, state, now))
+}
+
+/// 拘束中の予約を差し引いた出金可能額を含む資金状態を返す。
+pub fn fund_status_with_holds(session: &VerifiedSession) -> Result<FundStatus, ErrorCode> {
+    let mut status = fund_status(session)?;
+    let held = db::tx::query(|connection| {
+        db::repo::funds::held_reservation_total(connection, &session.user_id)
+    })
+    .map_err(|error| map_db(error, None))?;
+    status.withdrawable = status.withdrawable.saturating_sub(held);
+    Ok(status)
+}
+
+/// テスト専用の入金計上（`test-venue` featureでのみコンパイルされる）。
+#[cfg(feature = "test-venue")]
+pub fn test_credit_deposit(
+    session: &VerifiedSession,
+    amount: u64,
+    event_id: &[u8; 32],
+) -> Result<(), ErrorCode> {
+    let now = clock::now_ms();
+    db::tx::update(|connection| {
+        let event = db::repo::events::ExternalEvent {
+            event_id: *event_id,
+            network: config::network_name(config::NETWORK).to_string(),
+            account_address: [0u8; 20],
+            counterparty: [1u8; 20],
+            asset: "usdc".to_string(),
+            amount,
+            kind: "deposit".to_string(),
+            at: now,
+            evidence_ref: Some("test-venue".to_string()),
+        };
+        if !db::repo::events::ingest_external_event(connection, &event, now)? {
+            return Err(DbError::Invariant("duplicate test deposit"));
+        }
+        db::repo::ledger::deposit_confirmed(connection, &session.user_id, amount, now, event_id)?;
+        Ok(())
+    })
+    .map_err(|error| map_db(error, None))
 }

@@ -20,3 +20,9 @@ ic-cdk.workspace = true
 ic-cdk-management-canister.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[features]
+# テスト専用の入金計上（`test_credit_deposit`）を有効にする。
+# 本番ビルド（`icp build`、CIのwasmビルド）では有効にしない。
+default = []
+test-venue = []
