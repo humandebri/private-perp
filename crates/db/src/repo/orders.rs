@@ -531,18 +531,33 @@ pub fn list_fills(
         .collect()
 }
 
+/// 取り込む約定の内容。
+#[derive(Debug, Clone, Copy)]
+pub struct NewFill<'a> {
+    pub tid: u64,
+    pub hl_oid: u64,
+    pub market: &'a str,
+    pub price: &'a str,
+    pub quantity: &'a str,
+    pub fee: u64,
+    pub filled_at: u64,
+}
+
 /// 約定を取り込む（同じ`tid`は二重計上しない）。注文は`hl_oid`で解決する。
 pub fn ingest_fill(
     connection: &mut UpdateConnection<'_>,
     user_id: &[u8; 32],
-    tid: u64,
-    hl_oid: u64,
-    market: &str,
-    price: &str,
-    quantity: &str,
-    fee: u64,
-    filled_at: u64,
+    fill: &NewFill<'_>,
 ) -> Result<bool, Error> {
+    let NewFill {
+        tid,
+        hl_oid,
+        market,
+        price,
+        quantity,
+        fee,
+        filled_at,
+    } = *fill;
     let order = connection
         .query_optional(
             "SELECT order_id, quantity FROM orders WHERE hl_oid = ?1 LIMIT 1",

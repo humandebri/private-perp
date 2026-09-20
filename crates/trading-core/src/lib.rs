@@ -1038,7 +1038,17 @@ async fn test_ingest_fills(
             .unwrap_or(now);
         let inserted = db::tx::update(|connection| {
             db::repo::orders::ingest_fill(
-                connection, &user_id, tid, oid, &coin, &price, &quantity, fee, at,
+                connection,
+                &user_id,
+                &db::repo::orders::NewFill {
+                    tid,
+                    hl_oid: oid,
+                    market: &coin,
+                    price: &price,
+                    quantity: &quantity,
+                    fee,
+                    filled_at: at,
+                },
             )
         })
         .map_err(map_db)?;
