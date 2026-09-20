@@ -263,6 +263,10 @@ pub fn action_state(
 }
 
 /// 署名済みとして保存する（payloadと署名はこの時点で必須）。
+///
+/// 状態と署名を**同じUPDATE**で書く。`fund_actions` のCHECKは「`signing`では署名がNULL」
+/// 「`signed`・`dispatching`以降は署名とpayloadが必須」を要求するため、2段階に分けると
+/// 中間状態が制約違反になる。
 pub fn mark_signed(
     connection: &mut UpdateConnection<'_>,
     action_id: &[u8; 32],
@@ -274,24 +278,33 @@ pub fn mark_signed(
     connection
         .execute(
             "UPDATE fund_actions
-                SET signature = ?4, wire_payload = ?5
+                SET signature = ?4, wire_payload = ?5, dispatch_state = 'signed',
+                    updated_at = ?6, lease_until = NULL
               WHERE action_id = ?1 AND worker_epoch = ?2 AND dispatch_state = ?3",
             params![
                 action_id.as_slice(),
                 epoch as i64,
                 action_state_str(ActionState::Signing),
                 signature,
-                wire_payload
+                wire_payload,
+                now as i64
             ],
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
-    crate::cas::ensure_changed(changed, "signing with matching epoch", "state changed")?;
-    cas_transition(
+    if changed == 0 {
+        let actual = action_state(connection, action_id)?
+            .map(|state| action_state_str(state).to_string())
+            .unwrap_or_else(|| "missing".to_string());
+        return Err(Error::StateConflict {
+            expected: action_state_str(ActionState::Signing).to_string(),
+            actual,
+        });
+    }
+    record_action_event(
         connection,
         action_id,
-        epoch,
-        ActionState::Signing,
+        Some(ActionState::Signing),
         ActionState::Signed,
         None,
         now,

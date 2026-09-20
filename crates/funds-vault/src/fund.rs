@@ -153,8 +153,8 @@ fn map_accept(error: DbError, request_id: &[u8]) -> ErrorCode {
     }
 }
 
-/// 配分を要求する（受付＋予約。送信は署名段階）。
-pub fn request_allocation(
+/// 配分を要求する（受付＋予約＋actionの作成。署名・送信はoutboxのsweep）。
+pub async fn request_allocation(
     session: &VerifiedSession,
     request: &AllocationRequest,
 ) -> Result<FundRequestAccepted, ErrorCode> {
@@ -236,7 +236,48 @@ pub fn request_allocation(
             });
         }
     };
+
+    // 新規受付のときだけ、払出し先（取引口座）を用意してactionを登録する。
+    if state == FundRequestState::Reserved {
+        let (_account_id, _path, _public_key, address) =
+            crate::outbox::provision_trading_account(&session.user_id, now).await?;
+        let nonce = db::tx::update(|connection| {
+            db::repo::actions::allocate_master_nonce(connection, "reserve", now)
+        })
+        .map_err(|error| map_db(error, None))?;
+        let payload = crate::venue::UsdSend {
+            destination: format!("0x{}", hex::encode(address)),
+            amount_micros: request.amount,
+            time: nonce,
+        };
+        let digest = payload.digest()?;
+        let action_id = crate::random::random32().await?;
+        let action = db::repo::actions::NewFundAction {
+            action_id,
+            user_id: session.user_id,
+            client_request_id: Some(request_id.to_vec()),
+            kind: "allocation".to_string(),
+            signer_id: "reserve".to_string(),
+            canonical_action: payload.body(&test_signature_placeholder())?,
+            digest,
+            nonce,
+        };
+        db::tx::update(|connection| {
+            db::repo::actions::insert_fund_action(connection, &action, now)
+        })
+        .map_err(|error| map_accept(error, request_id))?;
+    }
+
     Ok(accepted(request_id, state, now))
+}
+
+/// 受付時点のcanonical action（署名前のため署名欄は空のまま保存する）。
+fn test_signature_placeholder() -> hl_sign::Signature {
+    hl_sign::Signature {
+        r: [0u8; 32],
+        s: [0u8; 32],
+        v: 27,
+    }
 }
 
 /// 出金を要求する（本人署名の検証＋受付＋予約。払出しは署名段階）。

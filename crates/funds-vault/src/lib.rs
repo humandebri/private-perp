@@ -15,6 +15,7 @@ mod clock;
 mod config;
 mod crypto;
 mod fund;
+mod outbox;
 mod random;
 mod venue;
 
@@ -23,6 +24,11 @@ use api_types::error::ErrorCode;
 use candid::Principal;
 
 const MEMORY_ID: u8 = db::memory_id::FUNDS_VAULT_MAIN;
+
+thread_local! {
+    /// 直近のsweep時刻（heartbeatの間隔ゲート）。
+    static LAST_SWEEP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// このビルドのバージョン。デプロイ確認用。
 #[ic_cdk::query]
@@ -77,11 +83,11 @@ fn list_fund_events(
 
 /// 配分を要求する（受付＋予約）。
 #[ic_cdk::update]
-fn request_allocation(
+async fn request_allocation(
     request: api_types::fund::AllocationRequest,
 ) -> Result<api_types::fund::FundRequestAccepted, ErrorCode> {
     let verified = auth::verify_session(&request.session, ic_cdk::api::msg_caller())?;
-    fund::request_allocation(&verified, &request)
+    fund::request_allocation(&verified, &request).await
 }
 
 /// 出金を要求する（本人署名の検証＋受付＋予約）。
@@ -133,6 +139,32 @@ fn test_credit_deposit(
             detail: "event_id must be 32 bytes".to_string(),
         })?;
     fund::test_credit_deposit(&verified, amount, &event_id)
+}
+
+/// 未処理の資金actionを処理する（heartbeatから間隔を空けて呼ぶ）。
+#[ic_cdk::heartbeat]
+async fn heartbeat() {
+    let now = clock::now_ms();
+    let due = LAST_SWEEP.with(|cell| {
+        let previous = cell.get();
+        if now.saturating_sub(previous) < outbox::SWEEP_INTERVAL_MS {
+            false
+        } else {
+            cell.set(now);
+            true
+        }
+    });
+    if !due {
+        return;
+    }
+    let _ = outbox::sweep(now).await;
+}
+
+/// テスト専用のsweep（`test-venue` featureでのみ存在）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+async fn test_sweep_now() -> Result<u32, ErrorCode> {
+    outbox::sweep(clock::now_ms()).await
 }
 
 /// 呼び出し元のPrincipal（診断用。認可の判断は各メソッド内で行う）。
