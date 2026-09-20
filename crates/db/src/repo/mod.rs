@@ -11,6 +11,7 @@ pub mod core_requests;
 pub mod events;
 pub mod funds;
 pub mod guard;
+pub mod hpke;
 pub mod ledger;
 pub mod meta;
 pub mod orders;

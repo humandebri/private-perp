@@ -55,6 +55,41 @@ fn revoke_session(session: SessionHandle) -> Result<(), ErrorCode> {
     auth::revoke_session(&session, ic_cdk::api::msg_caller())
 }
 
+/// HPKEの鍵世代を更新する（controllerのみ）。
+///
+/// 秘密鍵はcanister内のDBに留め、公開鍵のみを配布する（`Plan.md` 16.5）。
+#[ic_cdk::update]
+async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can rotate the HPKE key".to_string(),
+        });
+    }
+    let ikm = crate::random::random32().await?;
+    let (secret, public) = hpke::derive_keypair(&ikm);
+    let secret: [u8; 32] = secret.try_into().map_err(|_| ErrorCode::Internal {
+        code: "unexpected secret length".to_string(),
+    })?;
+    let public: [u8; 32] = public.try_into().map_err(|_| ErrorCode::Internal {
+        code: "unexpected public length".to_string(),
+    })?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| db::repo::hpke::insert_key(connection, &secret, &public, now))
+        .map_err(|error| auth::map_db(error, None))?;
+    Ok(public.to_vec().into())
+}
+
+/// 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
+#[ic_cdk::query]
+fn get_hpke_public_key() -> Result<api_types::Blob, ErrorCode> {
+    let public =
+        db::tx::query(db::repo::hpke::active_public).map_err(|error| auth::map_db(error, None))?;
+    public
+        .map(|public| public.into())
+        .ok_or(ErrorCode::PolicyUnavailable)
+}
+
 /// 本人の取引口座ID（`trading_core` が所有権の確認に使う）。
 #[ic_cdk::query]
 fn get_trading_account(session: SessionHandle) -> Result<Option<api_types::Blob>, ErrorCode> {

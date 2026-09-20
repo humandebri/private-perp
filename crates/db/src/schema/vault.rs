@@ -215,6 +215,17 @@ CREATE TABLE agent_generations (
 );
 ";
 
+/// HPKEの鍵世代（`Plan.md` 16.5）。秘密鍵はcanister外へ出さない。
+const HPKE_KEYS: &str = "
+CREATE TABLE hpke_keys (
+    generation INTEGER PRIMARY KEY CHECK (generation > 0),
+    secret BLOB NOT NULL CHECK (length(secret) = 32),
+    public BLOB NOT NULL CHECK (length(public) = 32),
+    created_at INTEGER NOT NULL,
+    retired_at INTEGER
+);
+";
+
 /// `funds_vault` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -236,5 +247,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 5,
         sql: AGENTS,
+    },
+    Migration {
+        version: 6,
+        sql: HPKE_KEYS,
     },
 ];
