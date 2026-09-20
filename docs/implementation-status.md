@@ -110,3 +110,34 @@
 Canisterの資金安全性・機密性・相関耐性、SNS/guard、controller移管、法務、eligibility発行、配信権限分離、nonce対応を含むCSP、依存ライセンス・NOTICEの再確認、独立監査が必要。Cloudflare配信権限が持つJS変更リスクは残る。
 
 Cloudflare公開、SNSローンチ、controller変更、ウォレット接続、実資金操作は行っていない。
+
+## Phase 1（S2・S3）のCanister実装状況（2026-09-19・ローカル検証）
+
+Canister側は「`version`とDB初期化だけの雛形」ではなくなった。資金層（S2）と一部の統制（S3）が
+動作し、PocketICで検証済みである。ただし**Phase 1のGo/No-Goは未合格**であり、testnet往復は未実施。
+
+### 検証済み（証跡: `docs/phase-1/evidence/P1-001`〜`P1-010`）
+
+| 領域 | 状態 | 証跡 |
+|---|---|---|
+| EOA認証（challenge・セッション・失効・origin束縛） | 実装・検証済み | P1-001〜003 |
+| 資金の参照・受付・予約・複式台帳 | 実装・検証済み | P1-004 |
+| outbox（claim→実tECDSA署名→dispatching永続化→非replicated POST→照合） | 配分で実装・検証済み | P1-006 |
+| 不明な送金の扱い（再送しない・時間経過でも解放しない） | 検証済み（T-205・T-206） | P1-006 |
+| upgradeでの認証・台帳・未解決actionの保存 | 検証済み | P1-010 |
+| HPKE（鍵世代の更新・公開鍵配布・封筒の往復・`aad`束縛） | 実装・検証済み | P1-007 |
+| `control_guard`（SNS限定・7日猶予・内容一致・迂回APIなし） | 実装・検証済み（一致実行は下記制約で保留） | P1-009 |
+| `policy_registry`（fail-closed・停止方向のみ） | 実装・検証済み | P1-010 |
+| `trading_core`（認可境界・注文受付・取消・一覧） | 実装・検証済み | P1-008 |
+
+ローカルの閾値ECDSAはPocketICの**テスト用閾値鍵サブネット**で有効（key id `test_key_1`）。
+PocketIC上の署名往復は約17.9ms（本番subnetの性能値ではない）。
+
+### 未実装・未検証（次段階）
+
+1. `trading_core`の注文パイプライン：Agent承認（`approveAgent`＋HL照合）、署名・送信・`orderStatus`照合、`get_account_snapshot`、SL/TP・全部決済、リスク予約の実配線。
+2. 2Cの残り：入金の本番経路（`/info`の外部イベント照合による計上）、払出し・回収のaction、`unknown`の照合による解消。
+3. 個人データAPIへの封筒適用と応答暗号化、鍵更新中の扱い（T-605）。
+4. `control_guard`の一致する実行：`execute_upgrade`はwasmを引数で受けるため2 MiB超を送れない（実測2,193,336バイト）。チャンク導入かコードレジストリが必要（テストは理由付きで保留）。
+5. 残りの失敗試験（T-401〜T-410等）と、Phase 1完了後の読み取り専用レビュー。
+6. testnet：実HLの受理挙動、署名p50/p95、受付→HL受理、Confidential Subnetの成立性。**未検証**。
