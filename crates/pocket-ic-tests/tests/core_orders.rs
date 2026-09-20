@@ -671,3 +671,146 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
     assert_eq!(listed.items[0].state, api_types::order::OrderState::Open);
     assert_eq!(listed.items[0].hl_oid, Some(12345));
 }
+
+/// 取引所の拒否と応答喪失を正しく分類し、不明な注文は再送しない。
+#[test]
+fn rejected_and_uncertain_orders_are_classified_without_resending() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(123);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+    let meta: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_meta_cache",
+        (
+            "local".to_string(),
+            "hyperliquid".to_string(),
+            UNIVERSE.to_string(),
+        ),
+    )
+    .expect("call");
+    meta.expect("set_meta_cache");
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .expect("call");
+    context.expect("set_market_context");
+
+    let caller = principal(124);
+    let session = open_session(&pic, vault, caller, &secret(186));
+    let credit: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (session.clone(), 1_000_000u64, blob(&[71u8; 32])),
+    )
+    .expect("call");
+    credit.expect("credit");
+    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_allocation",
+        AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(b"outcome-alloc"),
+            amount: 400_000,
+            target: AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .expect("call");
+    allocated.expect("allocation");
+    let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
+        &pic,
+        core,
+        caller,
+        "request_agent_generation",
+        session.clone(),
+    )
+    .expect("call");
+    agent.expect("agent");
+
+    let submit = |request_id: &[u8]| -> Result<SubmitOrderResult, ErrorCode> {
+        update_args(
+            &pic,
+            core,
+            caller,
+            "submit_order",
+            (
+                session.clone(),
+                order_args(&session, request_id, "ETH", "0.05", "2500"),
+            ),
+        )
+        .expect("call")
+    };
+
+    // 取引所の拒否 → rejected（再送しない）。
+    submit(b"outcome-reject").expect("accepted order");
+    let rejected = br#"{"status":"err","response":"insufficient margin"}"#.to_vec();
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        core,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, rejected)),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "list_orders",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    assert_eq!(
+        listed.expect("list").items[0].state,
+        api_types::order::OrderState::Rejected
+    );
+
+    // 応答喪失 → unknown（再送しない）。
+    submit(b"outcome-unknown").expect("accepted order");
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        core,
+        caller,
+        "test_sweep_now",
+        (),
+        Err((3, "outcall failed".to_string())),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "list_orders",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    let listed = listed.expect("list");
+    assert_eq!(listed.items[0].state, api_types::order::OrderState::Unknown);
+
+    // どちらも再送しない。
+    let swept_again: Result<u32, ErrorCode> =
+        update_args(&pic, core, caller, "test_sweep_now", ()).expect("call");
+    assert_eq!(swept_again.expect("sweep"), 0, "自動再送しない");
+}
