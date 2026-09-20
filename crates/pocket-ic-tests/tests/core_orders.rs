@@ -5,7 +5,7 @@ use api_types::auth::{
 };
 use api_types::error::{ErrorCode, NotAllowedCode};
 use api_types::fund::AllocationRequest;
-use api_types::order::{OrderKind, Side, SubmitOrderArgs, SubmitOrderResult};
+use api_types::order::{OrderKind, OrderSummary, Side, SubmitOrderArgs, SubmitOrderResult};
 use api_types::{AccountKind, Blob, Network};
 use candid::Principal;
 use hl_sign::private_perp;
@@ -223,6 +223,40 @@ fn orders_are_accepted_idempotently_after_authorization() {
         ErrorCode::NotAllowed {
             code: NotAllowedCode::AssetNotAllowed
         }
+    );
+
+    // 一覧は新しい順に返り、別principalのセッションでは取得できない。
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "list_orders",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    let listed = listed.expect("list");
+    assert_eq!(
+        listed.items.len(),
+        1,
+        "受付けた1件のみ（競合・拒否は登録されない）"
+    );
+    assert_eq!(listed.items[0].order_id, accepted.order_id);
+    assert_eq!(listed.items[0].market, "ETH");
+    assert_eq!(listed.items[0].state, api_types::order::OrderState::Pending);
+    assert_eq!(listed.items[0].asset_index, 1, "metaの添字から解決");
+    assert!(listed.next_cursor.is_none(), "上限未満ならカーソルなし");
+
+    let denied_list: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        principal(113),
+        "list_orders",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    assert!(
+        matches!(denied_list, Err(ErrorCode::Unauthenticated { .. })),
+        "{denied_list:?}"
     );
 
     // 別principalのセッションでは受付できない。

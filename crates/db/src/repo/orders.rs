@@ -5,7 +5,7 @@
 use crate::error::Error;
 use crate::repo::sql;
 use crate::states::{order_state_from_str, order_state_str};
-use api_types::order::OrderState;
+use api_types::order::{OrderState, OrderSummary};
 use ic_sqlite_vfs::db::UpdateConnection;
 use ic_sqlite_vfs::db::connection::Connection;
 use ic_sqlite_vfs::params;
@@ -197,4 +197,81 @@ pub fn order_by_request(
         ))
     })
     .transpose()
+}
+
+/// 口座ではなく**利用者**単位の注文一覧（新しい順）。`before_rowid` はページング用。
+pub fn list_orders(
+    connection: &Connection,
+    user_id: &[u8; 32],
+    before_rowid: Option<i64>,
+    limit: u32,
+) -> Result<Vec<(i64, OrderSummary)>, Error> {
+    let rows = connection
+        .query_all(
+            "SELECT rowid, order_id, cloid, market, asset_index, side, kind, price, quantity,
+                    filled_quantity, reduce_only, state, cancel_requested, hl_oid, created_at, updated_at
+               FROM orders
+              WHERE user_id = ?1 AND (?2 IS NULL OR rowid < ?2)
+              ORDER BY rowid DESC
+              LIMIT ?3",
+            params![
+                user_id.as_slice(),
+                match before_rowid {
+                    Some(value) => ic_sqlite_vfs::db::Value::Integer(value),
+                    None => ic_sqlite_vfs::db::Value::Null,
+                },
+                limit as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<i64>(0)?,
+                    row.get::<Vec<u8>>(1)?,
+                    row.get::<Vec<u8>>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<i64>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<String>(6)?,
+                    row.get::<Option<String>>(7)?,
+                    row.get::<String>(8)?,
+                    row.get::<String>(9)?,
+                    row.get::<i64>(10)?,
+                    row.get::<String>(11)?,
+                    row.get::<i64>(12)?,
+                    row.get::<Option<i64>>(13)?,
+                    row.get::<i64>(14)?,
+                    row.get::<i64>(15)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+
+    rows.into_iter()
+        .map(|row| {
+            let state =
+                order_state_from_str(&row.11).ok_or(Error::Invariant("unknown order state"))?;
+            Ok((
+                row.0,
+                OrderSummary {
+                    order_id: row.1.into(),
+                    cloid: row.2.into(),
+                    market: row.3,
+                    asset_index: u32::try_from(row.4).map_err(|_| Error::Invariant("bad index"))?,
+                    is_buy: row.5 == "buy",
+                    kind: row.6,
+                    price: row.7,
+                    quantity: row.8,
+                    filled_quantity: row.9,
+                    reduce_only: row.10 != 0,
+                    state,
+                    cancel_requested: row.12 != 0,
+                    hl_oid: row
+                        .13
+                        .map(|value| u64::try_from(value).map_err(|_| Error::Invariant("bad oid")))
+                        .transpose()?,
+                    created_at: u64::try_from(row.14).map_err(|_| Error::Invariant("bad time"))?,
+                    updated_at: u64::try_from(row.15).map_err(|_| Error::Invariant("bad time"))?,
+                },
+            ))
+        })
+        .collect()
 }

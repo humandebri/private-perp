@@ -263,6 +263,53 @@ async fn submit_order(
     })
 }
 
+/// 注文一覧（新しい順）。
+///
+/// **updateである理由**：認可に `funds_vault` へのinter-canister呼び出しが必要だが、
+/// queryでは他Canisterを呼べない。最終設計では、(a) 個人向け読み取りをupdateのまま
+/// 提供する、(b) vaultからセッション写像をcoreへ同期してqueryで返す、のいずれかを選ぶ
+/// （`docs/phase-1/README.md` の残課題）。
+#[ic_cdk::update]
+async fn list_orders(
+    session: SessionHandle,
+    cursor: Option<api_types::Blob>,
+    limit: u32,
+) -> Result<api_types::Paged<api_types::order::OrderSummary>, ErrorCode> {
+    let user_id = authorize(&session).await?;
+    let limit = limit.clamp(1, 100);
+    let now = ic_cdk::api::time() / 1_000_000;
+
+    let before = match cursor.as_ref() {
+        Some(cursor) => {
+            let bytes: [u8; 8] = cursor
+                .as_ref()
+                .try_into()
+                .map_err(|_| bad(BadRequestCode::MalformedPayload, "invalid cursor"))?;
+            Some(i64::from_be_bytes(bytes))
+        }
+        None => None,
+    };
+
+    let rows = db::tx::query(|connection| {
+        db::repo::orders::list_orders(connection, &user_id, before, limit)
+    })
+    .map_err(map_db)?;
+
+    let next_cursor = if rows.len() == limit as usize {
+        rows.last()
+            .map(|(rowid, _)| rowid.to_be_bytes().to_vec().into())
+    } else {
+        None
+    };
+
+    Ok(api_types::Paged {
+        items: rows.into_iter().map(|(_, order)| order).collect(),
+        next_cursor,
+        observed_at: now,
+        revision: 1,
+    })
+}
+
 fn bad(code: BadRequestCode, detail: &str) -> ErrorCode {
     ErrorCode::BadRequest {
         code,

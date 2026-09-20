@@ -169,3 +169,23 @@ pub struct ListQuery {
     pub cursor: Option<Blob>,
     pub limit: u32,
 }
+
+/// 注文一覧の1件（`list_orders`）。
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OrderSummary {
+    pub order_id: Blob,
+    pub cloid: Blob,
+    pub market: String,
+    pub asset_index: u32,
+    pub is_buy: bool,
+    pub kind: String,
+    pub price: Option<String>,
+    pub quantity: String,
+    pub filled_quantity: String,
+    pub reduce_only: bool,
+    pub state: OrderState,
+    pub cancel_requested: bool,
+    pub hl_oid: Option<u64>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
