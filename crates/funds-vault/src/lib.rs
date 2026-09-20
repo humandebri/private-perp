@@ -13,6 +13,7 @@
 mod auth;
 mod clock;
 mod config;
+mod crypto;
 mod fund;
 mod random;
 
@@ -89,6 +90,29 @@ fn request_withdrawal(
 ) -> Result<api_types::fund::FundRequestAccepted, ErrorCode> {
     let verified = auth::verify_session(&request.session, ic_cdk::api::msg_caller())?;
     fund::request_withdrawal(&verified, &request)
+}
+
+/// テスト専用のECDSA往復（`test-venue` featureでのみ存在）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+async fn test_ecdsa_roundtrip(
+    seed: u32,
+    digest: api_types::Blob,
+) -> Result<(api_types::Blob, api_types::Blob), ErrorCode> {
+    let path = crypto::derivation_path(&[b"test", &seed.to_be_bytes()]);
+    let public_key = crypto::public_key(path.clone()).await?;
+    let digest: [u8; 32] = digest
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "digest must be 32 bytes".to_string(),
+        })?;
+    let signature = crypto::sign_with_key(&digest, path, &public_key).await?;
+    Ok((
+        public_key.to_vec().into(),
+        signature.to_bytes65().to_vec().into(),
+    ))
 }
 
 /// テスト専用の入金計上（`test-venue` featureでのみ存在）。

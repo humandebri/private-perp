@@ -24,7 +24,7 @@
 |---|---|---|
 | 2A | 完了 | `crates/db` に vault/core のスキーマ（バージョン付きMigration）、複式台帳（仕訳合計0・符号付きpostings・残高導出）、資金要求の冪等な受付、予約、challenge/セッション、epoch CASを実装。PocketICで `Db::init`→`migrate` がCanister install時に通ることを確認。 |
 | 2B | 一部完了 | EOA challenge・セッション・失効（`auth.rs`）、資金の参照APIと配分・出金の受付＋予約（`fund.rs`）を実装。送信するactionの構築・署名（2C）が未実装 |
-| 2C | 未着手 | ローカルECDSAスパイク、永続outboxの署名・送信、照合（モックベニュー） |
+| 2C | 一部完了 | ECDSAスパイクは**PocketICに鍵が無く実tECDSAを検証できない**と判明（`P1-005`）。テスト署名器でoutbox経路を検証する方針へ切替。署名送信・照合は未着手 |
 | 2D | 未着手 | HPKE要求・応答封筒 |
 | 2E | 未着手 | PocketIC失敗試験（T-1xx／T-2xxのローカル分） |
 | — | 未着手 | outbox/events repo（`fund_actions`・`external_events` の操作）。表は2Aで作成済み |

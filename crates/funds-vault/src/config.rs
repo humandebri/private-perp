@@ -26,6 +26,15 @@ pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024;
 #[allow(dead_code)]
 pub const MAX_PAGE_SIZE: u32 = 100;
 
+/// 閾値ECDSAのkey id。PocketICでの実測で確定する（候補: `test_key_1`／`dfx_test_key`）。
+/// 本番は `key_1`（`pzp6e`）を使う。値は `docs/phase-0/environments.md` に記録する。
+pub const ECDSA_KEY_ID: &str = "test_key_1";
+
+/// Hyperliquidのuser-signed EIP-712に使うchain id（testnet/localは421614）。
+/// 払出しのwire payload構築（署名段階）で使う。
+#[allow(dead_code)]
+pub const HL_USER_SIGNED_CHAIN_ID: u64 = 421_614;
+
 /// 現在のnetwork。ローカル・testnet・mainnetを混同しないための識別子。
 #[allow(dead_code)]
 pub const NETWORK: Network = Network::Local;
