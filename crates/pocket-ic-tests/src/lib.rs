@@ -250,3 +250,9 @@ where
         .map_err(|error| format!("reject {method}: {error:?}"))?;
     candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))
 }
+
+/// Canisterをアップグレードする（`post_upgrade`の検証に使う）。
+pub fn upgrade(pic: &PocketIc, canister: Principal, file: &str, init_arg: Vec<u8>) {
+    pic.upgrade_canister(canister, wasm(file), init_arg, None)
+        .unwrap_or_else(|error| panic!("upgrade {file}: {error:?}"));
+}
