@@ -15,6 +15,7 @@ mod clock;
 mod config;
 mod crypto;
 mod fund;
+mod hpke;
 mod outbox;
 mod random;
 mod venue;
