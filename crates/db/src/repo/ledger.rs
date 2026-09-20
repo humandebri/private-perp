@@ -545,3 +545,26 @@ pub fn ensure_custody_account(
         .map_err(sql)?;
     custody_account(connection, user_id, kind)?.ok_or(Error::NotFound)
 }
+
+/// 導出アドレスから利用者を引く（入金の宛先解決）。
+pub fn custody_account_by_address(
+    connection: &Connection,
+    address: &[u8; 20],
+) -> Result<Option<([u8; 32], String)>, Error> {
+    let row = connection
+        .query_optional(
+            "SELECT user_id, kind FROM custody_accounts WHERE master_address = ?1 LIMIT 1",
+            params![address.as_slice()],
+            |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<String>(1)?)),
+        )
+        .map_err(sql)?;
+    row.map(|(user_id, kind)| {
+        Ok((
+            user_id
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte user id"))?,
+            kind,
+        ))
+    })
+    .transpose()
+}

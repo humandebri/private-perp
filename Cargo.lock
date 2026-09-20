@@ -721,6 +721,7 @@ dependencies = [
  "hpke",
  "ic-cdk",
  "ic-cdk-management-canister",
+ "ic-sqlite-vfs",
  "serde",
  "serde_json",
 ]

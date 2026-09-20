@@ -14,6 +14,7 @@ mod auth;
 mod clock;
 mod config;
 mod crypto;
+mod deposits;
 mod fund;
 mod hpke;
 mod outbox;
@@ -402,6 +403,40 @@ async fn test_sweep_now() -> Result<u32, ErrorCode> {
 #[ic_cdk::query]
 fn caller_principal() -> Principal {
     ic_cdk::api::msg_caller()
+}
+
+/// 取引所の入金を本人へ計上する（controllerのみ。宛先が導出口座の場合）。
+#[ic_cdk::update]
+fn credit_venue_deposit(
+    tx_hash: api_types::Blob,
+    amount: u64,
+    address: api_types::Blob,
+    asset: String,
+) -> Result<bool, ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can credit venue deposits".to_string(),
+        });
+    }
+    if tx_hash.as_ref().is_empty() {
+        return Err(ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "tx_hash must not be empty".to_string(),
+        });
+    }
+    let address: [u8; 20] = address
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "address must be 20 bytes".to_string(),
+        })?;
+    let now = deposits::now_ms();
+    db::tx::update(|connection| {
+        deposits::credit(connection, tx_hash.as_ref(), amount, &address, &asset, now)
+    })
+    .map_err(|error| auth::map_db(error, None))
 }
 
 fn init_db() {

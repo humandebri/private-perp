@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 api-types = { path = "../api-types" }
 candid.workspace = true
 db = { path = "../db" }
+ic-sqlite-vfs.workspace = true
 hl-sign = { path = "../hl-sign" }
 hl-types = { path = "../hl-types" }
 hpke.workspace = true
