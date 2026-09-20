@@ -1,7 +1,7 @@
 //! `control_guard` の7日猶予と迂回拒否の試験（`docs/phase-0/threat-test-matrix.md` T-501〜T-506）。
 
 use api_types::error::{ErrorCode, NotAllowedCode};
-use api_types::guard::{ScheduleUpgradeArgs, UpgradeRequest, UpgradeStatus};
+use api_types::guard::{ScheduleUpgradeArgs, UpgradeRequest, UpgradeState, UpgradeStatus};
 use candid::Principal;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
@@ -101,6 +101,7 @@ fn only_the_sns_principal_can_schedule() {
     schedule(&pic, guard, sns, target, wasm_hash).expect("schedule");
     let scheduled = status(&pic, guard).scheduled.expect("scheduled");
     assert_eq!(scheduled.executable_at - scheduled.scheduled_at, 7 * DAY_MS);
+    assert_eq!(scheduled.state, UpgradeState::Pending, "猶予前はpending");
 }
 
 #[test]
@@ -148,7 +149,11 @@ fn execution_is_blocked_until_seven_days_and_on_content_mismatch() {
     );
 
     // 予約は保持されたまま（一致する実行は下の wasm サイズ制約のため保留）。
-    assert!(status(&pic, guard).scheduled.is_some());
+    let scheduled = status(&pic, guard).scheduled.expect("scheduled");
+    assert!(
+        scheduled.state == UpgradeState::Executable,
+        "猶予の経過後はexecutableとして返す（保存状態は書き換えない）"
+    );
 }
 
 /// 一致する予約の実行。**ingress上限（2,097,152バイト）のため未検証**。
