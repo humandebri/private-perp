@@ -37,6 +37,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_bytes = "=0.11.19"
 serde_json = "=1.0.151"
 sha2 = "=0.11.0"
+rand_core = "=0.10.1"
 hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
 sha3 = "=0.12.0"
 # `pocket-ic 16.0.0` が `thiserror =2.0.18` を要求するため、同一メジャー内で

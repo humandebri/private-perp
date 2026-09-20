@@ -6,6 +6,8 @@
 //!
 //! 本クレートはテスト専用であり、Canisterへは含めない。
 
+pub mod fixed_rng;
+
 use candid::{CandidType, Principal};
 use pocket_ic::common::rest::{
     CanisterHttpHeader, CanisterHttpReject, CanisterHttpReply, CanisterHttpResponse,
