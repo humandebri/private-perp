@@ -1,0 +1,439 @@
+//! 複式台帳。`docs/phase-0/money-and-units.md` 4節、`state-machines.md` 3節。
+//!
+//! - 仕訳（journal）は借方と貸方の合計が0になる符号付きpostingsで表す
+//!   （正=借方、負=貸方）。
+//! - 残高はpostingsから導出し、キャッシュ残高を持たない。
+//! - 同じjournal内で同じ勘定を2回使わない（`PRIMARY KEY (journal_id, account_id)`）。
+//! - 金額は `i64` マイクロUSDCで、checked演算によりオーバーフローを拒否する。
+
+use crate::error::Error;
+use crate::repo::{amount_u64, sql};
+use ic_sqlite_vfs::db::UpdateConnection;
+use ic_sqlite_vfs::db::connection::Connection;
+use ic_sqlite_vfs::params;
+
+/// サービスが保有する資産の勘定。
+pub const CASH_RESERVE: &str = "cash_reserve";
+pub const CASH_TRADING: &str = "cash_trading";
+pub const CASH_IN_TRANSIT: &str = "cash_in_transit";
+/// 外部（入金元・出金先）を表すsuspense勘定。
+pub const EXTERNAL: &str = "external";
+/// 手数料収益。
+pub const FEE_INCOME: &str = "fee_income";
+
+/// ユーザーの未配分残高（負債）。
+pub fn user_reserve(user_id: &[u8; 32]) -> String {
+    format!("user_reserve:{}", hex::encode(user_id))
+}
+
+/// ユーザーの移動中の額（負債）。
+pub fn user_in_transit(user_id: &[u8; 32]) -> String {
+    format!("user_in_transit:{}", hex::encode(user_id))
+}
+
+/// ユーザーの出金予約額（負債）。
+pub fn user_reserved_for_withdrawal(user_id: &[u8; 32]) -> String {
+    format!("user_reserved_for_withdrawal:{}", hex::encode(user_id))
+}
+
+/// ユーザー別取引口座のequity（負債）。
+pub fn user_trading(account_id: &[u8; 32]) -> String {
+    format!("user_trading:{}", hex::encode(account_id))
+}
+
+/// 勘定の種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountKind {
+    Asset,
+    Liability,
+    Suspense,
+    Income,
+}
+
+impl AccountKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asset => "asset",
+            Self::Liability => "liability",
+            Self::Suspense => "suspense",
+            Self::Income => "income",
+        }
+    }
+}
+
+/// 仕訳の1行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Posting {
+    pub account: String,
+    pub kind: AccountKind,
+    pub amount: i64,
+}
+
+/// 勘定を取得（無ければ作成）する。
+fn account_id(connection: &Connection, name: &str, kind: AccountKind) -> Result<i64, Error> {
+    if let Some(existing) = connection
+        .query_optional_scalar::<i64>(
+            "SELECT account_id FROM accounts WHERE name = ?1",
+            params![name],
+        )
+        .map_err(sql)?
+    {
+        return Ok(existing);
+    }
+    connection
+        .execute(
+            "INSERT INTO accounts (name, kind, asset) VALUES (?1, ?2, 'usdc')",
+            params![name, kind.as_str()],
+        )
+        .map_err(sql)?;
+    connection
+        .query_optional_scalar::<i64>(
+            "SELECT account_id FROM accounts WHERE name = ?1",
+            params![name],
+        )
+        .map_err(sql)?
+        .ok_or(Error::NotFound)
+}
+
+/// 仕訳を1件投稿する。合計が0でなければ拒否する。
+///
+/// `external_event_id` は外部イベントの安定IDで、同じIDの二重計上を
+/// UNIQUE制約で拒否する（重複時は `Conflict`）。
+pub fn post_journal(
+    connection: &mut UpdateConnection<'_>,
+    kind: &str,
+    at: u64,
+    external_event_id: Option<&[u8; 32]>,
+    request_id: Option<&[u8]>,
+    postings: &[Posting],
+) -> Result<i64, Error> {
+    if postings.is_empty() {
+        return Err(Error::Invariant("empty journal"));
+    }
+
+    let mut total: i64 = 0;
+    for posting in postings {
+        if posting.amount == 0 {
+            return Err(Error::Invariant("zero posting"));
+        }
+        total = total.checked_add(posting.amount).ok_or(Error::Overflow)?;
+    }
+    if total != 0 {
+        return Err(Error::Invariant("journal is not balanced"));
+    }
+
+    let external_event_value = match external_event_id {
+        Some(value) => ic_sqlite_vfs::db::Value::Blob(value),
+        None => ic_sqlite_vfs::db::Value::Null,
+    };
+    let request_value = match request_id {
+        Some(value) => ic_sqlite_vfs::db::Value::Blob(value),
+        None => ic_sqlite_vfs::db::Value::Null,
+    };
+    connection
+        .execute(
+            "INSERT INTO journals (kind, external_event_id, request_id, memo, at)
+             VALUES (?1, ?2, ?3, NULL, ?4)",
+            params![kind, external_event_value, request_value, at as i64],
+        )
+        .map_err(sql)?;
+
+    let journal_id = connection
+        .query_scalar::<i64>("SELECT last_insert_rowid()", &[])
+        .map_err(sql)?;
+
+    for posting in postings {
+        let account = account_id(connection, &posting.account, posting.kind)?;
+        connection
+            .execute(
+                "INSERT INTO postings (journal_id, account_id, amount) VALUES (?1, ?2, ?3)",
+                params![journal_id, account, posting.amount],
+            )
+            .map_err(sql)?;
+    }
+
+    Ok(journal_id)
+}
+
+/// 勘定の符号付き残高（正=借方）。
+pub fn signed_balance(connection: &Connection, account: &str) -> Result<i64, Error> {
+    connection
+        .query_scalar::<i64>(
+            "SELECT COALESCE(SUM(p.amount), 0)
+               FROM postings p
+               JOIN accounts a ON a.account_id = p.account_id
+              WHERE a.name = ?1",
+            params![account],
+        )
+        .map_err(sql)
+}
+
+/// 負債勘定の残高（正=負っている額）。
+fn liability_balance(connection: &Connection, account: &str) -> Result<u64, Error> {
+    let signed = signed_balance(connection, account)?;
+    amount_u64(
+        signed.checked_neg().ok_or(Error::Overflow)?,
+        "liability balance is negative",
+    )
+}
+
+/// 本人の残高区分（`docs/phase-0/api-contract.md` 2.2の `FundStatus`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserBalances {
+    pub reserve_unallocated: u64,
+    pub in_transit: u64,
+    pub reserved_for_withdrawal: u64,
+    pub trading_equity: u64,
+    pub withdrawable: u64,
+}
+
+/// 本人の残高区分を導出する。二重計上しない。
+pub fn user_balances(connection: &Connection, user_id: &[u8; 32]) -> Result<UserBalances, Error> {
+    let reserve_unallocated = liability_balance(connection, &user_reserve(user_id))?;
+    let in_transit = liability_balance(connection, &user_in_transit(user_id))?;
+    let reserved_for_withdrawal =
+        liability_balance(connection, &user_reserved_for_withdrawal(user_id))?;
+
+    let mut trading_equity: u64 = 0;
+    let account_ids = connection
+        .query_all(
+            "SELECT account_id FROM custody_accounts WHERE user_id = ?1 AND kind = 'trading'",
+            params![user_id.as_slice()],
+            |row| row.get::<Vec<u8>>(0),
+        )
+        .map_err(sql)?;
+    for account in account_ids {
+        let account_id: [u8; 32] = account
+            .try_into()
+            .map_err(|_| Error::Invariant("expected a 32-byte account id"))?;
+        trading_equity = trading_equity
+            .checked_add(liability_balance(connection, &user_trading(&account_id))?)
+            .ok_or(Error::Overflow)?;
+    }
+
+    let withdrawable = reserve_unallocated
+        .checked_sub(reserved_for_withdrawal)
+        .ok_or(Error::Invariant(
+            "withdrawal reservation exceeds the balance",
+        ))?;
+
+    Ok(UserBalances {
+        reserve_unallocated,
+        in_transit,
+        reserved_for_withdrawal,
+        trading_equity,
+        withdrawable,
+    })
+}
+
+/// 配分（予約→取引口座）の開始仕訳。
+pub fn allocation_start(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    amount: u64,
+    at: u64,
+    request_id: &[u8],
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "allocation_start",
+        at,
+        None,
+        Some(request_id),
+        &[
+            Posting {
+                account: CASH_IN_TRANSIT.to_string(),
+                kind: AccountKind::Asset,
+                amount,
+            },
+            Posting {
+                account: CASH_RESERVE.to_string(),
+                kind: AccountKind::Asset,
+                amount: -amount,
+            },
+            Posting {
+                account: user_reserve(user_id),
+                kind: AccountKind::Liability,
+                amount,
+            },
+            Posting {
+                account: user_in_transit(user_id),
+                kind: AccountKind::Liability,
+                amount: -amount,
+            },
+        ],
+    )
+}
+
+/// 配分の確定仕訳（取引口座への着金）。
+pub fn allocation_confirm(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    trading_account_id: &[u8; 32],
+    amount: u64,
+    at: u64,
+    external_event_id: &[u8; 32],
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "allocation_confirm",
+        at,
+        Some(external_event_id),
+        None,
+        &[
+            Posting {
+                account: CASH_TRADING.to_string(),
+                kind: AccountKind::Asset,
+                amount,
+            },
+            Posting {
+                account: CASH_IN_TRANSIT.to_string(),
+                kind: AccountKind::Asset,
+                amount: -amount,
+            },
+            Posting {
+                account: user_in_transit(user_id),
+                kind: AccountKind::Liability,
+                amount,
+            },
+            Posting {
+                account: user_trading(trading_account_id),
+                kind: AccountKind::Liability,
+                amount: -amount,
+            },
+        ],
+    )
+}
+
+/// 回収（取引口座→共通保管）の確定仕訳。
+pub fn recovery_confirm(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    trading_account_id: &[u8; 32],
+    amount: u64,
+    at: u64,
+    external_event_id: &[u8; 32],
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "recovery_confirm",
+        at,
+        Some(external_event_id),
+        None,
+        &[
+            Posting {
+                account: CASH_RESERVE.to_string(),
+                kind: AccountKind::Asset,
+                amount,
+            },
+            Posting {
+                account: CASH_TRADING.to_string(),
+                kind: AccountKind::Asset,
+                amount: -amount,
+            },
+            Posting {
+                account: user_reserve(user_id),
+                kind: AccountKind::Liability,
+                amount: -amount,
+            },
+            Posting {
+                account: user_trading(trading_account_id),
+                kind: AccountKind::Liability,
+                amount,
+            },
+        ],
+    )
+}
+
+/// 入金の計上仕訳（外部→共通保管、本人への与信）。
+pub fn deposit_confirmed(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    amount: u64,
+    at: u64,
+    external_event_id: &[u8; 32],
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "deposit_confirmed",
+        at,
+        Some(external_event_id),
+        None,
+        &[
+            Posting {
+                account: CASH_RESERVE.to_string(),
+                kind: AccountKind::Asset,
+                amount,
+            },
+            Posting {
+                account: user_reserve(user_id),
+                kind: AccountKind::Liability,
+                amount: -amount,
+            },
+        ],
+    )
+}
+
+/// 出金予約の仕訳（未配分→出金予約）。
+pub fn withdrawal_reserve(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    amount: u64,
+    at: u64,
+    request_id: &[u8],
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "withdrawal_reserve",
+        at,
+        None,
+        Some(request_id),
+        &[
+            Posting {
+                account: user_reserve(user_id),
+                kind: AccountKind::Liability,
+                amount,
+            },
+            Posting {
+                account: user_reserved_for_withdrawal(user_id),
+                kind: AccountKind::Liability,
+                amount: -amount,
+            },
+        ],
+    )
+}
+
+/// 払出しの確定仕訳（出金予約→外部）。
+pub fn payout_settled(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    amount: u64,
+    at: u64,
+    external_event_id: &[u8; 32],
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "payout_settled",
+        at,
+        Some(external_event_id),
+        None,
+        &[
+            Posting {
+                account: user_reserved_for_withdrawal(user_id),
+                kind: AccountKind::Liability,
+                amount,
+            },
+            Posting {
+                account: CASH_RESERVE.to_string(),
+                kind: AccountKind::Asset,
+                amount: -amount,
+            },
+        ],
+    )
+}

@@ -20,7 +20,7 @@ fn version() -> String {
 }
 
 fn init_db() {
-    if let Err(error) = db::init(MEMORY_ID) {
+    if let Err(error) = db::init(MEMORY_ID, &[]) {
         ic_cdk::trap(format!("db init failed: {error}"));
     }
 }

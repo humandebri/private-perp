@@ -7,6 +7,8 @@ publish.workspace = true
 description = "ic-sqlite-vfs の同期ラッパ（非async）"
 
 [dependencies]
+api-types = { path = "../api-types" }
+hex.workspace = true
 
 # `ic-sqlite-vfs` は wasm32 用のvendored SQLiteアーカイブをリンクするため、
 # ホストビルドでは依存させない（Implementation.md 3.2、4.1）。
