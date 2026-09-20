@@ -13,7 +13,9 @@ pub mod eip712;
 pub mod error;
 pub mod hash;
 pub mod keccak;
+pub mod private_perp;
 pub mod signature;
+pub mod typed_data;
 pub mod user_signed;
 
 pub use eip712::Domain;
@@ -24,3 +26,4 @@ pub use signature::{
     Signature, address_from_public_key, address_from_secret, public_key_compressed,
     recover_address, recover_v, sign_digest_for_tests,
 };
+pub use typed_data::{TypedField, TypedKind, TypedValue, digest_with_domain, sign_with_domain};
