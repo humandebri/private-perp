@@ -444,3 +444,111 @@ fn a_withdrawal_is_dispatched_from_the_reserve() {
         0
     );
 }
+
+#[test]
+fn payout_rejection_and_unknown_are_handled() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(46);
+    let key = secret(137);
+    let session = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 17);
+    let provisioned: Result<Vec<u8>, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .expect("call");
+    provisioned.expect("provisioned");
+
+    let eoa = address_from_secret(&key).expect("address");
+    let withdraw = |request_id: &[u8], nonce: u64| -> Result<FundRequestAccepted, ErrorCode> {
+        let intent = private_perp::Withdrawal {
+            eoa,
+            amount: 250_000,
+            asset: "usdc".to_string(),
+            destination: format!("0x{}", hex::encode(eoa)),
+            network: "local".to_string(),
+            nonce,
+            expires_at: 1_700_000_600_000u64,
+            canister: vault.as_slice().to_vec(),
+        };
+        let signature = intent.sign_for_tests(&key).expect("sign");
+        update(
+            &pic,
+            vault,
+            caller,
+            "request_withdrawal",
+            WithdrawalRequest {
+                session: session.clone(),
+                client_request_id: blob(request_id),
+                amount: 250_000,
+                asset: AssetId::Usdc,
+                destination: Destination::AuthenticatedEoaHlAccount,
+                network: Network::Local,
+                nonce,
+                expires_at: 1_700_000_600_000u64,
+                intent_signature: signature.to_bytes65().to_vec().into(),
+            },
+        )
+        .expect("call")
+    };
+
+    // 取引所が拒否 → 予約は解放され、資金は元に戻る。
+    withdraw(b"payout-reject", 1).expect("accepted");
+    let rejected = br#"{"status":"err","response":"insufficient margin"}"#.to_vec();
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, rejected)),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+    let after = status(&pic, vault, caller, &session);
+    assert_eq!(
+        after.reserve_unallocated, 1_000_000,
+        "拒否なら資金は動かない"
+    );
+    assert_eq!(after.reserved_for_withdrawal, 0, "予約と台帳の拘束が解ける");
+
+    let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    assert_eq!(
+        events.expect("events").items[0].state,
+        FundRequestState::Rejected
+    );
+
+    // 応答喪失 → unknownとして保持（再送しない）。
+    withdraw(b"payout-unknown", 2).expect("accepted");
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Err((3, "outcall failed".to_string())),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+    let after = status(&pic, vault, caller, &session);
+    assert_eq!(
+        after.reserved_for_withdrawal, 250_000,
+        "不明な払出しは拘束を保持"
+    );
+    assert_eq!(after.unknowns.len(), 1);
+
+    let swept_again: Result<u32, ErrorCode> =
+        update_args(&pic, vault, caller, "test_sweep_now", ()).expect("call");
+    assert_eq!(swept_again.expect("sweep"), 0, "自動再送しない");
+}
