@@ -148,3 +148,19 @@ pub fn mark_executed(
     }
     Ok(())
 }
+
+/// 実行権を取得する（`install_code`の**前**に呼ぶ。単一の実行者のみtrue）。
+pub fn claim_upgrade(
+    connection: &mut UpdateConnection<'_>,
+    upgrade_id: i64,
+) -> Result<bool, Error> {
+    connection
+        .execute(
+            "UPDATE upgrades SET state = 'executable'
+              WHERE upgrade_id = ?1 AND state IN ('pending', 'executable')",
+            params![upgrade_id],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    Ok(changed > 0)
+}

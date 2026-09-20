@@ -187,6 +187,16 @@ async fn execute_upgrade(
         return Err(not_allowed(NotAllowedCode::UpgradeContentMismatch));
     }
 
+    // `install_code`はawaitするため、その前に実行権をCASで確定する（同時呼び出しで
+    // 二重にインストールしない）。
+    let claimed = db::tx::update(|connection| {
+        db::repo::guard::claim_upgrade(connection, reserved.upgrade_id)
+    })
+    .map_err(map_db)?;
+    if !claimed {
+        return Err(not_allowed(NotAllowedCode::UpgradeAlreadyExecuted));
+    }
+
     install_code(&InstallCodeArgs {
         mode: CanisterInstallMode::Upgrade(None),
         canister_id: target,

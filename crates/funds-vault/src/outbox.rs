@@ -112,6 +112,24 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
         time: action.nonce,
     };
     let digest = payload.digest()?;
+    // 受付時に記録したダイジェストと一致しないpayloadは署名しない（保存した監査証跡と
+    // 実署名が乖離するのを防ぐ）。導出経路や設定が変わった場合はここで恒久エラーになる。
+    if digest != action.digest {
+        db::tx::update(|connection| {
+            db::repo::events::insert_audit(
+                connection,
+                "system",
+                "action_digest_mismatch",
+                None,
+                Some("aborted"),
+                now,
+            )
+        })
+        .map_err(|error| map_db(error, None))?;
+        return Err(ErrorCode::Internal {
+            code: "action digest mismatch".to_string(),
+        });
+    }
     let signature = crypto::sign_with_key(&digest, path, &public_key).await?;
     let wire_payload = payload.body(&signature)?;
 
