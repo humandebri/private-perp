@@ -408,6 +408,36 @@ pub fn withdrawal_reserve(
     )
 }
 
+/// 出金予約の取消（棄却時に予約を戻す）。
+pub fn withdrawal_release(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    amount: u64,
+    at: u64,
+    request_id: &[u8],
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "withdrawal_release",
+        at,
+        None,
+        Some(request_id),
+        &[
+            Posting {
+                account: user_reserve(user_id),
+                kind: AccountKind::Liability,
+                amount: -amount,
+            },
+            Posting {
+                account: user_reserved_for_withdrawal(user_id),
+                kind: AccountKind::Liability,
+                amount,
+            },
+        ],
+    )
+}
+
 /// 払出しの確定仕訳（出金予約→外部）。
 pub fn payout_settled(
     connection: &mut UpdateConnection<'_>,

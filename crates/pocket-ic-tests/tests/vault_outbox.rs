@@ -7,8 +7,11 @@ use api_types::auth::{
     ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
 };
 use api_types::error::ErrorCode;
-use api_types::fund::{AllocationRequest, FundRequestAccepted, FundRequestState, FundStatus};
-use api_types::{AccountKind, Blob, Network};
+use api_types::fund::{
+    AllocationRequest, Destination, FundRequestAccepted, FundRequestState, FundStatus,
+    WithdrawalRequest,
+};
+use api_types::{AccountKind, AssetId, Blob, Network};
 use candid::Principal;
 use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
@@ -359,5 +362,85 @@ fn a_tampered_digest_is_never_signed() {
     assert!(
         after.unknowns.is_empty(),
         "送信していないのでunknownではない"
+    );
+}
+
+#[test]
+fn a_withdrawal_is_dispatched_from_the_reserve() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(45);
+    let key = secret(136);
+    let session = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 16);
+    let provisioned: Result<Vec<u8>, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .expect("call");
+    provisioned.expect("provisioned");
+
+    let eoa = address_from_secret(&key).expect("address");
+    let expires_at = 1_700_000_600_000u64;
+    let intent = private_perp::Withdrawal {
+        eoa,
+        amount: 300_000,
+        asset: "usdc".to_string(),
+        destination: format!("0x{}", hex::encode(eoa)),
+        network: "local".to_string(),
+        nonce: 1,
+        expires_at,
+        canister: vault.as_slice().to_vec(),
+    };
+    let signature = intent.sign_for_tests(&key).expect("sign");
+    let accepted: Result<FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_withdrawal",
+        WithdrawalRequest {
+            session: session.clone(),
+            client_request_id: blob(b"payout-1"),
+            amount: 300_000,
+            asset: AssetId::Usdc,
+            destination: Destination::AuthenticatedEoaHlAccount,
+            network: Network::Local,
+            nonce: 1,
+            expires_at,
+            intent_signature: signature.to_bytes65().to_vec().into(),
+        },
+    )
+    .expect("call");
+    accepted.expect("withdrawal accepted");
+
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+
+    let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    assert_eq!(
+        events.expect("events").items[0].state,
+        FundRequestState::Settled
+    );
+    assert_eq!(
+        status(&pic, vault, caller, &session).reserved_for_withdrawal,
+        0
     );
 }

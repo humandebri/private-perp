@@ -411,6 +411,14 @@ async fn dispatch_withdrawal(
         Ok((ExchangeOutcome::Rejected { message }, _response)) => {
             db::tx::update(|connection| {
                 db::repo::funds::release_reservation(connection, &action.user_id, request_id, now)?;
+                // 台帳の予約も戻す（受付時の`withdrawal_reserve`の逆仕訳）。
+                db::repo::ledger::withdrawal_release(
+                    connection,
+                    &action.user_id,
+                    request.amount,
+                    now,
+                    request_id,
+                )?;
                 db::repo::funds::set_request_state(
                     connection,
                     &action.user_id,

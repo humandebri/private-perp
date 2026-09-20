@@ -326,11 +326,11 @@ async fn request_allocation(
 
 /// 出金を要求する（本人署名の検証＋受付＋予約）。
 #[ic_cdk::update]
-fn request_withdrawal(
+async fn request_withdrawal(
     request: api_types::fund::WithdrawalRequest,
 ) -> Result<api_types::fund::FundRequestAccepted, ErrorCode> {
     let verified = auth::verify_session(&request.session, ic_cdk::api::msg_caller())?;
-    fund::request_withdrawal(&verified, &request)
+    fund::request_withdrawal(&verified, &request).await
 }
 
 /// テスト専用のECDSA往復（`test-venue` featureでのみ存在）。

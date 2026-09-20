@@ -281,7 +281,7 @@ fn test_signature_placeholder() -> hl_sign::Signature {
 }
 
 /// 出金を要求する（本人署名の検証＋受付＋予約。払出しは署名段階）。
-pub fn request_withdrawal(
+pub async fn request_withdrawal(
     session: &VerifiedSession,
     request: &WithdrawalRequest,
 ) -> Result<FundRequestAccepted, ErrorCode> {
@@ -381,6 +381,9 @@ pub fn request_withdrawal(
         request_id,
     ]);
 
+    // 払出し先は認証済みEOAのHL口座（`0x`＋アドレス）。
+    let destination_address = format!("0x{}", hex::encode(eoa));
+
     let outcome = db::tx::update(|connection| {
         let accepted = db::repo::funds::accept_fund_request(
             connection,
@@ -391,7 +394,7 @@ pub fn request_withdrawal(
                 kind: RequestKind::Withdrawal,
                 account_id: None,
                 amount: request.amount,
-                destination: Some("authenticated_eoa"),
+                destination: Some(destination_address.as_str()),
             },
             now,
         )?;
@@ -404,6 +407,14 @@ pub fn request_withdrawal(
                     &db::repo::ledger::user_reserve(&session.user_id),
                     request.amount,
                     now,
+                )?;
+                // 複式台帳でも予約へ移す（`user_reserve`→`user_reserved_for_withdrawal`）。
+                db::repo::ledger::withdrawal_reserve(
+                    connection,
+                    &session.user_id,
+                    request.amount,
+                    now,
+                    request_id,
                 )?;
                 db::repo::funds::set_request_state(
                     connection,
@@ -436,6 +447,35 @@ pub fn request_withdrawal(
             });
         }
     };
+    // 新規受付のときだけ、準備口座からの払出しactionを登録する（sweepが署名・送信する）。
+    if state == FundRequestState::Reserved {
+        let nonce = db::tx::update(|connection| {
+            db::repo::actions::allocate_master_nonce(connection, "reserve", now)
+        })
+        .map_err(|error| map_db(error, None))?;
+        let payload = crate::venue::UsdSend {
+            destination: destination_address.clone(),
+            amount_micros: request.amount,
+            time: nonce,
+        };
+        let digest = payload.digest()?;
+        let action_id = crate::random::random32().await?;
+        let action = db::repo::actions::NewFundAction {
+            action_id,
+            user_id: session.user_id,
+            client_request_id: Some(request_id.to_vec()),
+            kind: "withdrawal".to_string(),
+            signer_id: "reserve".to_string(),
+            canonical_action: payload.body(&test_signature_placeholder())?,
+            digest,
+            nonce,
+        };
+        db::tx::update(|connection| {
+            db::repo::actions::insert_fund_action(connection, &action, now)
+        })
+        .map_err(|error| map_accept(error, request_id))?;
+    }
+
     Ok(accepted(request_id, state, now))
 }
 
