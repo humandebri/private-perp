@@ -94,6 +94,30 @@ fn get_policy_principal() -> Option<Principal> {
         .map(|bytes| Principal::from_slice(&bytes))
 }
 
+/// 政策が停止中なら拒否する（未設定時は判定しない。本番では設定必須）。
+async fn require_not_stopped() -> Result<(), ErrorCode> {
+    let bytes = db::tx::query(db::repo::core_config::policy_principal).map_err(map_db)?;
+    let Some(bytes) = bytes else {
+        return Ok(());
+    };
+    let policy = Principal::from_slice(&bytes);
+    let response = Call::bounded_wait(policy, "get_stop_status")
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: format!("policy get_stop_status: {error}"),
+        })?;
+    // `get_stop_status` は`Result`ではなく`StopStatus`を返す。
+    let status: api_types::policy::StopStatus = response
+        .candid()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    if status.stopped {
+        return Err(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::OperationNotAvailable,
+        });
+    }
+    Ok(())
+}
+
 /// vaultのprincipal（診断用）。
 #[ic_cdk::query]
 fn get_vault_principal() -> Option<Principal> {
@@ -178,6 +202,9 @@ async fn submit_order(
     let now = ic_cdk::api::time() / 1_000_000;
 
     // 銘柄は初期allowlistのみ。asset indexはmetaから解決する（固定値を埋め込まない）。
+    // 緊急停止中は新規受付を行わない（fail-closed）。
+    require_not_stopped().await?;
+
     let market = args.market.to_uppercase();
     if market != "BTC" && market != "ETH" {
         return Err(ErrorCode::NotAllowed {

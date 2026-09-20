@@ -76,10 +76,13 @@ pub fn set_policy_principal(
 
 /// 政策Canisterのprincipal（未設定はNone）。
 pub fn policy_principal(connection: &Connection) -> Result<Option<Vec<u8>>, Error> {
-    connection
-        .query_optional_scalar::<Vec<u8>>(
+    // NULLを取り得る列は`Option<T>`で読む（`Vec<u8>`固定だとNULLで型エラーになる）。
+    let row = connection
+        .query_optional(
             "SELECT policy_principal FROM core_config WHERE singleton = 1",
             params![],
+            |row| row.get::<Option<Vec<u8>>>(0),
         )
-        .map_err(sql)
+        .map_err(sql)?;
+    Ok(row.flatten())
 }
