@@ -448,3 +448,57 @@ pub fn record_action_event(
         )
         .map_err(sql)
 }
+
+/// 未解決（送信中・結果不明）のaction。出金可能額へ算入しない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedActionRow {
+    pub action_id: [u8; 32],
+    pub kind: api_types::fund::FundActionKind,
+    pub state: ActionState,
+    pub since: u64,
+}
+
+/// 本人の未解決actionを古い順に返す。
+pub fn unresolved_actions(
+    connection: &Connection,
+    user_id: &[u8; 32],
+) -> Result<Vec<UnresolvedActionRow>, Error> {
+    let raw = connection
+        .query_all(
+            "SELECT action_id, kind, dispatch_state, created_at
+               FROM fund_actions
+              WHERE user_id = ?1 AND dispatch_state IN ('dispatching', 'unknown')
+              ORDER BY created_at",
+            params![user_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<i64>(3)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+
+    raw.into_iter()
+        .map(|raw| {
+            Ok(UnresolvedActionRow {
+                action_id: raw
+                    .0
+                    .try_into()
+                    .map_err(|_| Error::Invariant("expected a 32-byte action id"))?,
+                kind: match raw.1.as_str() {
+                    "recovery" => api_types::fund::FundActionKind::Recovery,
+                    "withdrawal" => api_types::fund::FundActionKind::Withdrawal,
+                    "agent_approval" => api_types::fund::FundActionKind::AgentApproval,
+                    "agent_revocation" => api_types::fund::FundActionKind::AgentRevocation,
+                    _ => api_types::fund::FundActionKind::Allocation,
+                },
+                state: action_state_from_str(&raw.2)
+                    .ok_or(Error::Invariant("unknown dispatch state"))?,
+                since: u64::try_from(raw.3).map_err(|_| Error::Invariant("negative timestamp"))?,
+            })
+        })
+        .collect()
+}

@@ -269,11 +269,23 @@ pub fn verify_session(
 ) -> Result<VerifiedSession, ErrorCode> {
     let session_id = to_fixed::<32>(&session.session_id, "session_id must be 32 bytes")?;
     let now = clock::now_ms();
-    let row: Option<SessionRow> = db::tx::query(|connection| {
-        db::repo::auth::find_valid_session(connection, &session_id, now)
+    let (valid, stored) = db::tx::query(|connection| {
+        let valid = db::repo::auth::find_valid_session(connection, &session_id, now)?;
+        let stored = db::repo::auth::session_row(connection, &session_id)?;
+        Ok((valid, stored))
     })
     .map_err(|error| map_db(error, None))?;
-    let row = row.ok_or(ErrorCode::SessionExpired)?;
+
+    let row: SessionRow = match (valid, stored) {
+        (Some(row), _) => row,
+        (None, Some(row)) if row.revoked_at.is_some() => return Err(ErrorCode::SessionRevoked),
+        (None, Some(_)) => return Err(ErrorCode::SessionExpired),
+        (None, None) => {
+            return Err(ErrorCode::Unauthenticated {
+                reason: "unknown session".to_string(),
+            });
+        }
+    };
 
     if row.principal != caller.as_slice() {
         return Err(ErrorCode::Unauthenticated {

@@ -13,6 +13,7 @@
 mod auth;
 mod clock;
 mod config;
+mod fund;
 mod random;
 
 use api_types::auth::{ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle};
@@ -43,6 +44,33 @@ async fn open_session(request: OpenSessionRequest) -> Result<SessionHandle, Erro
 #[ic_cdk::update]
 fn revoke_session(session: SessionHandle) -> Result<(), ErrorCode> {
     auth::revoke_session(&session, ic_cdk::api::msg_caller())
+}
+
+/// 入金案内（認証済みセッションが必要）。
+#[ic_cdk::query]
+fn get_funding_instructions(
+    session: SessionHandle,
+) -> Result<api_types::fund::FundingInstructions, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    fund::funding_instructions(&verified)
+}
+
+/// 資金状態（認証済みセッションが必要）。
+#[ic_cdk::query]
+fn get_fund_status(session: SessionHandle) -> Result<api_types::fund::FundStatus, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    fund::fund_status(&verified)
+}
+
+/// 資金履歴（認証済みセッションが必要）。
+#[ic_cdk::query]
+fn list_fund_events(
+    session: SessionHandle,
+    cursor: Option<api_types::Blob>,
+    limit: u32,
+) -> Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    fund::fund_events(&verified, cursor, limit)
 }
 
 /// 呼び出し元のPrincipal（診断用。認可の判断は各メソッド内で行う）。

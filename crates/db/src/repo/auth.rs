@@ -387,3 +387,28 @@ pub fn count_recent_challenges(
         .map_err(sql)?;
     amount_u64(count, "negative challenge count")
 }
+
+/// セッション行を（有効性を問わず）返す。失効・期限切れの区別に使う。
+pub fn session_row(
+    connection: &Connection,
+    session_id: &[u8; 32],
+) -> Result<Option<SessionRow>, Error> {
+    let raw = connection
+        .query_optional(
+            "SELECT session_id, user_id, principal, expires_at, revocation_generation, revoked_at
+               FROM sessions WHERE session_id = ?1",
+            params![session_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<Vec<u8>>(1)?,
+                    row.get::<Vec<u8>>(2)?,
+                    row.get::<i64>(3)?,
+                    row.get::<i64>(4)?,
+                    row.get::<Option<i64>>(5)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    raw.map(convert_session).transpose()
+}

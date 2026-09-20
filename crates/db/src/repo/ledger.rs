@@ -437,3 +437,60 @@ pub fn payout_settled(
         ],
     )
 }
+
+/// 保管口座の参照行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustodyAccount {
+    pub account_id: [u8; 32],
+    pub kind: api_types::AccountKind,
+    pub derivation_path: String,
+    pub master_address: [u8; 20],
+    pub network: String,
+    pub state: String,
+}
+
+/// 本人の保管口座を1件返す。
+pub fn custody_account(
+    connection: &Connection,
+    user_id: &[u8; 32],
+    kind: api_types::AccountKind,
+) -> Result<Option<CustodyAccount>, Error> {
+    let kind_name = match kind {
+        api_types::AccountKind::Reserve => "reserve",
+        api_types::AccountKind::Trading => "trading",
+    };
+    let raw = connection
+        .query_optional(
+            "SELECT account_id, derivation_path, master_address, network, state
+               FROM custody_accounts WHERE user_id = ?1 AND kind = ?2 LIMIT 1",
+            params![user_id.as_slice(), kind_name],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<Vec<u8>>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+
+    raw.map(|raw| {
+        Ok(CustodyAccount {
+            account_id: raw
+                .0
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte account id"))?,
+            kind,
+            derivation_path: raw.1,
+            master_address: raw
+                .2
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 20-byte address"))?,
+            network: raw.3,
+            state: raw.4,
+        })
+    })
+    .transpose()
+}
