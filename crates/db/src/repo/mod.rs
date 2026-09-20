@@ -6,6 +6,7 @@
 pub mod actions;
 pub mod agents;
 pub mod auth;
+pub mod core_config;
 pub mod events;
 pub mod funds;
 pub mod guard;

@@ -145,6 +145,14 @@ CREATE TABLE meta_cache (
 );
 ";
 
+/// 運営が設定するブートストラップ値（vault principalなど）。
+const CONFIG: &str = "
+CREATE TABLE core_config (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    vault_principal BLOB
+);
+";
+
 /// `trading_core` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -154,5 +162,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 2,
         sql: ORDERS,
+    },
+    Migration {
+        version: 3,
+        sql: CONFIG,
     },
 ];

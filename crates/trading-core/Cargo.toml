@@ -10,6 +10,7 @@ description = "trading_core Canisterの雛形"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+api-types = { path = "../api-types" }
 candid.workspace = true
 db = { path = "../db" }
 ic-cdk.workspace = true
