@@ -286,7 +286,8 @@ async fn submit_order(
 async fn request_agent_generation(
     session: SessionHandle,
 ) -> Result<api_types::fund::AgentGeneration, ErrorCode> {
-    let user_id = authorize(&session).await?;
+    // 認可（caller束縛）を確認してから口座を解決する。
+    authorize(&session).await?;
     let account_id = trading_account(&session).await?;
     let now = ic_cdk::api::time() / 1_000_000;
 
