@@ -199,7 +199,13 @@ pub async fn open_session(
     let row = db::tx::update(|connection| {
         db::repo::auth::consume_challenge(connection, &challenge_id, now)
     })
-    .map_err(|error| map_db(error, Some(&challenge_id)))?;
+    .map_err(|error| match error {
+        DbError::Conflict => bad(BadRequestCode::ChallengeReused, "challenge already used"),
+        DbError::Invariant(message) if message.contains("expired") => {
+            bad(BadRequestCode::ChallengeExpired, "challenge expired")
+        }
+        other => map_db(other, Some(&challenge_id)),
+    })?;
 
     if row.purpose != purpose_name(ChallengePurpose::Login) {
         return Err(bad(

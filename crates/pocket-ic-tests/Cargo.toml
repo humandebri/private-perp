@@ -8,6 +8,7 @@ description = "PocketICによるCanister統合・障害注入試験（テスト�
 
 [dependencies]
 api-types = { path = "../api-types" }
+hl-sign = { path = "../hl-sign" }
 candid.workspace = true
 pocket-ic.workspace = true
 serde.workspace = true

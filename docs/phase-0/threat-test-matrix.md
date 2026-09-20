@@ -1,7 +1,7 @@
 # 脅威と試験の対応表
 
 - 根拠：`Implementation.md` 9.2〜9.4、14.4、`Plan.md` 3.2、16章、ロードマップ4章・6章
-- 状態：設計契約。**すべて未実行**。Phase 0で実行済みになった試験は1件もない
+- 状態：設計契約。**一部実行済み**。実行済みの試験は実施日と証跡を付す（2026-09-19にT-101〜T-105を実行）。未実行のものは未実行のまま
 
 ## 1. 読み方
 
@@ -25,11 +25,11 @@
 
 | ID | 脅威・失敗条件 | 対策（契約） | 層 | 期待結果 | 証跡 | Phase |
 |---|---|---|---|---|---|---|
-| T-101 | 偽のEOAでchallengeを解く | EIP-712 `typed_data` にorigin/network/canister/用途/nonce/期限を束縛 | unit, PocketIC | 拒否（`BadRequest.InvalidSignature`） | 試験ログ | 1 |
+| T-101 | 偽のEOAでchallengeを解く | EIP-712 `typed_data` にorigin/network/canister/用途/nonce/期限を束縛 | unit, PocketIC | 拒否（`BadRequest.InvalidSignature`） | 試験ログ | 1 | 実行: 2026-09-19 実行済み（`crates/pocket-ic-tests/tests/vault_auth.rs::a_signature_from_another_key_is_rejected`） /
 | T-102 | 別Principalでセッションを開く | challengeの`principal`と署名EOAを束縛 | PocketIC | 拒否 | 試験ログ | 1 |
-| T-103 | 期限切れchallengeの再利用 | 5分期限、一回性nonce | unit, PocketIC | 拒否（`ChallengeExpired`） | 試験ログ | 1 |
-| T-104 | challenge再使用（二重`open_session`） | nonce一回性をDBの一意制約で保証 | PocketIC | 2回目を拒否（`ChallengeReused`） | 試験ログ | 1 |
-| T-105 | 別origin・別networkからの要求 | `aad`とchallengeの束縛 | unit, PocketIC | 拒否（`OriginMismatch`／`NetworkMismatch`） | 試験ログ | 1 |
+| T-103 | 期限切れchallengeの再利用 | 5分期限、一回性nonce | unit, PocketIC | 拒否（`ChallengeExpired`） | 試験ログ | 1 | 実行: 2026-09-19 実行済み（同 `an_expired_challenge_is_rejected`） /
+| T-104 | challenge再使用（二重`open_session`） | nonce一回性をDBの一意制約で保証 | PocketIC | 2回目を拒否（`ChallengeReused`） | 試験ログ | 1 | 実行: 2026-09-19 実行済み（同 `a_challenge_can_only_be_used_once`） /
+| T-105 | 別origin・別networkからの要求 | `aad`とchallengeの束縛 | unit, PocketIC | 拒否（`OriginMismatch`／`NetworkMismatch`） | 試験ログ | 1 | 実行: 2026-09-19 実行済み（同 `a_challenge_signed_for_another_origin_is_rejected`） /
 | T-106 | `purpose = withdrawal` のchallengeでセッション確立 | 用途分離 | PocketIC | 拒否 | 試験ログ | 1 |
 | T-107 | ログアウト後も旧セッションが有効 | `revoke_session`で失効世代を更新 | PocketIC | 失効（`SessionRevoked`）。資金要求・新規リスク受付を拒否 | 試験ログ | 2 |
 | T-108 | 失効伝達前に`trading_core`を呼ぶ | 未確認セッションを受理しない | PocketIC | 拒否（`SessionIssuedByUnregisteredVault`等） | 試験ログ | 2 |

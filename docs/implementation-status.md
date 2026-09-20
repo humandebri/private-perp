@@ -16,7 +16,7 @@
 
 ### 検証結果（ローカル実行）
 
-- `cargo test`：51件成功（`api-types` 4、`db` 5、`hl-sign` 25、`hl-types` 17）。`hl-sign` には公式SDK fixtureとの比較試験（11件）を含む。
+- `cargo test`：ホスト51件成功（PocketIC統合試験は別ジョブ）（`api-types` 4、`db` 5、`hl-sign` 25、`hl-types` 17）。`hl-sign` には公式SDK fixtureとの比較試験（11件）を含む。
 - 公式SDKとの一致：actionハッシュ（`createL1ActionHash`）・署名（r/s/v、決定的）・復元アドレスのすべてが11件で一致。中間値（msgpack・digest）はSDKが公開しないためfixtureには入れず、署名一致で検証している。
 - `cargo clippy --workspace --all-targets -- -D warnings`（ホスト全体。`pocket-ic-tests` とCanisterクレートを含む）、`cargo fmt --all --check`、`bash scripts/check-no-await.sh`、`bash scripts/check-signing-boundary.sh`：成功。
 - `bash scripts/fetch-pocket-ic.sh`：サーバの版（`pocket-ic-server 16.x`）とsha256を検証する。旧版・digest不一致では非0終了することを確認済み。

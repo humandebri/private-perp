@@ -23,11 +23,13 @@
 | 段階 | 状態 | 内容 |
 |---|---|---|
 | 2A | 完了 | `crates/db` に vault/core のスキーマ（バージョン付きMigration）、複式台帳（仕訳合計0・符号付きpostings・残高導出）、資金要求の冪等な受付、予約、challenge/セッション、epoch CASを実装。PocketICで `Db::init`→`migrate` がCanister install時に通ることを確認。 |
-| 2B | 未着手 | `funds_vault` のEOA challenge・セッション・資金API（`docs/phase-0/api-contract.md` 2節） |
+| 2B | 一部完了 | EOA challenge・セッション・失効を実装（`crates/funds-vault/src/auth.rs`）。資金APIは未着手 |
 | 2C | 未着手 | ローカルECDSAスパイク、永続outboxの署名・送信、照合（モックベニュー） |
 | 2D | 未着手 | HPKE要求・応答封筒 |
 | 2E | 未着手 | PocketIC失敗試験（T-1xx／T-2xxのローカル分） |
 | — | 未着手 | outbox/events repo（`fund_actions`・`external_events` の操作）。表は2Aで作成済み |
+
+認証の証跡: `crates/pocket-ic-tests/tests/vault_auth.rs`（5件成功。正しい署名でセッション発行、別鍵・challenge再使用・期限切れ・別originの拒否＝T-101/T-103/T-104/T-105）。
 
 補足: 自前のEIP-712スキーム（challenge・出金intent）は `hl-sign::private_perp` に実装し、フィールド束縛と署名復元をホストテストで固定した。`db::init` はCanisterごとのMigration一覧を受け取る形へ変更した（`policy`・`control_guard` は専用スキーマ未定義のため空で初期化）。
 
