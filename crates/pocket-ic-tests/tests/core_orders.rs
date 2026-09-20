@@ -979,3 +979,149 @@ fn fills_are_listed_only_for_the_authorized_caller() {
         "{denied:?}"
     );
 }
+
+/// `/info`照合の取り込みは冪等で、約定一覧と注文状態に反映される。
+#[test]
+fn fills_are_ingested_idempotently() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(132);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+    let meta: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_meta_cache",
+        (
+            "local".to_string(),
+            "hyperliquid".to_string(),
+            UNIVERSE.to_string(),
+        ),
+    )
+    .expect("call");
+    meta.expect("set_meta_cache");
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .expect("call");
+    context.expect("set_market_context");
+
+    let caller = principal(133);
+    let session = open_session(&pic, vault, caller, &secret(190));
+    let credit: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (session.clone(), 1_000_000u64, blob(&[111u8; 32])),
+    )
+    .expect("call");
+    credit.expect("credit");
+    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_allocation",
+        AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(b"fills-ingest-alloc"),
+            amount: 300_000,
+            target: AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .expect("call");
+    allocated.expect("allocation");
+    let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
+        &pic,
+        core,
+        caller,
+        "request_agent_generation",
+        session.clone(),
+    )
+    .expect("call");
+    agent.expect("agent");
+    let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"fills-ingest", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    submitted.expect("accepted order");
+
+    let venue_body = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":777}}]}}}"#.to_vec();
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        core,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, venue_body)),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+
+    let fills = r#"[{"tid":1,"oid":777,"coin":"ETH","px":"2500","sz":"0.05","fee":12,"time":1758000000000}]"#;
+    let ingested: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_fills",
+        (session.clone(), fills.to_string()),
+    )
+    .expect("call");
+    assert_eq!(ingested.expect("ingest"), 1);
+
+    let again: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_fills",
+        (session.clone(), fills.to_string()),
+    )
+    .expect("call");
+    assert_eq!(again.expect("ingest"), 0, "同じtidは二重計上しない");
+
+    let listed: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "list_fills",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    let listed = listed.expect("fills");
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].market, "ETH");
+    assert_eq!(listed.items[0].quantity, "0.05");
+    assert_eq!(listed.items[0].fee, 12);
+
+    let orders: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "list_orders",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    let orders = orders.expect("orders");
+    assert_eq!(orders.items[0].state, api_types::order::OrderState::Filled);
+    assert_eq!(orders.items[0].filled_quantity, "0.05");
+}

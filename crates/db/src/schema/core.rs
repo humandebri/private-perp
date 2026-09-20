@@ -179,6 +179,7 @@ CREATE TABLE agent_generations (
 const FILLS: &str = "
 CREATE TABLE fills (
     fill_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tid INTEGER NOT NULL UNIQUE,
     user_id BLOB NOT NULL CHECK (length(user_id) = 32),
     order_id BLOB NOT NULL CHECK (length(order_id) = 32),
     market TEXT NOT NULL,

@@ -530,3 +530,63 @@ pub fn list_fills(
         })
         .collect()
 }
+
+/// 約定を取り込む（同じ`tid`は二重計上しない）。注文は`hl_oid`で解決する。
+pub fn ingest_fill(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    tid: u64,
+    hl_oid: u64,
+    market: &str,
+    price: &str,
+    quantity: &str,
+    fee: u64,
+    filled_at: u64,
+) -> Result<bool, Error> {
+    let order = connection
+        .query_optional(
+            "SELECT order_id, quantity FROM orders WHERE hl_oid = ?1 LIMIT 1",
+            params![hl_oid as i64],
+            |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<String>(1)?)),
+        )
+        .map_err(sql)?;
+    let Some((order_id, ordered_quantity)) = order else {
+        return Ok(false);
+    };
+    let existing = connection
+        .query_optional_scalar::<i64>("SELECT tid FROM fills WHERE tid = ?1", params![tid as i64])
+        .map_err(sql)?;
+    if existing.is_some() {
+        return Ok(false);
+    }
+    connection
+        .execute(
+            "INSERT INTO fills (tid, user_id, order_id, market, price, quantity, fee, filled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                tid as i64,
+                user_id.as_slice(),
+                order_id,
+                market,
+                price,
+                quantity,
+                fee as i64,
+                filled_at as i64
+            ],
+        )
+        .map_err(sql)?;
+    // 累積約定量の厳密な合算は照合段階で行う。ここでは注文数量と一致する約定を
+    // 「約定済み」、それ以外を「一部約定」とする。
+    let state = if quantity == ordered_quantity {
+        "filled"
+    } else {
+        "partially_filled"
+    };
+    connection
+        .execute(
+            "UPDATE orders SET state = ?2, filled_quantity = ?3, updated_at = ?4 WHERE order_id = ?1",
+            params![order_id, state, quantity, filled_at as i64],
+        )
+        .map_err(sql)?;
+    Ok(true)
+}

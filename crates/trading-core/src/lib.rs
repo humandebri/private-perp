@@ -992,6 +992,63 @@ async fn test_sweep_now() -> Result<u32, ErrorCode> {
     Ok(processed)
 }
 
+/// テスト専用：`/info`の`userFills`相当を取り込む（`test-venue` featureでのみ存在）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+async fn test_ingest_fills(
+    session: api_types::auth::SessionHandle,
+    fills_json: String,
+) -> Result<u32, ErrorCode> {
+    let user_id = authorize(&session).await?;
+    let fills: Vec<serde_json::Value> =
+        serde_json::from_str(&fills_json).map_err(|error| internal(error.to_string()))?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    let mut ingested = 0;
+    for fill in fills {
+        let tid = fill
+            .get("tid")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let oid = fill
+            .get("oid")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let coin = fill
+            .get("coin")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let price = fill
+            .get("px")
+            .and_then(|value| value.as_str())
+            .unwrap_or("0")
+            .to_string();
+        let quantity = fill
+            .get("sz")
+            .and_then(|value| value.as_str())
+            .unwrap_or("0")
+            .to_string();
+        let fee = fill
+            .get("fee")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let at = fill
+            .get("time")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(now);
+        let inserted = db::tx::update(|connection| {
+            db::repo::orders::ingest_fill(
+                connection, &user_id, tid, oid, &coin, &price, &quantity, fee, at,
+            )
+        })
+        .map_err(map_db)?;
+        if inserted {
+            ingested += 1;
+        }
+    }
+    Ok(ingested)
+}
+
 fn init_db() {
     if let Err(error) = db::init(MEMORY_ID, db::schema::core::MIGRATIONS) {
         ic_cdk::trap(format!("db init failed: {error}"));
