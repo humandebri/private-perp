@@ -15,8 +15,21 @@
 | 段階 | 内容 | 状態 |
 |---|---|---|
 | S1 | hl-sign（action構築・msgpack・EIP-712・v復元）＋公式SDK比較 | 完了 |
-| S2 | PocketIC基盤、ic-sqlite-vfs疎通、複式台帳・予約・outbox・nonce・fencing | 基盤のみ完了、台帳以降は未着手 |
+| S2 | PocketIC基盤、ic-sqlite-vfs疎通、複式台帳・予約・outbox・nonce・fencing | 2A完了（dbスキーマ・台帳・予約・CAS）。2B以降は未着手 |
 | S3 | モックHL往復・障害注入、ローカルECDSA、guard迂回拒否 | 未着手 |
+
+## 2.1 S2の進捗（2026-09-19）
+
+| 段階 | 状態 | 内容 |
+|---|---|---|
+| 2A | 完了 | `crates/db` に vault/core のスキーマ（バージョン付きMigration）、複式台帳（仕訳合計0・符号付きpostings・残高導出）、資金要求の冪等な受付、予約、challenge/セッション、epoch CASを実装。PocketICで `Db::init`→`migrate` がCanister install時に通ることを確認。 |
+| 2B | 未着手 | `funds_vault` のEOA challenge・セッション・資金API（`docs/phase-0/api-contract.md` 2節） |
+| 2C | 未着手 | ローカルECDSAスパイク、永続outboxの署名・送信、照合（モックベニュー） |
+| 2D | 未着手 | HPKE要求・応答封筒 |
+| 2E | 未着手 | PocketIC失敗試験（T-1xx／T-2xxのローカル分） |
+| — | 未着手 | outbox/events repo（`fund_actions`・`external_events` の操作）。表は2Aで作成済み |
+
+補足: 自前のEIP-712スキーム（challenge・出金intent）は `hl-sign::private_perp` に実装し、フィールド束縛と署名復元をホストテストで固定した。`db::init` はCanisterごとのMigration一覧を受け取る形へ変更した（`policy`・`control_guard` は専用スキーマ未定義のため空で初期化）。
 
 ## 3. 完了したタスク
 
