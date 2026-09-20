@@ -372,3 +372,18 @@ pub fn revoke_all_sessions(
     let changed = crate::cas::changes(connection)?;
     Ok(u64::try_from(changed).unwrap_or(0))
 }
+
+/// 指定時刻以降に発行したchallengeの件数（発行レートの上限に使う）。
+pub fn count_recent_challenges(
+    connection: &Connection,
+    eoa_address: &[u8; 20],
+    since: u64,
+) -> Result<u64, Error> {
+    let count = connection
+        .query_scalar::<i64>(
+            "SELECT COUNT(*) FROM challenges WHERE eoa_address = ?1 AND issued_at >= ?2",
+            params![eoa_address.as_slice(), since as i64],
+        )
+        .map_err(sql)?;
+    amount_u64(count, "negative challenge count")
+}

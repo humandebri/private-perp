@@ -1,4 +1,4 @@
-//! `funds_vault` Canisterの雛形。
+//! `funds_vault` Canister。
 //!
 //! 責務はEOA認証、共通保管口座とユーザー別取引口座のmaster鍵管理、複式台帳、
 //! 資金要求・予約・outbox、Agent承認・失効である
@@ -7,7 +7,17 @@
 //! **任意のダイジェストへの署名APIを追加しない。** 資金移動は目的・金額・宛先・
 //! 本人認可・残高を検証してから行う。
 //!
-//! Phase 0 では `version` とDB初期化のみを実装する。認証・台帳・署名はPhase 1以降。
+//! S2の2B時点で実装しているのは認証（challenge・セッション）である。資金API・outboxの
+//! 署名送信・HPKEは後続の段階で追加する。
+
+mod auth;
+mod clock;
+mod config;
+mod random;
+
+use api_types::auth::{ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle};
+use api_types::error::ErrorCode;
+use candid::Principal;
 
 const MEMORY_ID: u8 = db::memory_id::FUNDS_VAULT_MAIN;
 
@@ -15,6 +25,30 @@ const MEMORY_ID: u8 = db::memory_id::FUNDS_VAULT_MAIN;
 #[ic_cdk::query]
 fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// ログインchallengeを発行する。
+#[ic_cdk::update]
+async fn issue_challenge(request: ChallengeRequest) -> Result<ChallengeResponse, ErrorCode> {
+    auth::issue_challenge(request, ic_cdk::api::canister_self()).await
+}
+
+/// challengeを消費してセッションを発行する。
+#[ic_cdk::update]
+async fn open_session(request: OpenSessionRequest) -> Result<SessionHandle, ErrorCode> {
+    auth::open_session(request, ic_cdk::api::msg_caller()).await
+}
+
+/// セッションを失効させる。
+#[ic_cdk::update]
+fn revoke_session(session: SessionHandle) -> Result<(), ErrorCode> {
+    auth::revoke_session(&session, ic_cdk::api::msg_caller())
+}
+
+/// 呼び出し元のPrincipal（診断用。認可の判断は各メソッド内で行う）。
+#[ic_cdk::query]
+fn caller_principal() -> Principal {
+    ic_cdk::api::msg_caller()
 }
 
 fn init_db() {

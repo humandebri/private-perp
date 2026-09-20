@@ -643,9 +643,16 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 name = "funds-vault"
 version = "0.1.0"
 dependencies = [
+ "api-types",
  "candid",
  "db",
+ "hex",
+ "hl-sign",
+ "hl-types",
  "ic-cdk",
+ "ic-cdk-management-canister",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -981,6 +988,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ic-cdk-management-canister"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af9840a7ba13c9c8f6e76114755c1645d1f72d99e9a16f3f102d704dfe0b3cd4"
+dependencies = [
+ "candid",
+ "ic-cdk",
+ "ic-management-canister-types 0.10.0",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ic-certification"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1008,6 +1029,17 @@ name = "ic-management-canister-types"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3187ba94198a8df0e38a478f289812fcead6a86c658b9552b00f1f8081f06bb3"
+dependencies = [
+ "candid",
+ "serde",
+ "serde_bytes",
+]
+
+[[package]]
+name = "ic-management-canister-types"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98d6395878cedbecf0d7887521e6c3f62063b714c80c20efd046a89314fd2b59"
 dependencies = [
  "candid",
  "serde",
@@ -1517,7 +1549,7 @@ dependencies = [
  "flate2",
  "hex",
  "ic-certification",
- "ic-management-canister-types",
+ "ic-management-canister-types 0.8.0",
  "ic-transport-types",
  "reqwest",
  "schemars",

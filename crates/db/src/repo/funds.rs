@@ -25,7 +25,7 @@ impl RequestKind {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn from_db_str(value: &str) -> Option<Self> {
         Some(match value {
             "allocation" => Self::Allocation,
             "recovery" => Self::Recovery,
@@ -84,7 +84,7 @@ pub fn fund_request(
     raw.map(
         |(kind, state, amount, account_id, destination, body_hash)| {
             Ok(FundRequestRow {
-                kind: RequestKind::from_str(&kind)
+                kind: RequestKind::from_db_str(&kind)
                     .ok_or(Error::Invariant("unknown request kind"))?,
                 state: crate::states::fund_request_state_from_str(&state)
                     .ok_or(Error::Invariant("unknown request state"))?,
@@ -127,18 +127,33 @@ pub fn request_state(
         .transpose()
 }
 
+/// 新規の資金要求。
+#[derive(Debug, Clone, Copy)]
+pub struct NewFundRequest<'a> {
+    pub user_id: &'a [u8; 32],
+    pub client_request_id: &'a [u8],
+    pub body_hash: &'a [u8; 32],
+    pub kind: RequestKind,
+    pub account_id: Option<&'a [u8; 32]>,
+    pub amount: u64,
+    pub destination: Option<&'a str>,
+}
+
 /// 要求を受付ける。同一ID・同一本文は再送として扱い、異なる本文は拒否する。
 pub fn accept_fund_request(
     connection: &mut UpdateConnection<'_>,
-    user_id: &[u8; 32],
-    client_request_id: &[u8],
-    body_hash: &[u8; 32],
-    kind: RequestKind,
-    account_id: Option<&[u8; 32]>,
-    amount: u64,
-    destination: Option<&str>,
+    request: &NewFundRequest<'_>,
     now: u64,
 ) -> Result<AcceptOutcome, Error> {
+    let NewFundRequest {
+        user_id,
+        client_request_id,
+        body_hash,
+        kind,
+        account_id,
+        amount,
+        destination,
+    } = *request;
     if let Some(existing) = fund_request(connection, user_id, client_request_id)? {
         return Ok(if existing.body_hash == *body_hash {
             AcceptOutcome::Duplicate

@@ -37,9 +37,11 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Format
         run: cargo fmt --all --check
-      - name: Lint (host, whole workspace)
+      - name: Lint (host, pure crates and test harness)
         # 既定メンバーだけでは crates/pocket-ic-tests が漏れるため --workspace を使う。
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # Canisterクレートは `db` のwasm専用モジュール（repo/tx）に依存するためホストでは
+        # ビルドできず、wasmターゲットのlintステップで別途検査する。
+        run: cargo clippy --workspace --all-targets --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy -- -D warnings
       - name: Test (host, default members)
         run: cargo test
       - name: Forbid async in hl-sign and db
@@ -47,7 +49,7 @@ jobs:
       - name: Forbid raw-key signing in canister crates
         run: bash scripts/check-signing-boundary.sh
       - name: Lint (wasm canisters)
-        run: cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -- -D warnings
+        run: cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -p db -- -D warnings
       - name: Build canister wasm
         run: cargo build --release --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core
   pocket-ic:

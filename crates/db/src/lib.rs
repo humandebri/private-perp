@@ -21,6 +21,8 @@ pub mod states;
 pub mod cas;
 #[cfg(target_family = "wasm")]
 pub mod repo;
+#[cfg(target_family = "wasm")]
+pub mod tx;
 
 /// CanisterごとのMemoryId割当（`Implementation.md` 4.2）。
 ///
