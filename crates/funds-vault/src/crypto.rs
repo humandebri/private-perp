@@ -27,6 +27,8 @@ fn key_id() -> EcdsaKeyId {
 }
 
 /// derivation pathを組み立てる（`codec`は`vec blob`）。
+/// 口座の導出（署名段階）とテストで使う。
+#[allow(dead_code)]
 pub fn derivation_path(parts: &[&[u8]]) -> Vec<Vec<u8>> {
     parts.iter().map(|part| part.to_vec()).collect()
 }
