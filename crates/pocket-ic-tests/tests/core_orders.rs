@@ -259,6 +259,63 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "{denied_list:?}"
     );
 
+    // 取消要求は冪等で、他者の注文や不明なIDは拒否する。
+    let cancel: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "cancel_order",
+        (session.clone(), accepted.order_id.clone()),
+    )
+    .expect("call");
+    cancel.expect("cancel");
+
+    let after_cancel: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "list_orders",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    assert!(
+        after_cancel.expect("list").items[0].cancel_requested,
+        "取消要求が記録される"
+    );
+
+    let again: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "cancel_order",
+        (session.clone(), accepted.order_id.clone()),
+    )
+    .expect("call");
+    again.expect("cancel is idempotent");
+
+    let unknown: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "cancel_order",
+        (session.clone(), blob(&[9u8; 32])),
+    )
+    .expect("call");
+    assert!(unknown.is_err(), "不明な注文は拒否する");
+
+    let other_cancel: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        principal(114),
+        "cancel_order",
+        (session.clone(), accepted.order_id.clone()),
+    )
+    .expect("call");
+    assert!(
+        matches!(other_cancel, Err(ErrorCode::Unauthenticated { .. })),
+        "{other_cancel:?}"
+    );
+
     // 別principalのセッションでは受付できない。
     let other: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,

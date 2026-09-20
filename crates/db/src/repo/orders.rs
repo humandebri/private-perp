@@ -275,3 +275,33 @@ pub fn list_orders(
         })
         .collect()
 }
+
+/// 注文の所有者と状態（取消の認可判定に使う）。
+pub fn order_owner(
+    connection: &Connection,
+    order_id: &[u8; 32],
+) -> Result<Option<([u8; 32], OrderState, bool)>, Error> {
+    let raw = connection
+        .query_optional(
+            "SELECT user_id, state, cancel_requested FROM orders WHERE order_id = ?1",
+            params![order_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<i64>(2)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    raw.map(|(user_id, state, cancel_requested)| {
+        Ok((
+            user_id
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte user id"))?,
+            order_state_from_str(&state).ok_or(Error::Invariant("unknown order state"))?,
+            cancel_requested != 0,
+        ))
+    })
+    .transpose()
+}

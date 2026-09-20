@@ -263,6 +263,47 @@ async fn submit_order(
     })
 }
 
+/// 注文の取消を要求する（署名・送信はパイプラインが行う）。
+///
+/// 受付と同様に冪等で、既に取消要求済み・終端状態なら何もしない。
+#[ic_cdk::update]
+async fn cancel_order(session: SessionHandle, order_id: api_types::Blob) -> Result<(), ErrorCode> {
+    let user_id = authorize(&session).await?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    let order_id: [u8; 32] = order_id.as_ref().try_into().map_err(|_| {
+        bad(
+            BadRequestCode::MalformedPayload,
+            "order_id must be 32 bytes",
+        )
+    })?;
+
+    let owner = db::tx::query(|connection| db::repo::orders::order_owner(connection, &order_id))
+        .map_err(map_db)?
+        .ok_or_else(|| bad(BadRequestCode::MalformedPayload, "unknown order"))?;
+
+    let (order_user, state, cancel_requested) = owner;
+    if order_user != user_id {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "order does not belong to this caller".to_string(),
+        });
+    }
+    if cancel_requested || is_terminal(state) {
+        return Ok(());
+    }
+
+    db::tx::update(|connection| db::repo::orders::mark_cancel_requested(connection, &order_id, now))
+        .map_err(map_db)
+}
+
+/// 終端状態（これ以上状態が進まない）。
+fn is_terminal(state: api_types::order::OrderState) -> bool {
+    use api_types::order::OrderState;
+    matches!(
+        state,
+        OrderState::Filled | OrderState::Cancelled | OrderState::Rejected
+    )
+}
+
 /// 注文一覧（新しい順）。
 ///
 /// **updateである理由**：認可に `funds_vault` へのinter-canister呼び出しが必要だが、
