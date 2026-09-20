@@ -31,7 +31,8 @@ fn schedule(
         request: UpgradeRequest {
             target,
             wasm_hash: wasm_hash.to_vec().into(),
-            arg_hash: [0u8; 32].to_vec().into(),
+            // 実行時に渡す引数（空）と同じhashを予約する。
+            arg_hash: hash_of(&[]).to_vec().into(),
         },
     };
     update(pic, guard, caller, "schedule_upgrade", args).expect("schedule call")
@@ -145,10 +146,18 @@ fn execution_is_blocked_until_seven_days_and_on_content_mismatch() {
         }
     );
 
-    // NOTE: 一致するupgradeの実際の実行（install_code）はまだ検証できていない。
-    // 現状この経路は失敗するため、次ラウンドで原因を特定して試験を追加する。
-    // 予約は保持されたままである。
-    assert!(status(&pic, guard).scheduled.is_some());
+    // 一致する予約は実行でき、予約は消える。
+    execute(&pic, guard, principal(55), target, policy_wasm).expect("execute");
+    assert!(status(&pic, guard).scheduled.is_none());
+
+    // 二重実行は拒否する（有効な予約が無い）。
+    let again = execute(&pic, guard, principal(55), target, wasm(POLICY_WASM)).expect_err("again");
+    assert_eq!(
+        again,
+        ErrorCode::NotAllowed {
+            code: NotAllowedCode::UpgradeNotScheduled
+        }
+    );
 }
 
 #[test]

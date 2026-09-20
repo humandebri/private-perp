@@ -39,7 +39,7 @@
 
 実行済み（2026-09-19、`crates/pocket-ic-tests/tests/vault_outbox.rs`）: T-205（送金成功後の応答喪失で自動再送しない）。T-206は「未解決actionを再送しない」部分のみ確認（時間経過での解放は未実装）。
 
-実行済み（2026-09-19、`crates/pocket-ic-tests/tests/guard_upgrade.rs`）: T-501（非SNSの予約拒否）、T-502（早期実行拒否）、T-503/T-504（内容不一致拒否）、T-506（取消＋新規予約で新しい猶予）。一致する予約の実行（`install_code`）は未検証。
+実行済み（2026-09-19、`crates/pocket-ic-tests/tests/guard_upgrade.rs`）: T-501（非SNSの予約拒否）、T-502（早期実行拒否）、T-503/T-504（内容不一致拒否）、T-506（取消＋新規予約で新しい猶予）。一致する予約の実行（`install_code`）も検証済み。
 
 ## 4. 資金・台帳・出金
 
