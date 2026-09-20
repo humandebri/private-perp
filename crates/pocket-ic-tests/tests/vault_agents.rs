@@ -1,20 +1,25 @@
-//! Agent世代の要求と状態表示（`Implementation.md` 7章）の試験。
+//! Agent承認（master署名）の試験。
+//!
+//! 鍵の導出・保管は `trading_core` が担い、vaultは**渡されたアドレス**をmaster署名で
+//! 承認するだけである（`Implementation.md` 7章）。取引所が受理した場合のみ`Active`を返す。
 
 use api_types::Network;
 use api_types::auth::{
     ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
 };
 use api_types::error::ErrorCode;
-use api_types::fund::{AgentGeneration, AgentState, AgentStatus};
+use api_types::fund::{AgentGeneration, AgentState};
 use candid::Principal;
 use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy_default, pic, principal, query, update,
+    FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy_default, pic, principal, update,
 };
 
 const ORIGIN: &str = "https://app.example.test";
+const ACCEPTED: &[u8] = br#"{"status":"ok","response":{"type":"default"}}"#;
+const REJECTED: &[u8] = br#"{"status":"err","response":"agent already exists"}"#;
 
 fn secret(seed: u8) -> [u8; 32] {
     let mut bytes = [0u8; 32];
@@ -69,69 +74,7 @@ fn open_session(
     session.expect("session")
 }
 
-#[test]
-fn agent_generations_are_requested_with_a_derived_address() {
-    let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
-    let caller = principal(90);
-    let key = secret(161);
-    let session = open_session(&pic, vault, caller, &key);
-
-    let requested: Result<AgentGeneration, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_agent_generation",
-        session.clone(),
-    )
-    .expect("call");
-    let requested = requested.expect("generation");
-    assert_eq!(requested.generation, 1);
-    assert_eq!(requested.state, AgentState::Requested);
-    assert_eq!(
-        requested.agent_address.len(),
-        20,
-        "導出した公開鍵のアドレス"
-    );
-
-    // 未承認の世代があるうちは同じ世代を返す（世代を無駄に増やさない）。
-    let again: Result<AgentGeneration, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_agent_generation",
-        session.clone(),
-    )
-    .expect("call");
-    let again = again.expect("generation");
-    assert_eq!(again.generation, 1);
-    assert_eq!(again.agent_address, requested.agent_address);
-
-    // 状態表示: 承認前なのでcurrentは無く、nextに要求中の世代が入る。
-    let status: Result<AgentStatus, ErrorCode> =
-        query(&pic, vault, caller, "get_agent_status", session.clone()).expect("call");
-    let status = status.expect("status");
-    assert!(status.current.is_none(), "承認はまだ実装していない");
-    assert_eq!(status.next.expect("next").generation, 1);
-
-    // 他principalのセッションでは要求できない。
-    let denied: Result<AgentGeneration, ErrorCode> = update(
-        &pic,
-        vault,
-        principal(91),
-        "request_agent_generation",
-        session,
-    )
-    .expect("call");
-    assert!(
-        matches!(denied, Err(ErrorCode::Unauthenticated { .. })),
-        "{denied:?}"
-    );
-}
-
-const ACCEPTED: &[u8] = br#"{"status":"ok","response":{"type":"default"}}"#;
-const REJECTED: &[u8] = br#"{"status":"err","response":"agent already exists"}"#;
-
+/// vaultへ「このアドレスを承認せよ」と依頼する（outcallはmockで応答させる）。
 fn approve_agent(
     pic: &PocketIc,
     vault: Principal,
@@ -156,45 +99,20 @@ fn approving_a_generation_activates_it_only_when_the_venue_accepts() {
     let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let caller = principal(92);
     let session = open_session(&pic, vault, caller, &secret(162));
+    let address = api_types::Blob::from(vec![7u8; 20]);
 
-    let requested: Result<AgentGeneration, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_agent_generation",
-        session.clone(),
-    )
-    .expect("call");
-    assert_eq!(requested.expect("generation").generation, 1);
-
-    // 取引所が拒否した場合はrequestedのまま残る。
+    // 取引所が拒否した場合はactiveにしない。
     let rejected = approve_agent(&pic, vault, caller, &session, Ok((200, REJECTED.to_vec())));
     assert!(
         matches!(rejected, Err(ErrorCode::UpstreamRejected { .. })),
         "{rejected:?}"
     );
-    let still: Result<AgentStatus, ErrorCode> =
-        query(&pic, vault, caller, "get_agent_status", session.clone()).expect("call");
-    let still = still.expect("status");
-    assert!(still.current.is_none());
-    assert_eq!(still.next.expect("next").generation, 1);
 
-    // 受理された場合はactiveへ遷移し、currentになる。
+    // 受理された場合はactiveとして返る（秘密鍵はcoreが保管する）。
     let approved = approve_agent(&pic, vault, caller, &session, Ok((200, ACCEPTED.to_vec())));
     let approved = approved.expect("approved");
     assert_eq!(approved.state, AgentState::Active);
+    assert_eq!(approved.generation, 1);
+    assert_eq!(approved.agent_address, address);
     assert!(approved.approved_at.is_some());
-
-    let status: Result<AgentStatus, ErrorCode> =
-        query(&pic, vault, caller, "get_agent_status", session.clone()).expect("call");
-    let status = status.expect("status");
-    assert_eq!(status.current.expect("current").generation, 1);
-    assert!(status.next.is_none());
-
-    // 二重承認は要求中の世代が無いため拒否する。
-    let again = approve_agent(&pic, vault, caller, &session, Ok((200, ACCEPTED.to_vec())));
-    assert!(
-        again.is_err(),
-        "要求中の世代が無ければ承認しない: {again:?}"
-    );
 }
