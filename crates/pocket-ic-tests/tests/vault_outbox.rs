@@ -323,3 +323,41 @@ fn concurrent_sweeps_dispatch_the_action_once() {
     assert_eq!(after.reserve_unallocated, 600_000);
     assert!(after.unknowns.is_empty());
 }
+
+#[test]
+fn a_tampered_digest_is_never_signed() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(44);
+    let key = secret(135);
+    let session = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 15);
+    allocate(&pic, vault, caller, &session, b"out-5", 250_000).expect("accepted");
+
+    // 受付時に記録したダイジェストを壊す。
+    let corrupted: Result<u32, ErrorCode> =
+        update_args(&pic, vault, caller, "test_corrupt_action_digest", ()).expect("call");
+    assert_eq!(corrupted.expect("corrupt"), 1);
+
+    // sweepは署名せずに恒久エラーで止まる（outcallは発生しない）。
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("call");
+    let error = swept.expect_err("digest mismatch must stop the sweep");
+    assert!(matches!(error, ErrorCode::Internal { .. }), "{error:?}");
+
+    // 資金は動かず、予約は保持されたまま（送信していないので不明でもない）。
+    let after = status(&pic, vault, caller, &session);
+    assert_eq!(after.in_transit, 0, "送信しないので移動中にならない");
+    assert_eq!(after.withdrawable, 750_000, "予約は保持されたまま");
+    assert!(
+        after.unknowns.is_empty(),
+        "送信していないのでunknownではない"
+    );
+}

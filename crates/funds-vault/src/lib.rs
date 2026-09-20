@@ -80,6 +80,15 @@ async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
     Ok(public.to_vec().into())
 }
 
+/// テスト専用：queuedなactionのダイジェストを壊す（`test-venue` featureでのみ存在）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+fn test_corrupt_action_digest() -> Result<u32, ErrorCode> {
+    db::tx::update(|connection| db::repo::actions::overwrite_queued_digest(connection, &[0u8; 32]))
+        .map(|changed| changed as u32)
+        .map_err(|error| auth::map_db(error, None))
+}
+
 /// テスト専用：現行鍵で封筒を作る（`test-venue` featureでのみ存在）。
 #[cfg(feature = "test-venue")]
 #[ic_cdk::update]

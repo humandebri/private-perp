@@ -515,3 +515,18 @@ pub fn unresolved_actions(
         })
         .collect()
 }
+
+/// テスト専用：queuedなactionのダイジェストを上書きする（署名前の照合を検証するため）。
+pub fn overwrite_queued_digest(
+    connection: &mut UpdateConnection<'_>,
+    digest: &[u8; 32],
+) -> Result<u64, Error> {
+    connection
+        .execute(
+            "UPDATE fund_actions SET digest = ?1 WHERE dispatch_state = 'queued'",
+            params![digest.as_slice()],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    u64::try_from(changed).map_err(|_| Error::Invariant("negative change count"))
+}
