@@ -366,3 +366,125 @@ pub fn signable(
     })
     .transpose()
 }
+
+/// 送信待ちの注文（古い順）。
+pub fn queued_orders(connection: &Connection, limit: u32) -> Result<Vec<[u8; 32]>, Error> {
+    let rows = connection
+        .query_all(
+            "SELECT order_id FROM orders WHERE dispatch_state = 'queued' ORDER BY rowid LIMIT ?1",
+            params![limit as i64],
+            |row| row.get::<Vec<u8>>(0),
+        )
+        .map_err(sql)?;
+    rows.into_iter()
+        .map(|bytes| {
+            bytes
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte order id"))
+        })
+        .collect()
+}
+
+/// 送信権を取得する（POST発行**前**に呼ぶ。単一の実行者だけtrue）。
+pub fn claim_for_dispatch(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+) -> Result<bool, Error> {
+    connection
+        .execute(
+            "UPDATE orders SET dispatch_state = 'signing' WHERE order_id = ?1 AND dispatch_state = 'queued'",
+            params![order_id.as_slice()],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    Ok(changed > 0)
+}
+
+/// 署名とpayloadを保存して`dispatching`へ（送信前に確定させる）。
+pub fn mark_dispatching(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    wire_payload: &[u8],
+    signature: &[u8],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders SET dispatch_state = 'dispatching', wire_payload = ?2, signature = ?3, updated_at = ?4
+              WHERE order_id = ?1 AND dispatch_state = 'signing'",
+            params![order_id.as_slice(), wire_payload, signature, now as i64],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    if changed == 0 {
+        return Err(Error::StateConflict {
+            expected: "signing".to_string(),
+            actual: "missing or not claimed".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// 取引所が受理した（`open`へ）。
+pub fn mark_venue_accepted(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    hl_oid: Option<u64>,
+    now: u64,
+) -> Result<(), Error> {
+    let oid = match hl_oid {
+        Some(oid) => {
+            ic_sqlite_vfs::db::Value::Integer(i64::try_from(oid).map_err(|_| Error::Overflow)?)
+        }
+        None => ic_sqlite_vfs::db::Value::Null,
+    };
+    connection
+        .execute(
+            "UPDATE orders SET state = 'open', dispatch_state = 'reconciled', hl_oid = COALESCE(?2, hl_oid), updated_at = ?3
+              WHERE order_id = ?1 AND dispatch_state = 'dispatching'",
+            params![order_id.as_slice(), oid, now as i64],
+        )
+        .map_err(sql)
+        .and_then(|_| {
+            let changed = crate::cas::changes(connection)?;
+            crate::cas::ensure_changed(changed, "dispatching", "not dispatching")
+        })
+}
+
+/// 取引所が拒否した（`rejected`へ）。
+pub fn mark_venue_rejected(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders SET state = 'rejected', dispatch_state = 'reconciled', updated_at = ?2
+              WHERE order_id = ?1 AND dispatch_state = 'dispatching'",
+            params![order_id.as_slice(), now as i64],
+        )
+        .map_err(sql)
+        .and_then(|_| {
+            let changed = crate::cas::changes(connection)?;
+            crate::cas::ensure_changed(changed, "dispatching", "not dispatching")
+        })
+}
+
+/// 結果不明（再送しない）。
+pub fn mark_unknown(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders SET state = 'unknown', dispatch_state = 'unknown', updated_at = ?2
+              WHERE order_id = ?1 AND dispatch_state IN ('signing', 'dispatching')",
+            params![order_id.as_slice(), now as i64],
+        )
+        .map_err(sql)
+        .and_then(|_| {
+            let changed = crate::cas::changes(connection)?;
+            crate::cas::ensure_changed(changed, "signing or dispatching", "not in flight")
+        })
+}
