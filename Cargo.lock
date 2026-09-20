@@ -1576,6 +1576,7 @@ version = "0.1.0"
 dependencies = [
  "api-types",
  "candid",
+ "hex",
  "hl-sign",
  "pocket-ic",
  "serde",

@@ -23,11 +23,15 @@
 | 段階 | 状態 | 内容 |
 |---|---|---|
 | 2A | 完了 | `crates/db` に vault/core のスキーマ（バージョン付きMigration）、複式台帳（仕訳合計0・符号付きpostings・残高導出）、資金要求の冪等な受付、予約、challenge/セッション、epoch CASを実装。PocketICで `Db::init`→`migrate` がCanister install時に通ることを確認。 |
-| 2B | 一部完了 | EOA challenge・セッション・失効を実装（`crates/funds-vault/src/auth.rs`）。資金APIは未着手 |
+| 2B | 一部完了 | EOA challenge・セッション・失効（`auth.rs`）、資金の参照APIと配分・出金の受付＋予約（`fund.rs`）を実装。送信するactionの構築・署名（2C）が未実装 |
 | 2C | 未着手 | ローカルECDSAスパイク、永続outboxの署名・送信、照合（モックベニュー） |
 | 2D | 未着手 | HPKE要求・応答封筒 |
 | 2E | 未着手 | PocketIC失敗試験（T-1xx／T-2xxのローカル分） |
 | — | 未着手 | outbox/events repo（`fund_actions`・`external_events` の操作）。表は2Aで作成済み |
+
+出金intentの型は `PrivatePerpWithdrawal(address eoa,uint64 amount,string asset,string destination,string network,uint64 nonce,uint64 expiresAt,bytes canister)` とする。クライアントが知り得ない内部ID（user_id・account_id）を署名対象に含めず、認証済みEOAへ束縛するため（`hl-sign::private_perp`）。
+
+資金APIの証跡: `crates/pocket-ic-tests/tests/vault_funds.rs`（4件成功。残高不足の拒否、冪等な再送と本文相違の拒否、予約による出金可能額の減少、別鍵・宛先相違・期限切れintentの拒否、別callerのセッション拒否）。
 
 認証の証跡: `crates/pocket-ic-tests/tests/vault_auth.rs`（5件成功。正しい署名でセッション発行、別鍵・challenge再使用・期限切れ・別originの拒否＝T-101/T-103/T-104/T-105）。
 

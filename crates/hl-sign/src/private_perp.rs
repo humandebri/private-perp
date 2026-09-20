@@ -35,8 +35,7 @@ pub const CHALLENGE_FIELDS: &[TypedField] = &[
 /// 出金intentの型。
 pub const WITHDRAWAL_PRIMARY_TYPE: &str = "PrivatePerpWithdrawal";
 pub const WITHDRAWAL_FIELDS: &[TypedField] = &[
-    field("userId", TypedKind::Bytes32),
-    field("accountId", TypedKind::Bytes32),
+    field("eoa", TypedKind::Address),
     field("amount", TypedKind::Uint64),
     field("asset", TypedKind::String),
     field("destination", TypedKind::String),
@@ -108,8 +107,7 @@ impl Challenge {
 /// 出金intent。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Withdrawal {
-    pub user_id: [u8; 32],
-    pub account_id: [u8; 32],
+    pub eoa: [u8; 20],
     pub amount: u64,
     pub asset: String,
     pub destination: String,
@@ -122,8 +120,7 @@ pub struct Withdrawal {
 impl Withdrawal {
     fn values(&self) -> Vec<TypedValue> {
         vec![
-            TypedValue::Bytes32(self.user_id),
-            TypedValue::Bytes32(self.account_id),
+            TypedValue::Address(self.eoa),
             TypedValue::Uint64(self.amount),
             TypedValue::String(self.asset.clone()),
             TypedValue::String(self.destination.clone()),
@@ -184,8 +181,7 @@ mod tests {
 
     fn withdrawal() -> Withdrawal {
         Withdrawal {
-            user_id: [5u8; 32],
-            account_id: [6u8; 32],
+            eoa: [5u8; 20],
             amount: 1_000_000,
             asset: "usdc".to_string(),
             destination: "0x11".to_string(),
@@ -204,7 +200,7 @@ mod tests {
         );
         assert_eq!(
             type_string(super::WITHDRAWAL_PRIMARY_TYPE, WITHDRAWAL_FIELDS),
-            "PrivatePerpWithdrawal(bytes32 userId,bytes32 accountId,uint64 amount,string asset,string destination,string network,uint64 nonce,uint64 expiresAt,bytes canister)"
+            "PrivatePerpWithdrawal(address eoa,uint64 amount,string asset,string destination,string network,uint64 nonce,uint64 expiresAt,bytes canister)"
         );
     }
 

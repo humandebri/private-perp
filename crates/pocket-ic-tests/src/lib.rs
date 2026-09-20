@@ -128,3 +128,41 @@ pub fn logs(pic: &PocketIc, canister: Principal, sender: Principal) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// 複数引数のupdate呼び出し（Candidの複数引数として符号化する）。
+pub fn update_args<A, R>(
+    pic: &PocketIc,
+    canister: Principal,
+    caller: Principal,
+    method: &str,
+    arg: A,
+) -> Result<R, String>
+where
+    A: candid::utils::ArgumentEncoder,
+    R: CandidType + DeserializeOwned,
+{
+    let payload = candid::encode_args(arg).map_err(|error| format!("encode {method}: {error}"))?;
+    let bytes = pic
+        .update_call(canister, caller, method, payload)
+        .map_err(|error| format!("reject {method}: {error:?}"))?;
+    candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))
+}
+
+/// 複数引数のquery呼び出し。
+pub fn query_args<A, R>(
+    pic: &PocketIc,
+    canister: Principal,
+    caller: Principal,
+    method: &str,
+    arg: A,
+) -> Result<R, String>
+where
+    A: candid::utils::ArgumentEncoder,
+    R: CandidType + DeserializeOwned,
+{
+    let payload = candid::encode_args(arg).map_err(|error| format!("encode {method}: {error}"))?;
+    let bytes = pic
+        .query_call(canister, caller, method, payload)
+        .map_err(|error| format!("reject {method}: {error:?}"))?;
+    candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))
+}

@@ -290,8 +290,7 @@ pub fn request_withdrawal(
             .eoa_address;
 
     let intent = hl_sign::private_perp::Withdrawal {
-        user_id: session.user_id,
-        account_id: [0u8; 32],
+        eoa,
         amount: request.amount,
         asset: "usdc".to_string(),
         destination: format!("0x{}", hex::encode(eoa)),
