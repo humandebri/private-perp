@@ -488,3 +488,45 @@ pub fn mark_unknown(
             crate::cas::ensure_changed(changed, "signing or dispatching", "not in flight")
         })
 }
+
+/// 約定一覧（新しい順）。
+pub fn list_fills(
+    connection: &Connection,
+    user_id: &[u8; 32],
+    limit: u32,
+) -> Result<Vec<(i64, api_types::order::FillView)>, Error> {
+    let rows = connection
+        .query_all(
+            "SELECT rowid, order_id, market, price, quantity, fee, filled_at
+               FROM fills WHERE user_id = ?1 ORDER BY rowid DESC LIMIT ?2",
+            params![user_id.as_slice(), limit as i64],
+            |row| {
+                Ok((
+                    row.get::<i64>(0)?,
+                    row.get::<Vec<u8>>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<i64>(5)?,
+                    row.get::<i64>(6)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.0,
+                api_types::order::FillView {
+                    order_id: row.1.into(),
+                    cloid: None,
+                    market: row.2,
+                    price: row.3,
+                    quantity: row.4,
+                    fee: u64::try_from(row.5).map_err(|_| Error::Invariant("bad fee"))?,
+                    at: u64::try_from(row.6).map_err(|_| Error::Invariant("bad time"))?,
+                },
+            ))
+        })
+        .collect()
+}

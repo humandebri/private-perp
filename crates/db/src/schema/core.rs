@@ -175,6 +175,20 @@ CREATE TABLE agent_generations (
 );
 ";
 
+/// 約定（`/info`照合で取り込む）。
+const FILLS: &str = "
+CREATE TABLE fills (
+    fill_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id BLOB NOT NULL CHECK (length(user_id) = 32),
+    order_id BLOB NOT NULL CHECK (length(order_id) = 32),
+    market TEXT NOT NULL,
+    price TEXT NOT NULL,
+    quantity TEXT NOT NULL,
+    fee INTEGER NOT NULL CHECK (fee >= 0),
+    filled_at INTEGER NOT NULL
+);
+";
+
 /// `trading_core` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -192,5 +206,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 4,
         sql: AGENTS,
+    },
+    Migration {
+        version: 5,
+        sql: FILLS,
     },
 ];

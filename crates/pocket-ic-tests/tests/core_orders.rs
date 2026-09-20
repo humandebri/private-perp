@@ -910,3 +910,72 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
     );
     assert!(snapshot.positions.is_empty());
 }
+
+/// 約定一覧は現状空で、認可を要する。
+#[test]
+fn fills_are_listed_only_for_the_authorized_caller() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(127);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+
+    let caller = principal(128);
+    let session = open_session(&pic, vault, caller, &secret(188));
+    let credit: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (session.clone(), 500_000u64, blob(&[91u8; 32])),
+    )
+    .expect("call");
+    credit.expect("credit");
+    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_allocation",
+        AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(b"fills-alloc"),
+            amount: 100_000,
+            target: AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .expect("call");
+    allocated.expect("allocation");
+
+    let fills: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "list_fills",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    let fills = fills.expect("fills");
+    assert!(fills.items.is_empty(), "約定の取り込みは次段階（現状は空）");
+
+    // 別principalは取得できない。
+    let denied: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> = update_args(
+        &pic,
+        core,
+        principal(129),
+        "list_fills",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    assert!(
+        matches!(denied, Err(ErrorCode::Unauthenticated { .. })),
+        "{denied:?}"
+    );
+}

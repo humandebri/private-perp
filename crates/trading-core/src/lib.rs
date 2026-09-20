@@ -429,6 +429,30 @@ fn is_terminal(state: api_types::order::OrderState) -> bool {
     )
 }
 
+/// 約定一覧（新しい順）。
+///
+/// 認可にvaultへの問い合わせが必要なためupdateで提供する。
+#[ic_cdk::update]
+async fn list_fills(
+    session: SessionHandle,
+    cursor: Option<api_types::Blob>,
+    limit: u32,
+) -> Result<api_types::Paged<api_types::order::FillView>, ErrorCode> {
+    let user_id = authorize(&session).await?;
+    let limit = limit.clamp(1, 100);
+    let now = ic_cdk::api::time() / 1_000_000;
+    let _ = cursor;
+    let rows =
+        db::tx::query(|connection| db::repo::orders::list_fills(connection, &user_id, limit))
+            .map_err(map_db)?;
+    Ok(api_types::Paged {
+        items: rows.into_iter().map(|(_, fill)| fill).collect(),
+        next_cursor: None,
+        observed_at: now,
+        revision: 1,
+    })
+}
+
 /// 口座snapshot（残高はvault、注文はcore）。
 ///
 /// 認可にvaultへの問い合わせが必要なためupdateで提供する。
