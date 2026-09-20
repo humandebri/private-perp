@@ -31,12 +31,15 @@ pub const MAX_PAGE_SIZE: u32 = 100;
 pub const ECDSA_KEY_ID: &str = "test_key_1";
 
 /// Hyperliquidの`/exchange` endpoint（network別）。
+#[allow(dead_code)]
 pub const HL_EXCHANGE_URL: &str = "https://api.hyperliquid-testnet.xyz/exchange";
 
 /// EIP-712の`hyperliquidChain`値（ローカル・testnetは`Testnet`）。
+#[allow(dead_code)]
 pub const HL_CHAIN_NAME: &str = "Testnet";
 
 /// EIP-712の`signatureChainId`（16進、testnetは0x66eee）。
+#[allow(dead_code)]
 pub const HL_SIGNATURE_CHAIN_ID: &str = "0x66eee";
 
 /// Hyperliquidのuser-signed EIP-712に使うchain id（testnet/localは421614）。
