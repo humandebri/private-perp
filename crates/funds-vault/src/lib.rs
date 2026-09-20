@@ -80,6 +80,64 @@ async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
     Ok(public.to_vec().into())
 }
 
+/// テスト専用：現行鍵で封筒を作る（`test-venue` featureでのみ存在）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+async fn test_hpke_seal(plaintext: api_types::Blob) -> Result<api_types::Blob, ErrorCode> {
+    let public = db::tx::query(db::repo::hpke::active_public)
+        .map_err(|error| auth::map_db(error, None))?
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    let seed = crate::random::random32().await?;
+    let aad = test_aad(0);
+    hpke::seal(
+        &public,
+        b"private-perp/envelope/v1",
+        &aad,
+        plaintext.as_ref(),
+        &seed,
+    )
+    .map(|envelope| envelope.into())
+    .map_err(|error| ErrorCode::Internal { code: error })
+}
+
+/// テスト専用：封筒を開ける（`aad`の`expires_at`を変えると失敗する）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::query]
+fn test_hpke_open(
+    envelope: api_types::Blob,
+    expires_at: u64,
+) -> Result<api_types::Blob, ErrorCode> {
+    let secret = db::tx::query(db::repo::hpke::active_secret)
+        .map_err(|error| auth::map_db(error, None))?
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    let aad = test_aad(expires_at);
+    hpke::open(
+        &secret,
+        b"private-perp/envelope/v1",
+        &aad,
+        envelope.as_ref(),
+    )
+    .map(|plaintext| plaintext.into())
+    .map_err(|error| ErrorCode::BadRequest {
+        code: api_types::error::BadRequestCode::MalformedPayload,
+        detail: error,
+    })
+}
+
+/// テスト用の`aad`（呼び出し元と期限を束縛する）。
+#[cfg(feature = "test-venue")]
+fn test_aad(expires_at: u64) -> Vec<u8> {
+    let caller = ic_cdk::api::msg_caller();
+    hpke::envelope_aad(
+        "local",
+        &ic_cdk::api::canister_self().as_slice().to_vec(),
+        "test_hpke",
+        caller.as_slice(),
+        &[],
+        expires_at,
+    )
+}
+
 /// 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
 #[ic_cdk::query]
 fn get_hpke_public_key() -> Result<api_types::Blob, ErrorCode> {

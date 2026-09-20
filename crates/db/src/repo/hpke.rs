@@ -41,3 +41,13 @@ pub fn active_public(connection: &Connection) -> Result<Option<Vec<u8>>, Error> 
         )
         .map_err(sql)
 }
+
+/// 現行世代の秘密鍵（canister内でのみ使う。公開APIへ出さない）。
+pub fn active_secret(connection: &Connection) -> Result<Option<Vec<u8>>, Error> {
+    connection
+        .query_optional_scalar::<Vec<u8>>(
+            "SELECT secret FROM hpke_keys WHERE retired_at IS NULL ORDER BY generation DESC LIMIT 1",
+            params![],
+        )
+        .map_err(sql)
+}
