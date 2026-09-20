@@ -115,7 +115,7 @@ fn execution_is_blocked_until_seven_days_and_on_content_mismatch() {
         Some(vec![guard]),
         candid::encode_one(()).unwrap(),
     );
-    let wasm_hash = hash_of(&wasm(&POLICY_WASM));
+    let wasm_hash = hash_of(&wasm(POLICY_WASM));
 
     let set: Result<(), ErrorCode> =
         update(&pic, guard, controller, "set_sns_principal", sns).expect("call");
