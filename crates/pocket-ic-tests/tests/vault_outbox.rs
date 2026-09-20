@@ -13,6 +13,7 @@ use candid::Principal;
 use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
+use pocket_ic::common::rest::{CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse};
 use pocket_ic_tests::{
     FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy_default, pic, principal, update, update_args,
 };
@@ -258,4 +259,67 @@ fn a_venue_rejection_releases_the_reservation() {
     .expect("call");
     let events = events.expect("events");
     assert_eq!(events.items[0].state, FundRequestState::Rejected);
+}
+
+#[test]
+fn concurrent_sweeps_dispatch_the_action_once() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(43);
+    let key = secret(134);
+    let session = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 14);
+    allocate(&pic, vault, caller, &session, b"out-4", 400_000).expect("accepted");
+
+    // 同じactionを2つのsweepが同時に処理しようとする。
+    let payload = candid::encode_args(()).expect("encode");
+    let first = pic
+        .submit_call(vault, caller, "test_sweep_now", payload.clone())
+        .expect("submit 1");
+    let second = pic
+        .submit_call(vault, caller, "test_sweep_now", payload)
+        .expect("submit 2");
+
+    let mut mocked = 0;
+    for _ in 0..60 {
+        pic.tick();
+        for request in pic.get_canister_http() {
+            pic.mock_canister_http_response(MockCanisterHttpResponse {
+                subnet_id: request.subnet_id,
+                request_id: request.request_id,
+                response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: ACCEPTED.to_vec(),
+                }),
+                additional_responses: Vec::new(),
+            });
+            mocked += 1;
+        }
+        if pic.ingress_status(first.clone()).is_some()
+            && pic.ingress_status(second.clone()).is_some()
+        {
+            break;
+        }
+    }
+
+    let results: Vec<Result<u32, ErrorCode>> = [first, second]
+        .into_iter()
+        .map(|id| {
+            let bytes = pic.await_call(id).expect("await");
+            candid::decode_one::<Result<u32, ErrorCode>>(&bytes).expect("decode")
+        })
+        .collect();
+
+    let processed: u32 = results
+        .iter()
+        .map(|result| result.as_ref().copied().unwrap_or(0))
+        .sum();
+    assert_eq!(processed, 1, "actionは一度だけ処理される: {results:?}");
+    assert_eq!(mocked, 1, "送信は一度だけ行われる");
+
+    let after = status(&pic, vault, caller, &session);
+    assert_eq!(after.in_transit, 400_000, "二重計上しない");
+    assert_eq!(after.reserve_unallocated, 600_000);
+    assert!(after.unknowns.is_empty());
 }
