@@ -136,7 +136,7 @@ PocketIC上の署名往復は約17.9ms（本番subnetの性能値ではない）
 ### 未実装・未検証（次段階）
 
 1. `trading_core`の注文パイプライン：**受付（認可・冪等性・allowlist・meta添字）→ Agent鍵での署名 → `dispatching`永続化 → 非replicated送信 → 受理（`open`＋`oid`）／拒否／不明の分類まで検証済み**。`get_account_snapshot`（vault残高＋core注文の統合）、**約定の取り込み（`tid`で冪等）**、**`orderStatus`照合の反映**、**リスク予約（確保・解放と`margin_used`）**、**緊急停止中の受付拒否**、**入力検証（価格必須・桁数・レバレッジ・allowlist）**も検証済み。残るはSL/TP・全部決済と、`/info`搬送路に依存する照合の自動化。Agent承認（vaultのmaster署名）も実装・検証済み。
-2. 2Cの残り：**入金の受信側は検証済み**（`provision_reserve_account`で入金先を用意し、本人の入金先宛の入金を未配分残高へ計上、同一`tx_hash`は二重計上せず、未知の宛先は記録のみ）。残るのは**搬送路**（replicatedな`/info`取得とtransform）、払出し・回収のaction、`unknown`の照合による解消。
+2. 2Cの残り：**入金の受信側は検証済み**（`provision_reserve_account`で入金先を用意し、本人の入金先宛の入金を未配分残高へ計上、同一`tx_hash`は二重計上せず、未知の宛先は記録のみ）。搬送路（replicatedな`/info`取得とtransform）と**払出しの送信（受付→署名→送信→`payout_settled`／拒否で解放＋逆仕訳／不明で保持）**も検証済み。残るのは**回収（recovery）の送信経路**と`unknown`の照合解消。
 3. 個人データAPIへの封筒適用と応答暗号化、鍵更新中の扱い（T-605）。
 4. `control_guard`の一致する実行：**実行経路と同時実行の単一性は極小wasmで検証済み**。ただし実サイズのwasmは `execute_upgrade` の引数として2 MiB上限を超えるため（実測2,193,336バイト）、チャンク導入かコードレジストリが必要。
 5. 残りの失敗試験（T-401〜T-410等）と、Phase 1完了後の読み取り専用レビュー。
