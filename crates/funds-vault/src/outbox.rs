@@ -318,9 +318,10 @@ async fn dispatch_withdrawal(
     request_id: &[u8],
     now: u64,
 ) -> Result<(), ErrorCode> {
-    let destination = request.destination.clone().ok_or_else(|| {
-        internal("withdrawal request without a destination".to_string())
-    })?;
+    let destination = request
+        .destination
+        .clone()
+        .ok_or_else(|| internal("withdrawal request without a destination".to_string()))?;
     let account = db::tx::query(|connection| {
         db::repo::ledger::custody_account(
             connection,
@@ -373,12 +374,7 @@ async fn dispatch_withdrawal(
     })
     .map_err(|error| map_db(error, None))?;
     db::tx::update(|connection| {
-        db::repo::actions::mark_dispatching(
-            connection,
-            &action.action_id,
-            action.worker_epoch,
-            now,
-        )
+        db::repo::actions::mark_dispatching(connection, &action.action_id, action.worker_epoch, now)
     })
     .map_err(|error| map_db(error, None))?;
 
@@ -414,12 +410,7 @@ async fn dispatch_withdrawal(
         }
         Ok((ExchangeOutcome::Rejected { message }, _response)) => {
             db::tx::update(|connection| {
-                db::repo::funds::release_reservation(
-                    connection,
-                    &action.user_id,
-                    request_id,
-                    now,
-                )?;
+                db::repo::funds::release_reservation(connection, &action.user_id, request_id, now)?;
                 db::repo::funds::set_request_state(
                     connection,
                     &action.user_id,
