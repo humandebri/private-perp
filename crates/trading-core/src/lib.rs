@@ -346,7 +346,7 @@ fn resolve_asset_index(market: &str) -> Result<u32, ErrorCode> {
         db::repo::meta::universe_json(connection, "local", "hyperliquid")
     })
     .map_err(map_db)?
-    .ok_or_else(|| ErrorCode::PolicyUnavailable)?;
+    .ok_or(ErrorCode::PolicyUnavailable)?;
     let entries: Vec<serde_json::Value> =
         serde_json::from_str(&universe).map_err(|error| internal(error.to_string()))?;
     for (index, entry) in entries.iter().enumerate() {

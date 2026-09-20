@@ -170,12 +170,15 @@ pub fn held_risk(connection: &Connection, account_id: &[u8; 32]) -> Result<u64, 
     u64::try_from(total).map_err(|_| Error::Invariant("negative notional"))
 }
 
+/// 注文の同一性（`order_id` と `cloid`）。
+pub type OrderIdentity = ([u8; 32], [u8; 16]);
+
 /// 受付IDに対応する既存注文（再送時に同じ結果を返すため）。
 pub fn order_by_request(
     connection: &Connection,
     user_id: &[u8; 32],
     client_request_id: &[u8],
-) -> Result<Option<([u8; 32], [u8; 16])>, Error> {
+) -> Result<Option<OrderIdentity>, Error> {
     let raw = connection
         .query_optional(
             "SELECT order_id, cloid FROM orders WHERE user_id = ?1 AND client_request_id = ?2",
