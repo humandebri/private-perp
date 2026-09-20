@@ -237,7 +237,10 @@ async fn submit_order(
                 ));
             }
         }
-        _ => {}
+        _ => {
+            // 成行（Market IOC）も指値（スリッページ上限）と同様に価格を必須とする。
+            return Err(bad(BadRequestCode::MissingField, "limit price is required"));
+        }
     }
     if args.leverage.unwrap_or(3) > 5 {
         return Err(bad(
