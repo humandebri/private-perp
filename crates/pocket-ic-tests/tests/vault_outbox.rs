@@ -16,6 +16,7 @@ use pocket_ic::PocketIc;
 use pocket_ic_tests::{
     FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy_default, pic, principal, update, update_args,
 };
+use std::time::Duration;
 
 const ORIGIN: &str = "https://app.example.test";
 const ACCEPTED: &[u8] = br#"{"status":"ok","response":{"type":"default"}}"#;
@@ -199,6 +200,21 @@ fn an_uncertain_send_is_not_resent() {
     let swept_again: Result<u32, ErrorCode> =
         update_args(&pic, vault, caller, "test_sweep_now", ()).expect("call");
     assert_eq!(swept_again.expect("sweep"), 0, "自動再送しない");
+
+    // 時間が経過しても解放・確定しない（T-206: 不明を勝手に解消しない）。
+    pic.advance_time(Duration::from_secs(10 * 60));
+    pic.tick();
+    let after_wait = status(&pic, vault, caller, &session);
+    assert_eq!(after_wait.unknowns.len(), 1, "不明なactionを保持し続ける");
+    assert_eq!(after_wait.withdrawable, 700_000, "予約は保持されたまま");
+    assert_eq!(after_wait.in_transit, 0, "確定残高へ含めない");
+    let swept_after_wait: Result<u32, ErrorCode> =
+        update_args(&pic, vault, caller, "test_sweep_now", ()).expect("call");
+    assert_eq!(
+        swept_after_wait.expect("sweep"),
+        0,
+        "時間経過でも自動再送しない"
+    );
 }
 
 #[test]
