@@ -65,6 +65,35 @@ fn set_vault_principal(vault: Principal) -> Result<(), ErrorCode> {
         .map_err(map_db)
 }
 
+/// 政策Canisterのprincipalを設定する（controllerのみ）。
+#[ic_cdk::update]
+fn set_policy_principal(policy: Principal) -> Result<(), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can set the policy principal".to_string(),
+        });
+    }
+    let bytes = policy.as_slice().to_vec();
+    if bytes.is_empty() || bytes.len() > 29 {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "invalid policy principal".to_string(),
+        });
+    }
+    db::tx::update(|connection| db::repo::core_config::set_policy_principal(connection, &bytes))
+        .map_err(map_db)
+}
+
+/// 政策Canisterのprincipal（診断用）。
+#[ic_cdk::query]
+fn get_policy_principal() -> Option<Principal> {
+    db::tx::query(db::repo::core_config::policy_principal)
+        .ok()
+        .flatten()
+        .map(|bytes| Principal::from_slice(&bytes))
+}
+
 /// vaultのprincipal（診断用）。
 #[ic_cdk::query]
 fn get_vault_principal() -> Option<Principal> {

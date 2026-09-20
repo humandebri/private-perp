@@ -12,8 +12,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, deploy, deploy_default, pic,
-    principal, update, update_args,
+    FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, deploy,
+    deploy_default, pic, principal, query_args, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -1263,4 +1263,38 @@ fn order_status_updates_are_reflected() {
     )
     .expect("call");
     assert!(!unknown.expect("applied"));
+}
+
+/// 政策Canisterのprincipalはcontrollerだけが設定できる。
+#[test]
+fn the_policy_principal_is_settable_by_controllers() {
+    let pic = pic();
+    let controller = principal(138);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let policy = deploy(
+        &pic,
+        POLICY_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_policy_principal", policy).expect("call");
+    set.expect("set_policy_principal");
+    let stored =
+        query_args::<_, Option<Principal>>(&pic, core, principal(139), "get_policy_principal", ())
+            .expect("call");
+    assert_eq!(stored, Some(policy));
+
+    let denied: Result<(), ErrorCode> =
+        update(&pic, core, principal(140), "set_policy_principal", policy).expect("call");
+    assert!(
+        matches!(denied, Err(ErrorCode::Unauthenticated { .. })),
+        "{denied:?}"
+    );
 }

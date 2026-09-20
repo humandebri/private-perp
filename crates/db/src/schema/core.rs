@@ -153,6 +153,7 @@ const CONFIG: &str = "
 CREATE TABLE core_config (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     vault_principal BLOB,
+    policy_principal BLOB,
     network TEXT,
     dex TEXT
 );
