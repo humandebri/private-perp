@@ -25,15 +25,17 @@
 
 | ID | 脅威・失敗条件 | 対策（契約） | 層 | 期待結果 | 証跡 | Phase |
 |---|---|---|---|---|---|---|
-| T-101 | 偽のEOAでchallengeを解く | EIP-712 `typed_data` にorigin/network/canister/用途/nonce/期限を束縛 | unit, PocketIC | 拒否（`BadRequest.InvalidSignature`） | 試験ログ | 1 | 実行: 2026-09-19 実行済み（`crates/pocket-ic-tests/tests/vault_auth.rs::a_signature_from_another_key_is_rejected`） /
+| T-101 | 偽のEOAでchallengeを解く | EIP-712 `typed_data` にorigin/network/canister/用途/nonce/期限を束縛 | unit, PocketIC | 拒否（`BadRequest.InvalidSignature`） | 試験ログ | 1 |
 | T-102 | 別Principalでセッションを開く | challengeの`principal`と署名EOAを束縛 | PocketIC | 拒否 | 試験ログ | 1 |
-| T-103 | 期限切れchallengeの再利用 | 5分期限、一回性nonce | unit, PocketIC | 拒否（`ChallengeExpired`） | 試験ログ | 1 | 実行: 2026-09-19 実行済み（同 `an_expired_challenge_is_rejected`） /
-| T-104 | challenge再使用（二重`open_session`） | nonce一回性をDBの一意制約で保証 | PocketIC | 2回目を拒否（`ChallengeReused`） | 試験ログ | 1 | 実行: 2026-09-19 実行済み（同 `a_challenge_can_only_be_used_once`） /
-| T-105 | 別origin・別networkからの要求 | `aad`とchallengeの束縛 | unit, PocketIC | 拒否（`OriginMismatch`／`NetworkMismatch`） | 試験ログ | 1 | 実行: 2026-09-19 実行済み（同 `a_challenge_signed_for_another_origin_is_rejected`） /
+| T-103 | 期限切れchallengeの再利用 | 5分期限、一回性nonce | unit, PocketIC | 拒否（`ChallengeExpired`） | 試験ログ | 1 |
+| T-104 | challenge再使用（二重`open_session`） | nonce一回性をDBの一意制約で保証 | PocketIC | 2回目を拒否（`ChallengeReused`） | 試験ログ | 1 |
+| T-105 | 別origin・別networkからの要求 | `aad`とchallengeの束縛 | unit, PocketIC | 拒否（`OriginMismatch`／`NetworkMismatch`） | 試験ログ | 1 |
 | T-106 | `purpose = withdrawal` のchallengeでセッション確立 | 用途分離 | PocketIC | 拒否 | 試験ログ | 1 |
 | T-107 | ログアウト後も旧セッションが有効 | `revoke_session`で失効世代を更新 | PocketIC | 失効（`SessionRevoked`）。資金要求・新規リスク受付を拒否 | 試験ログ | 2 |
 | T-108 | 失効伝達前に`trading_core`を呼ぶ | 未確認セッションを受理しない | PocketIC | 拒否（`SessionIssuedByUnregisteredVault`等） | 試験ログ | 2 |
 | T-109 | セッション鍵・本人キャッシュのブラウザ永続化 | 永続化しない設計 | Playwright, レビュー | 保存領域に残らない | 画面記録 | 2 |
+
+実行済み（2026-09-19、`crates/pocket-ic-tests/tests/vault_auth.rs`）: T-101（別鍵の署名を拒否）、T-103（期限切れを拒否）、T-104（challenge再使用を拒否）、T-105（別origin/networkの署名を拒否）。T-102は未実行。
 
 ## 4. 資金・台帳・出金
 
