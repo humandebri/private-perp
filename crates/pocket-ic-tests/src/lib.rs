@@ -75,13 +75,18 @@ pub fn deploy(
     controllers: Option<Vec<Principal>>,
     init_arg: Vec<u8>,
 ) -> Principal {
-    let settings = controllers.map(|controllers| CanisterSettings {
+    let settings = controllers.clone().map(|controllers| CanisterSettings {
         controllers: Some(controllers),
         ..Default::default()
     });
     let canister = pic.create_canister_with_settings(None, settings);
     pic.add_cycles(canister, TEST_CYCLES);
-    pic.install_canister(canister, wasm(file), init_arg, None);
+    // 明示的なcontrollerを指定した場合、installはそのcontrollerとして行う
+    // （既定のsenderはcontrollerではないため拒否される）。
+    let sender = controllers
+        .as_ref()
+        .and_then(|controllers| controllers.first().copied());
+    pic.install_canister(canister, wasm(file), init_arg, sender);
     canister
 }
 

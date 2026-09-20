@@ -5,4 +5,5 @@
 //! （`ic-sqlite-vfs` の `Db::migrate` が適用済み版を記録する）。
 
 pub mod core;
+pub mod guard;
 pub mod vault;

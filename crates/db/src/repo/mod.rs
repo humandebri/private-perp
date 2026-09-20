@@ -7,6 +7,7 @@ pub mod actions;
 pub mod auth;
 pub mod events;
 pub mod funds;
+pub mod guard;
 pub mod ledger;
 
 use crate::error::Error;

@@ -10,6 +10,9 @@ description = "control_guard Canisterの雛形"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+api-types = { path = "../api-types" }
 candid.workspace = true
 db = { path = "../db" }
 ic-cdk.workspace = true
+ic-cdk-management-canister.workspace = true
+sha2.workspace = true
