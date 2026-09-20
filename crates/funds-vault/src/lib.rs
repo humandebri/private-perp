@@ -157,6 +157,45 @@ fn get_hpke_public_key() -> Result<api_types::Blob, ErrorCode> {
         .ok_or(ErrorCode::PolicyUnavailable)
 }
 
+/// 本人の残高（`trading_core` がsnapshotを作るための参照）。
+///
+/// 戻り値は `(取引口座の残高, 出金可能額)`。認可のcaller束縛は呼び出し側（core）が
+/// `session_status` で行う。
+#[ic_cdk::query]
+fn get_balances(session: SessionHandle) -> Result<(u64, u64), ErrorCode> {
+    let status = auth::session_status(&session)?;
+    let user_id: [u8; 32] =
+        status
+            .user_id
+            .as_ref()
+            .try_into()
+            .map_err(|_| ErrorCode::Internal {
+                code: "user_id must be 32 bytes".to_string(),
+            })?;
+    let session_id: [u8; 32] =
+        session
+            .session_id
+            .as_ref()
+            .try_into()
+            .map_err(|_| ErrorCode::Internal {
+                code: "session_id must be 32 bytes".to_string(),
+            })?;
+    let verified = auth::VerifiedSession {
+        user_id,
+        session_id,
+    };
+    // 複式では負債アカウントの符号が反転するため、利用者の取り分は符号を戻す。
+    let trading = db::tx::query(|connection| {
+        db::repo::ledger::signed_balance(connection, &db::repo::ledger::user_trading(&user_id))
+    })
+    .map_err(|error| auth::map_db(error, None))?;
+    let withdrawable = fund::fund_status_with_holds(&verified)?.withdrawable;
+    let trading = u64::try_from(-trading).map_err(|_| ErrorCode::Internal {
+        code: "trading balance is out of range".to_string(),
+    })?;
+    Ok((trading, withdrawable))
+}
+
 /// 本人の取引口座ID（`trading_core` が所有権の確認に使う）。
 #[ic_cdk::query]
 fn get_trading_account(session: SessionHandle) -> Result<Option<api_types::Blob>, ErrorCode> {

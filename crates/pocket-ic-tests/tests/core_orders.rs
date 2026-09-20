@@ -814,3 +814,99 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
         update_args(&pic, core, caller, "test_sweep_now", ()).expect("call");
     assert_eq!(swept_again.expect("sweep"), 0, "自動再送しない");
 }
+
+/// 口座snapshotはvaultの残高とcoreの注文を統合して返す。
+#[test]
+fn the_snapshot_merges_vault_balances_and_core_orders() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(125);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+    let meta: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_meta_cache",
+        (
+            "local".to_string(),
+            "hyperliquid".to_string(),
+            UNIVERSE.to_string(),
+        ),
+    )
+    .expect("call");
+    meta.expect("set_meta_cache");
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .expect("call");
+    context.expect("set_market_context");
+
+    let caller = principal(126);
+    let session = open_session(&pic, vault, caller, &secret(187));
+    let credit: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (session.clone(), 1_000_000u64, blob(&[81u8; 32])),
+    )
+    .expect("call");
+    credit.expect("credit");
+    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_allocation",
+        AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(b"snapshot-alloc"),
+            amount: 300_000,
+            target: AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .expect("call");
+    allocated.expect("allocation");
+
+    let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"snapshot-1", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    submitted.expect("accepted order");
+
+    let snapshot: Result<api_types::order::AccountSnapshot, ErrorCode> =
+        update(&pic, core, caller, "get_account_snapshot", session.clone()).expect("call");
+    let snapshot = snapshot.expect("snapshot");
+    assert_eq!(snapshot.account_id.len(), 32);
+    assert_eq!(
+        snapshot.withdrawable, 700_000,
+        "vaultの出金可能額（入金1,000,000 − 予約300,000）"
+    );
+    assert_eq!(snapshot.equity, 0, "着金の確定前は取引口座に残高が無い");
+    assert!(snapshot.open_orders.is_empty());
+    assert_eq!(
+        snapshot.pending_orders.len(),
+        1,
+        "受付済み注文はpendingとして出る"
+    );
+    assert!(snapshot.positions.is_empty());
+}

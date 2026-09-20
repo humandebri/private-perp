@@ -429,6 +429,91 @@ fn is_terminal(state: api_types::order::OrderState) -> bool {
     )
 }
 
+/// 口座snapshot（残高はvault、注文はcore）。
+///
+/// 認可にvaultへの問い合わせが必要なためupdateで提供する。
+#[ic_cdk::update]
+async fn get_account_snapshot(
+    session: SessionHandle,
+) -> Result<api_types::order::AccountSnapshot, ErrorCode> {
+    let user_id = authorize(&session).await?;
+    let account_id = trading_account(&session).await?;
+    let now = ic_cdk::api::time() / 1_000_000;
+
+    let vault = vault_principal()?;
+    let response = Call::bounded_wait(vault, "get_balances")
+        .with_arg(session.clone())
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: format!("vault get_balances: {error}"),
+        })?;
+    let balances: Result<(u64, u64), ErrorCode> = response
+        .candid()
+        .map_err(|error| internal(error.to_string()))?;
+    let (trading, withdrawable) = balances?;
+
+    let rows =
+        db::tx::query(|connection| db::repo::orders::list_orders(connection, &user_id, None, 50))
+            .map_err(map_db)?;
+
+    let mut open_orders = Vec::new();
+    let mut pending_orders = Vec::new();
+    for (_, order) in rows {
+        match order.state {
+            api_types::order::OrderState::Open | api_types::order::OrderState::PartiallyFilled => {
+                open_orders.push(api_types::order::OrderView {
+                    order_id: order.order_id.clone(),
+                    cloid: Some(order.cloid.clone()),
+                    market: order.market.clone(),
+                    side: if order.is_buy {
+                        api_types::order::Side::Buy
+                    } else {
+                        api_types::order::Side::Sell
+                    },
+                    kind: if order.kind == "market_ioc" {
+                        api_types::order::OrderKind::MarketIoc
+                    } else {
+                        api_types::order::OrderKind::LimitGtc
+                    },
+                    price: order.price.clone(),
+                    quantity: order.quantity.clone(),
+                    filled_quantity: order.filled_quantity.clone(),
+                    state: order.state,
+                    venue_state: None,
+                    hl_oid: order.hl_oid,
+                    cancel_requested: order.cancel_requested,
+                    updated_at: order.updated_at,
+                });
+            }
+            api_types::order::OrderState::Pending | api_types::order::OrderState::Unknown => {
+                pending_orders.push(api_types::order::PendingOrderView {
+                    request_id: order.order_id.clone(),
+                    cloid: Some(order.cloid.clone()),
+                    order_id: Some(order.order_id.clone()),
+                    action_state: api_types::fund::ActionState::Queued,
+                    since: order.created_at,
+                    last_error: None,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(api_types::order::AccountSnapshot {
+        account_id: account_id.to_vec().into(),
+        equity: trading,
+        margin_used: 0,
+        withdrawable,
+        unrealized_pnl: 0,
+        positions: Vec::new(),
+        open_orders,
+        pending_orders,
+        observed_at: now,
+        revision: 1,
+        data_age_ms: 0,
+    })
+}
+
 /// 注文一覧（新しい順）。
 ///
 /// **updateである理由**：認可に `funds_vault` へのinter-canister呼び出しが必要だが、
