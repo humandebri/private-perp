@@ -141,3 +141,47 @@ pub fn credit(
 pub fn now_ms() -> u64 {
     clock::now_ms()
 }
+
+/// 有界な定期照合（先頭から`limit`件の入金先を確認して計上する）。
+pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
+    let addresses =
+        db::tx::query(|connection| db::repo::ledger::reserve_addresses(connection, limit))
+            .map_err(|error| ErrorCode::Internal {
+                code: format!("{error:?}"),
+            })?;
+    let mut credited = 0;
+    for address in addresses {
+        let body = fetch_ledger_updates(&format!("0x{}", hex::encode(address))).await?;
+        let Ok(entries) = serde_json::from_slice::<Vec<serde_json::Value>>(&body) else {
+            continue;
+        };
+        let now = now_ms();
+        for entry in entries {
+            let Some(hash) = entry.get("hash").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let Some(usdc) = entry.get("usdc").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let hash = hash.strip_prefix("0x").unwrap_or(hash);
+            let Ok(tx_hash) = hex::decode(hash) else {
+                continue;
+            };
+            let amount = decimal_micros(usdc)?;
+            let at = entry
+                .get("time")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(now);
+            let inserted = db::tx::update(|connection| {
+                credit(connection, &tx_hash, amount, &address, "usdc", at)
+            })
+            .map_err(|error| ErrorCode::Internal {
+                code: format!("{error:?}"),
+            })?;
+            if inserted {
+                credited += 1;
+            }
+        }
+    }
+    Ok(credited)
+}

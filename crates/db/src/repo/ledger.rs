@@ -568,3 +568,22 @@ pub fn custody_account_by_address(
     })
     .transpose()
 }
+
+/// 入金先（準備口座）のアドレス（新しい順）。定期照合の対象。
+pub fn reserve_addresses(connection: &Connection, limit: u32) -> Result<Vec<[u8; 20]>, Error> {
+    let rows = connection
+        .query_all(
+            "SELECT master_address FROM custody_accounts WHERE kind = 'reserve'
+              ORDER BY created_at DESC LIMIT ?1",
+            params![limit as i64],
+            |row| row.get::<Vec<u8>>(0),
+        )
+        .map_err(sql)?;
+    rows.into_iter()
+        .map(|bytes| {
+            bytes
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 20-byte address"))
+        })
+        .collect()
+}

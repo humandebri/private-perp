@@ -30,6 +30,8 @@ const MEMORY_ID: u8 = db::memory_id::FUNDS_VAULT_MAIN;
 thread_local! {
     /// 直近のsweep時刻（heartbeatの間隔ゲート）。
     static LAST_SWEEP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 直近の入金照合時刻。
+    static LAST_DEPOSIT_RECONCILE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// このビルドのバージョン。デプロイ確認用。
@@ -390,6 +392,19 @@ async fn heartbeat() {
         return;
     }
     let _ = outbox::sweep(now).await;
+
+    // 入金の定期照合（60秒間隔・1回あたり2件まで。outcallの回数を抑える）。
+    let due_deposits = LAST_DEPOSIT_RECONCILE.with(|cell| {
+        if now.saturating_sub(cell.get()) < 60_000 {
+            false
+        } else {
+            cell.set(now);
+            true
+        }
+    });
+    if due_deposits {
+        let _ = deposits::reconcile_all(2).await;
+    }
 }
 
 /// テスト専用のsweep（`test-venue` featureでのみ存在）。
