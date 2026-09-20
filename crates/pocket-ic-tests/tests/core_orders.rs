@@ -1125,3 +1125,142 @@ fn fills_are_ingested_idempotently() {
     assert_eq!(orders.items[0].state, api_types::order::OrderState::Filled);
     assert_eq!(orders.items[0].filled_quantity, "0.05");
 }
+
+/// `orderStatus`照合の結果（取消など）が注文状態へ反映される。
+#[test]
+fn order_status_updates_are_reflected() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(134);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+    let meta: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_meta_cache",
+        (
+            "local".to_string(),
+            "hyperliquid".to_string(),
+            UNIVERSE.to_string(),
+        ),
+    )
+    .expect("call");
+    meta.expect("set_meta_cache");
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .expect("call");
+    context.expect("set_market_context");
+
+    let caller = principal(135);
+    let session = open_session(&pic, vault, caller, &secret(191));
+    let credit: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (session.clone(), 1_000_000u64, blob(&[121u8; 32])),
+    )
+    .expect("call");
+    credit.expect("credit");
+    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_allocation",
+        AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(b"status-alloc"),
+            amount: 300_000,
+            target: AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .expect("call");
+    allocated.expect("allocation");
+    let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
+        &pic,
+        core,
+        caller,
+        "request_agent_generation",
+        session.clone(),
+    )
+    .expect("call");
+    agent.expect("agent");
+    let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"status-1", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    submitted.expect("accepted order");
+
+    let venue_body = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":888}}]}}}"#.to_vec();
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        core,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, venue_body)),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+
+    let applied: Result<bool, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_apply_order_status",
+        (
+            session.clone(),
+            r#"{"status":"canceled","order":{"oid":888}}"#.to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(applied.expect("applied"), "既知のoidへ反映される");
+
+    let orders: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "list_orders",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    assert_eq!(
+        orders.expect("orders").items[0].state,
+        api_types::order::OrderState::Cancelled
+    );
+
+    // 未知のoidは何も変えない。
+    let unknown: Result<bool, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_apply_order_status",
+        (
+            session.clone(),
+            r#"{"status":"canceled","order":{"oid":999999}}"#.to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(!unknown.expect("applied"));
+}

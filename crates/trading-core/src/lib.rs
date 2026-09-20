@@ -1059,6 +1059,39 @@ async fn test_ingest_fills(
     Ok(ingested)
 }
 
+/// テスト専用：`orderStatus`相当を反映する（`test-venue` featureでのみ存在）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+async fn test_apply_order_status(
+    session: api_types::auth::SessionHandle,
+    status_json: String,
+) -> Result<bool, ErrorCode> {
+    authorize(&session).await?;
+    let value: serde_json::Value =
+        serde_json::from_str(&status_json).map_err(|error| internal(error.to_string()))?;
+    let status = value
+        .get("status")
+        .and_then(|status| status.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let oid = value
+        .get("order")
+        .and_then(|order| order.get("oid"))
+        .and_then(|oid| oid.as_u64())
+        .ok_or_else(|| bad(BadRequestCode::MissingField, "order.oid is required"))?;
+    // 取引所の語彙をこちらの状態へ写す（未知はunknownとして保持）。
+    let state = match status.as_str() {
+        "open" => "open",
+        "filled" => "filled",
+        "canceled" | "cancelled" => "cancelled",
+        "rejected" => "rejected",
+        _ => "unknown",
+    };
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| db::repo::orders::apply_order_status(connection, oid, state, now))
+        .map_err(map_db)
+}
+
 fn init_db() {
     if let Err(error) = db::init(MEMORY_ID, db::schema::core::MIGRATIONS) {
         ic_cdk::trap(format!("db init failed: {error}"));

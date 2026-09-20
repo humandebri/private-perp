@@ -605,3 +605,20 @@ pub fn ingest_fill(
         .map_err(sql)?;
     Ok(true)
 }
+
+/// `orderStatus`照合の結果を反映する（`hl_oid`で注文を引く）。
+pub fn apply_order_status(
+    connection: &mut UpdateConnection<'_>,
+    hl_oid: u64,
+    state: &str,
+    now: u64,
+) -> Result<bool, Error> {
+    connection
+        .execute(
+            "UPDATE orders SET state = ?2, updated_at = ?3 WHERE hl_oid = ?1",
+            params![hl_oid as i64, state, now as i64],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    Ok(changed > 0)
+}
