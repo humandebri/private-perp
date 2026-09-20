@@ -149,14 +149,10 @@ CREATE TABLE meta_cache (
 const CONFIG: &str = "
 CREATE TABLE core_config (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    vault_principal BLOB
+    vault_principal BLOB,
+    network TEXT,
+    dex TEXT
 );
-";
-
-/// 銘柄解決に使うnetwork・dex（固定値を埋め込まないため設定から解決する）。
-const MARKET_CONTEXT: &str = "
-ALTER TABLE core_config ADD COLUMN network TEXT;
-ALTER TABLE core_config ADD COLUMN dex TEXT;
 ";
 
 /// `trading_core` のMigration一覧。
@@ -172,9 +168,5 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 3,
         sql: CONFIG,
-    },
-    Migration {
-        version: 4,
-        sql: MARKET_CONTEXT,
     },
 ];
