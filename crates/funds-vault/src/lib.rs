@@ -55,6 +55,12 @@ fn revoke_session(session: SessionHandle) -> Result<(), ErrorCode> {
     auth::revoke_session(&session, ic_cdk::api::msg_caller())
 }
 
+/// セッションの有効性（canister間の検証経路。呼び出し元は返却されたprincipalを検証する）。
+#[ic_cdk::query]
+fn session_status(session: SessionHandle) -> Result<api_types::auth::SessionStatus, ErrorCode> {
+    auth::session_status(&session)
+}
+
 /// 入金案内（認証済みセッションが必要）。
 #[ic_cdk::query]
 fn get_funding_instructions(

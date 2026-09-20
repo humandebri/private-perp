@@ -6,6 +6,7 @@
 use crate::{clock, config, random};
 use api_types::auth::{
     ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
+    SessionStatus,
 };
 use api_types::error::{BadRequestCode, ErrorCode, NotAllowedCode};
 use candid::Principal;
@@ -302,6 +303,40 @@ pub fn verify_session(
     Ok(VerifiedSession {
         user_id: row.user_id,
         session_id,
+    })
+}
+
+/// セッションの有効性を返す（canister間の検証経路。`trading_core` が使う）。
+///
+/// 呼び出し元の束縛はここでは行わない。返した `principal` を呼び出し側が自分の
+/// `msg_caller` と比較して認可する（vaultはcoreの`msg_caller`を知らないため）。
+pub fn session_status(session: &SessionHandle) -> Result<SessionStatus, ErrorCode> {
+    let session_id = to_fixed::<32>(&session.session_id, "session_id must be 32 bytes")?;
+    let now = clock::now_ms();
+    let (valid, stored) = db::tx::query(|connection| {
+        let valid = db::repo::auth::find_valid_session(connection, &session_id, now)?;
+        let stored = db::repo::auth::session_row(connection, &session_id)?;
+        Ok((valid, stored))
+    })
+    .map_err(|error| map_db(error, None))?;
+
+    let row: SessionRow = match (valid, stored) {
+        (Some(row), _) => row,
+        (None, Some(row)) if row.revoked_at.is_some() => return Err(ErrorCode::SessionRevoked),
+        (None, Some(_)) => return Err(ErrorCode::SessionExpired),
+        (None, None) => {
+            return Err(ErrorCode::Unauthenticated {
+                reason: "unknown session".to_string(),
+            });
+        }
+    };
+
+    let principal = Principal::from_slice(&row.principal);
+    Ok(SessionStatus {
+        user_id: row.user_id.to_vec().into(),
+        principal,
+        expires_at: row.expires_at,
+        revocation_generation: row.revocation_generation,
     })
 }
 

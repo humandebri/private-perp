@@ -51,3 +51,15 @@ pub struct SessionHandle {
 pub struct RevokeSessionRequest {
     pub session: SessionHandle,
 }
+
+/// セッションの有効性（`trading_core` がvaultへ問い合わせる）。
+///
+/// 束縛されたprincipalを含むため、呼び出し側は自分の`msg_caller`と比較して認可する
+/// （vault側で呼び出し元を束縛できない、canister間の検証経路のため）。
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionStatus {
+    pub user_id: Blob,
+    pub principal: Principal,
+    pub expires_at: Timestamp,
+    pub revocation_generation: u64,
+}
