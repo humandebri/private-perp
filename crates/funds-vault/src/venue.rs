@@ -69,6 +69,88 @@ impl UsdSend {
     }
 }
 
+/// Agent承認（`approveAgent`）のaction。
+pub struct ApproveAgent {
+    /// Agentのアドレス（EIP-712では`address`型、JSONでは0x文字列）。
+    pub agent: [u8; 20],
+    pub name: String,
+    pub time: u64,
+}
+
+impl ApproveAgent {
+    /// EIP-712の署名対象ダイジェスト（master鍵＝口座所有者で署名する）。
+    pub fn digest(&self) -> Result<[u8; 32], ErrorCode> {
+        let values = vec![
+            user_signed::TypedValue::String(config::HL_CHAIN_NAME.to_string()),
+            user_signed::TypedValue::Address(self.agent),
+            user_signed::TypedValue::String(self.name.clone()),
+            user_signed::TypedValue::Uint64(self.time),
+        ];
+        user_signed::digest(
+            config::HL_USER_SIGNED_CHAIN_ID,
+            user_signed::APPROVE_AGENT_PRIMARY_TYPE,
+            user_signed::APPROVE_AGENT_FIELDS,
+            &values,
+        )
+        .map_err(|error| ErrorCode::Internal {
+            code: format!("approveAgent digest: {error}"),
+        })
+    }
+
+    /// 送信するJSON本文（action・signature・nonce）。
+    pub fn body(&self, signature: &hl_sign::Signature) -> Result<Vec<u8>, ErrorCode> {
+        let body = serde_json::json!({
+            "action": {
+                "type": "approveAgent",
+                "signatureChainId": config::HL_SIGNATURE_CHAIN_ID,
+                "hyperliquidChain": config::HL_CHAIN_NAME,
+                "agentAddress": format!("0x{}", hex::encode(self.agent)),
+                "agentName": self.name,
+                "nonce": self.time,
+            },
+            "nonce": self.time,
+            "signature": {
+                "r": format!("0x{}", hex::encode(signature.r)),
+                "s": format!("0x{}", hex::encode(signature.s)),
+                "v": signature.v,
+            },
+        });
+        serde_json::to_vec(&body).map_err(|error| ErrorCode::Internal {
+            code: format!("approveAgent body: {error}"),
+        })
+    }
+}
+
+/// `approveAgent`を送信する（非replicated POST）。
+pub async fn post_approve_agent(
+    payload: &ApproveAgent,
+    signature: &hl_sign::Signature,
+) -> Result<(ExchangeOutcome, Vec<u8>), ErrorCode> {
+    let body = payload.body(signature)?;
+    let response = HttpRequest::new(config::HL_EXCHANGE_URL)
+        .with_method(HttpMethod::POST)
+        .with_headers(vec![HttpHeader {
+            name: "Content-Type".to_string(),
+            value: "application/json".to_string(),
+        }])
+        .with_body(body)
+        .with_max_response_bytes(MAX_EXCHANGE_RESPONSE_BYTES)
+        .non_replicated()
+        .send()
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: error.to_string(),
+        })?;
+
+    match parse_exchange_response(&response.body) {
+        Some(outcome) => Ok((outcome, response.body)),
+        None => Err(ErrorCode::UpstreamRejected {
+            code: "unparseable exchange response".to_string(),
+            retryable: false,
+        }),
+    }
+}
+
 /// マイクロUSDCをHLへ渡す十進文字列にする（指数表記を使わない）。
 pub fn amount_text(micros: u64) -> String {
     hl_types::UsdcMicros::from_micros(micros).to_decimal_string()

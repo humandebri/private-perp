@@ -132,3 +132,27 @@ pub fn latest(
         .map_err(sql)?;
     raw.map(convert).transpose()
 }
+
+/// 世代を`active`へ遷移させる（承認の送信が受理された後）。
+pub fn mark_active(
+    connection: &mut UpdateConnection<'_>,
+    account_id: &[u8; 32],
+    generation: u64,
+    approved_at: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE agent_generations SET state = 'active', approved_at = ?3
+              WHERE account_id = ?1 AND generation = ?2 AND state = 'requested'",
+            params![account_id.as_slice(), generation as i64, approved_at as i64],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    if changed == 0 {
+        return Err(Error::StateConflict {
+            expected: "requested".to_string(),
+            actual: "missing or already approved".to_string(),
+        });
+    }
+    Ok(())
+}
