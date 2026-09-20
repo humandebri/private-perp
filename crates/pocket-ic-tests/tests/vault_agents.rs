@@ -12,7 +12,6 @@ use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
     FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy_default, pic, principal, query, update,
-    update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -133,6 +132,24 @@ fn agent_generations_are_requested_with_a_derived_address() {
 const ACCEPTED: &[u8] = br#"{"status":"ok","response":{"type":"default"}}"#;
 const REJECTED: &[u8] = br#"{"status":"err","response":"agent already exists"}"#;
 
+fn approve_agent(
+    pic: &PocketIc,
+    vault: Principal,
+    caller: Principal,
+    session: &SessionHandle,
+    reply: Result<(u16, Vec<u8>), (u64, String)>,
+) -> Result<AgentGeneration, ErrorCode> {
+    call_with_mocked_outcall(
+        pic,
+        vault,
+        caller,
+        "approve_agent_generation",
+        (session.clone(), api_types::Blob::from(vec![7u8; 20])),
+        reply,
+    )
+    .expect("call")
+}
+
 #[test]
 fn approving_a_generation_activates_it_only_when_the_venue_accepts() {
     let pic = pic();
@@ -151,15 +168,7 @@ fn approving_a_generation_activates_it_only_when_the_venue_accepts() {
     assert_eq!(requested.expect("generation").generation, 1);
 
     // 取引所が拒否した場合はrequestedのまま残る。
-    let rejected: Result<AgentGeneration, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        vault,
-        caller,
-        "approve_agent_generation",
-        (session.clone(),),
-        Ok((200, REJECTED.to_vec())),
-    )
-    .expect("call");
+    let rejected = approve_agent(&pic, vault, caller, &session, Ok((200, REJECTED.to_vec())));
     assert!(
         matches!(rejected, Err(ErrorCode::UpstreamRejected { .. })),
         "{rejected:?}"
@@ -171,15 +180,7 @@ fn approving_a_generation_activates_it_only_when_the_venue_accepts() {
     assert_eq!(still.next.expect("next").generation, 1);
 
     // 受理された場合はactiveへ遷移し、currentになる。
-    let approved: Result<AgentGeneration, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        vault,
-        caller,
-        "approve_agent_generation",
-        (session.clone(),),
-        Ok((200, ACCEPTED.to_vec())),
-    )
-    .expect("call");
+    let approved = approve_agent(&pic, vault, caller, &session, Ok((200, ACCEPTED.to_vec())));
     let approved = approved.expect("approved");
     assert_eq!(approved.state, AgentState::Active);
     assert!(approved.approved_at.is_some());
@@ -191,8 +192,7 @@ fn approving_a_generation_activates_it_only_when_the_venue_accepts() {
     assert!(status.next.is_none());
 
     // 二重承認は要求中の世代が無いため拒否する。
-    let again: Result<AgentGeneration, ErrorCode> =
-        update_args(&pic, vault, caller, "approve_agent_generation", (session,)).expect("call");
+    let again = approve_agent(&pic, vault, caller, &session, Ok((200, ACCEPTED.to_vec())));
     assert!(
         again.is_err(),
         "要求中の世代が無ければ承認しない: {again:?}"

@@ -578,47 +578,37 @@ pub fn agent_status(session: &VerifiedSession) -> Result<AgentStatus, ErrorCode>
     })
 }
 
-/// 要求中のAgent世代を承認する（master鍵で`approveAgent`を署名して送信する）。
+/// Agentアドレスを承認する（master鍵で`approveAgent`を署名して送信する）。
 ///
-/// 取引所が受理した場合のみ`active`へ遷移させる。拒否・応答不明の場合は`requested`のまま
-/// 残し、繰り返し要求できる（二重承認は`mark_active`のCASで防ぐ）。
+/// 鍵は `trading_core` が導出・保管するため、vaultは**渡されたアドレス**をmaster署名で
+/// 承認する（`Implementation.md` 7章）。
 pub async fn approve_agent_generation(
     session: &VerifiedSession,
+    agent_address: [u8; 20],
 ) -> Result<AgentGeneration, ErrorCode> {
     let now = clock::now_ms();
-    let (account_id, master_path, _master_public_key, address) =
+    let (account_id, master_path, _master_public_key, _address) =
         crate::outbox::provision_trading_account(&session.user_id, now).await?;
-    let _ = address;
 
-    let generation = db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
-        .map_err(|error| map_db(error, None))?
-        .filter(|generation| generation.state == AgentState::Requested)
-        .ok_or(ErrorCode::NotAllowed {
-            code: api_types::error::NotAllowedCode::OperationNotAvailable,
-        })?;
+    let latest = db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
+        .map_err(|error| map_db(error, None))?;
+    let generation = latest.as_ref().map(|row| row.generation).unwrap_or(1);
 
-    let agent_address: [u8; 20] =
-        generation
-            .agent_address
-            .as_ref()
-            .try_into()
-            .map_err(|_| ErrorCode::Internal {
-                code: "agent address must be 20 bytes".to_string(),
-            })?;
     let payload = crate::venue::ApproveAgent {
         agent: agent_address,
-        name: format!("private-perp gen {}", generation.generation),
+        name: format!("private-perp gen {generation}"),
         time: now,
     };
     let digest = payload.digest()?;
-    // master鍵（口座所有者）で署名する。`v`の復元に必要な公開鍵は経路から再導出する。
     let master_public_key = crate::crypto::public_key(master_path.clone()).await?;
     let signature = crate::crypto::sign_with_key(&digest, master_path, &master_public_key).await?;
 
     match crate::venue::post_approve_agent(&payload, &signature).await {
         Ok((crate::venue::ExchangeOutcome::Accepted, _response)) => {
             db::tx::update(|connection| {
-                db::repo::agents::mark_active(connection, &account_id, generation.generation, now)?;
+                if let Some(row) = db::repo::agents::latest(connection, &account_id)? {
+                    db::repo::agents::mark_active(connection, &account_id, row.generation, now)?;
+                }
                 db::repo::events::insert_audit(
                     connection,
                     "user",
@@ -630,9 +620,12 @@ pub async fn approve_agent_generation(
             })
             .map_err(|error| map_db(error, None))?;
             Ok(AgentGeneration {
-                state: AgentState::Active,
+                account_id: account_id.to_vec().into(),
+                generation,
+                agent_address: agent_address.to_vec().into(),
                 approved_at: Some(now),
-                ..generation
+                expires_at: None,
+                state: AgentState::Active,
             })
         }
         Ok((crate::venue::ExchangeOutcome::Rejected { message }, _response)) => {

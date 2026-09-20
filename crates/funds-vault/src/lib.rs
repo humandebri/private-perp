@@ -187,13 +187,22 @@ async fn request_agent_generation(
     fund::request_agent_generation(&verified).await
 }
 
-/// 要求中のAgent世代を承認する（master鍵で署名して送信する）。
+/// 渡されたAgentアドレスを承認する（master鍵で署名して送信する）。
 #[ic_cdk::update]
 async fn approve_agent_generation(
     session: SessionHandle,
+    agent_address: api_types::Blob,
 ) -> Result<api_types::fund::AgentGeneration, ErrorCode> {
     let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
-    fund::approve_agent_generation(&verified).await
+    let agent_address: [u8; 20] =
+        agent_address
+            .as_ref()
+            .try_into()
+            .map_err(|_| ErrorCode::BadRequest {
+                code: api_types::error::BadRequestCode::MalformedPayload,
+                detail: "agent_address must be 20 bytes".to_string(),
+            })?;
+    fund::approve_agent_generation(&verified, agent_address).await
 }
 
 /// Agent世代の状態。
