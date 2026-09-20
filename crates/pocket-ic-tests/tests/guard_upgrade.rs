@@ -11,6 +11,10 @@ use std::time::Duration;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// 極小の有効なwasmモジュール（ヘッダのみ）。`install_code`へ渡すサイズ上限を避けて
+/// 実行経路を検証するために使う。
+const MINIMAL_WASM: &[u8] = b"\0asm\x01\0\0\0";
+
 fn deploy_guard(pic: &PocketIc, controller: Principal) -> Principal {
     deploy(
         pic,
@@ -156,13 +160,8 @@ fn execution_is_blocked_until_seven_days_and_on_content_mismatch() {
     );
 }
 
-/// 一致する予約の実行。**ingress上限（2,097,152バイト）のため未検証**。
-///
-/// `execute_upgrade` はwasmモジュールを引数で受け取る設計であり、2 MiBを超える
-/// wasmは単一ingressメッセージで送れない（`docs/phase-1/evidence/P1-009.md`）。
-/// `install_chunked_code` 等の導入後に有効化する。
+/// 一致する予約は実行できる（極小wasmで`install_code`まで検証する）。
 #[test]
-#[ignore = "execute_upgrade cannot carry a wasm module >= 2 MiB in one ingress message; needs chunked install"]
 fn a_matching_reservation_executes_the_upgrade() {
     let pic = pic();
     let controller = principal(53);
@@ -174,8 +173,7 @@ fn a_matching_reservation_executes_the_upgrade() {
         Some(vec![guard]),
         candid::encode_one(()).unwrap(),
     );
-    let policy_wasm = wasm(POLICY_WASM);
-    let wasm_hash = hash_of(&policy_wasm);
+    let wasm_hash = hash_of(MINIMAL_WASM);
 
     let set: Result<(), ErrorCode> =
         update(&pic, guard, controller, "set_sns_principal", sns).expect("call");
@@ -185,7 +183,81 @@ fn a_matching_reservation_executes_the_upgrade() {
     for _ in 0..5 {
         pic.tick();
     }
-    execute(&pic, guard, principal(55), target, policy_wasm).expect("execute");
+
+    execute(&pic, guard, principal(55), target, MINIMAL_WASM.to_vec()).expect("execute");
+    assert!(
+        status(&pic, guard).scheduled.is_none(),
+        "実行後は予約が消える"
+    );
+
+    // 二重実行は拒否する。
+    let again =
+        execute(&pic, guard, principal(55), target, MINIMAL_WASM.to_vec()).expect_err("again");
+    assert_eq!(
+        again,
+        ErrorCode::NotAllowed {
+            code: NotAllowedCode::UpgradeNotScheduled
+        }
+    );
+}
+
+/// 実行権は単一の実行者だけが取れる（同時投入でも二重インストールしない）。
+#[test]
+fn only_one_concurrent_execution_wins() {
+    let pic = pic();
+    let controller = principal(53);
+    let guard = deploy_guard(&pic, controller);
+    let sns = principal(54);
+    let target = deploy(
+        &pic,
+        POLICY_WASM,
+        Some(vec![guard]),
+        candid::encode_one(()).unwrap(),
+    );
+    let wasm_hash = hash_of(MINIMAL_WASM);
+
+    let set: Result<(), ErrorCode> =
+        update(&pic, guard, controller, "set_sns_principal", sns).expect("call");
+    set.expect("set_sns_principal");
+    schedule(&pic, guard, sns, target, wasm_hash).expect("schedule");
+    pic.advance_time(Duration::from_millis(7 * DAY_MS + DAY_MS));
+    for _ in 0..5 {
+        pic.tick();
+    }
+
+    let payload =
+        candid::encode_args((target, MINIMAL_WASM.to_vec(), Vec::<u8>::new())).expect("encode");
+    let first = pic
+        .submit_call(guard, principal(55), "execute_upgrade", payload.clone())
+        .expect("submit 1");
+    let second = pic
+        .submit_call(guard, principal(56), "execute_upgrade", payload)
+        .expect("submit 2");
+
+    let outcomes: Vec<Result<(), ErrorCode>> = [first, second]
+        .into_iter()
+        .map(|id| {
+            let bytes = pic.await_call(id).expect("await");
+            candid::decode_one::<Result<(), ErrorCode>>(&bytes).expect("decode")
+        })
+        .collect();
+
+    let wins = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+    let losses = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                Err(ErrorCode::NotAllowed {
+                    code: NotAllowedCode::UpgradeAlreadyExecuted
+                }) | Err(ErrorCode::NotAllowed {
+                    code: NotAllowedCode::UpgradeNotScheduled
+                })
+            )
+        })
+        .count();
+    assert_eq!(wins, 1, "実行者は1つだけ: {outcomes:?}");
+    assert_eq!(losses, 1, "他方は拒否される: {outcomes:?}");
     assert!(status(&pic, guard).scheduled.is_none());
 }
 

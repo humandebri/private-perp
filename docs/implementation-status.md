@@ -138,6 +138,6 @@ PocketIC上の署名往復は約17.9ms（本番subnetの性能値ではない）
 1. `trading_core`の注文パイプライン：Agent承認（`approveAgent`＋HL照合）、署名・送信・`orderStatus`照合、`get_account_snapshot`、SL/TP・全部決済、リスク予約の実配線。
 2. 2Cの残り：入金の本番経路（`/info`の外部イベント照合による計上）、払出し・回収のaction、`unknown`の照合による解消。
 3. 個人データAPIへの封筒適用と応答暗号化、鍵更新中の扱い（T-605）。
-4. `control_guard`の一致する実行：`execute_upgrade`はwasmを引数で受けるため2 MiB超を送れない（実測2,193,336バイト）。チャンク導入かコードレジストリが必要（テストは理由付きで保留）。
+4. `control_guard`の一致する実行：**実行経路と同時実行の単一性は極小wasmで検証済み**。ただし実サイズのwasmは `execute_upgrade` の引数として2 MiB上限を超えるため（実測2,193,336バイト）、チャンク導入かコードレジストリが必要。
 5. 残りの失敗試験（T-401〜T-410等）と、Phase 1完了後の読み取り専用レビュー。
 6. testnet：実HLの受理挙動、署名p50/p95、受付→HL受理、Confidential Subnetの成立性。**未検証**。

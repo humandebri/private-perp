@@ -135,7 +135,7 @@ pub fn mark_executed(
 ) -> Result<(), Error> {
     connection
         .execute(
-            "UPDATE upgrades SET state = 'executed', executed_at = ?2 WHERE upgrade_id = ?1 AND state IN ('pending', 'executable')",
+            "UPDATE upgrades SET state = 'executed', executed_at = ?2 WHERE upgrade_id = ?1 AND state = 'executing'",
             params![upgrade_id, now as i64],
         )
         .map_err(sql)?;
@@ -156,7 +156,7 @@ pub fn claim_upgrade(
 ) -> Result<bool, Error> {
     connection
         .execute(
-            "UPDATE upgrades SET state = 'executable'
+            "UPDATE upgrades SET state = 'executing'
               WHERE upgrade_id = ?1 AND state IN ('pending', 'executable')",
             params![upgrade_id],
         )

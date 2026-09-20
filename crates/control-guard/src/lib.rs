@@ -229,7 +229,7 @@ fn get_upgrade_status() -> UpgradeStatus {
         executable_at: row.executable_at,
         // 猶予の経過は保存状態ではなく時刻から判定して返す（予約行は書き換えない）。
         state: match row.state.as_str() {
-            "executable" => UpgradeState::Executable,
+            "executable" | "executing" => UpgradeState::Executable,
             "executed" => UpgradeState::Executed,
             "cancelled" => UpgradeState::Cancelled,
             _ if clock::now_ms() >= row.executable_at => UpgradeState::Executable,

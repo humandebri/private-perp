@@ -16,7 +16,7 @@ CREATE TABLE upgrades (
     arg_hash BLOB NOT NULL CHECK (length(arg_hash) = 32),
     scheduled_at INTEGER NOT NULL,
     executable_at INTEGER NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('pending', 'executable', 'executed', 'cancelled')),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'executable', 'executing', 'executed', 'cancelled')),
     executed_at INTEGER,
     cancelled_at INTEGER
 );
