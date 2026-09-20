@@ -16,6 +16,8 @@ use candid::Principal;
 use db::error::Error as DbError;
 use ic_cdk::call::Call;
 use ic_cdk_management_canister::{EcdsaCurve, EcdsaKeyId, EcdsaPublicKeyArgs, ecdsa_public_key};
+#[cfg(feature = "test-venue")]
+use ic_cdk_management_canister::{SignWithEcdsaArgs, sign_with_ecdsa};
 
 const MEMORY_ID: u8 = db::memory_id::TRADING_CORE_MAIN;
 
@@ -569,6 +571,99 @@ fn resolve_asset_index(market: &str) -> Result<u32, ErrorCode> {
     Err(ErrorCode::NotAllowed {
         code: api_types::error::NotAllowedCode::AssetNotAllowed,
     })
+}
+
+/// テスト専用：注文actionへAgent鍵で署名する（`test-venue` featureでのみ存在）。
+///
+/// 戻り値は `(署名対象ダイジェスト, 65バイト署名)`。署名経路の検証に使う。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+async fn test_sign_order_action(
+    order_id: api_types::Blob,
+) -> Result<(api_types::Blob, api_types::Blob), ErrorCode> {
+    let order_id: [u8; 32] = order_id.as_ref().try_into().map_err(|_| {
+        bad(
+            BadRequestCode::MalformedPayload,
+            "order_id must be 32 bytes",
+        )
+    })?;
+    let order = db::tx::query(|connection| db::repo::orders::signable(connection, &order_id))
+        .map_err(map_db)?
+        .ok_or_else(|| bad(BadRequestCode::MalformedPayload, "unknown order"))?;
+
+    let tif = if order.kind == "market_ioc" {
+        hl_types::action::TimeInForce::Ioc
+    } else {
+        hl_types::action::TimeInForce::Gtc
+    };
+    let price = order.price.clone().ok_or_else(|| {
+        bad(
+            BadRequestCode::MissingField,
+            "price is required for signing",
+        )
+    })?;
+    let action = hl_types::action::OrderAction {
+        orders: vec![hl_types::action::OrderRequest {
+            asset_index: order.asset_index,
+            is_buy: order.is_buy,
+            price: hl_types::decimal::Decimal::parse(&price).map_err(bad_decimal)?,
+            size: hl_types::decimal::Decimal::parse(&order.quantity).map_err(bad_decimal)?,
+            reduce_only: order.reduce_only,
+            order_type: hl_types::action::OrderType::Limit { tif },
+            cloid: Some(format!("0x{}", hex::encode(order.cloid))),
+        }],
+        grouping: hl_types::action::Grouping::Na,
+    };
+    let msgpack = action.to_value().encode();
+    let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
+        action_msgpack: &msgpack,
+        nonce: order.created_at,
+        vault_address: None,
+        expires_after: None,
+    });
+    let digest = hl_sign::hash::signing_digest(action_hash, false);
+
+    // Agent鍵（coreが導出・保管）で署名し、`v`を復元する。
+    let generation =
+        db::tx::query(|connection| db::repo::agents::latest(connection, &order.account_id))
+            .map_err(map_db)?
+            .ok_or(ErrorCode::NotAllowed {
+                code: api_types::error::NotAllowedCode::OperationNotAvailable,
+            })?;
+    let path = agent_derivation_path(&order.account_id, generation.generation);
+    let public_key: [u8; 33] = ecdsa_public_key(&EcdsaPublicKeyArgs {
+        canister_id: None,
+        derivation_path: path.clone(),
+        key_id: ecdsa_key_id(),
+    })
+    .await
+    .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
+    .public_key
+    .try_into()
+    .map_err(|_| internal("unexpected public key length".to_string()))?;
+    let signature = sign_with_ecdsa(&SignWithEcdsaArgs {
+        message_hash: digest.to_vec(),
+        derivation_path: path,
+        key_id: ecdsa_key_id(),
+    })
+    .await
+    .map_err(|error| internal(format!("sign_with_ecdsa failed: {error}")))?
+    .signature;
+    let bytes: [u8; 64] = signature
+        .try_into()
+        .map_err(|_| internal("unexpected signature length".to_string()))?;
+    let mut r = [0u8; 32];
+    let mut s = [0u8; 32];
+    r.copy_from_slice(&bytes[0..32]);
+    s.copy_from_slice(&bytes[32..64]);
+    let v = hl_sign::recover_v(&digest, r, s, &public_key)
+        .map_err(|error| internal(format!("cannot recover v: {error}")))?;
+    let signature = hl_sign::Signature { r, s, v };
+
+    Ok((
+        digest.to_vec().into(),
+        signature.to_bytes65().to_vec().into(),
+    ))
 }
 
 fn init_db() {

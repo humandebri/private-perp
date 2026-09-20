@@ -30,4 +30,5 @@ cargo build --release --target wasm32-unknown-unknown \
 cargo build --release --target wasm32-unknown-unknown -p funds-vault --features test-venue
 
 echo "pocket-ic-test: 試験を実行します"
+  cargo build --release --target wasm32-unknown-unknown -p trading-core --features test-venue
 cargo test -p pocket-ic-tests "$@"

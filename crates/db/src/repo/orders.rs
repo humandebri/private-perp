@@ -305,3 +305,64 @@ pub fn order_owner(
     })
     .transpose()
 }
+
+/// 署名に必要な注文情報（`trading_core` が Agent鍵で署名する）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignableOrder {
+    pub account_id: [u8; 32],
+    pub asset_index: u32,
+    pub is_buy: bool,
+    pub price: Option<String>,
+    pub quantity: String,
+    pub kind: String,
+    pub reduce_only: bool,
+    pub cloid: [u8; 16],
+    pub created_at: u64,
+}
+
+/// 注文を署名用に取得する。
+pub fn signable(
+    connection: &Connection,
+    order_id: &[u8; 32],
+) -> Result<Option<SignableOrder>, Error> {
+    let raw = connection
+        .query_optional(
+            "SELECT account_id, asset_index, side, price, quantity, kind, reduce_only, cloid, created_at
+               FROM orders WHERE order_id = ?1",
+            params![order_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<Option<String>>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<i64>(6)?,
+                    row.get::<Vec<u8>>(7)?,
+                    row.get::<i64>(8)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    raw.map(|row| {
+        Ok(SignableOrder {
+            account_id: row
+                .0
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte account id"))?,
+            asset_index: u32::try_from(row.1).map_err(|_| Error::Invariant("bad index"))?,
+            is_buy: row.2 == "buy",
+            price: row.3,
+            quantity: row.4,
+            kind: row.5,
+            reduce_only: row.6 != 0,
+            cloid: row
+                .7
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 16-byte cloid"))?,
+            created_at: u64::try_from(row.8).map_err(|_| Error::Invariant("bad time"))?,
+        })
+    })
+    .transpose()
+}

@@ -448,3 +448,114 @@ fn core_derives_agent_keys_for_the_account() {
         "{denied:?}"
     );
 }
+
+/// 注文actionはcoreのAgent鍵で署名され、そのアドレスへ復元できる。
+#[test]
+fn core_signs_orders_with_the_agent_key() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(119);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+    let meta: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_meta_cache",
+        (
+            "local".to_string(),
+            "hyperliquid".to_string(),
+            UNIVERSE.to_string(),
+        ),
+    )
+    .expect("call");
+    meta.expect("set_meta_cache");
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .expect("call");
+    context.expect("set_market_context");
+
+    let caller = principal(120);
+    let session = open_session(&pic, vault, caller, &secret(184));
+    let credit: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (session.clone(), 1_000_000u64, blob(&[51u8; 32])),
+    )
+    .expect("call");
+    credit.expect("credit");
+    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_allocation",
+        AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(b"sign-alloc"),
+            amount: 200_000,
+            target: AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .expect("call");
+    allocated.expect("allocation");
+
+    let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
+        &pic,
+        core,
+        caller,
+        "request_agent_generation",
+        session.clone(),
+    )
+    .expect("call");
+    let agent_address = agent.expect("agent").agent_address;
+
+    let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"sign-1", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    let submitted = submitted.expect("accepted order");
+
+    let signed: Result<(Vec<u8>, Vec<u8>), ErrorCode> = update(
+        &pic,
+        core,
+        caller,
+        "test_sign_order_action",
+        submitted.order_id.clone(),
+    )
+    .expect("call");
+    let (digest, signature) = signed.expect("signature");
+    let digest: [u8; 32] = digest.try_into().expect("digest");
+    let signature =
+        hl_sign::Signature::from_bytes65(&signature.try_into().expect("65-byte signature"))
+            .expect("signature");
+
+    let recovered =
+        hl_sign::signature::recover_address(&digest, &signature, None).expect("recover");
+    assert_eq!(
+        recovered.to_vec(),
+        agent_address.as_ref().to_vec(),
+        "Agent鍵で署名されている"
+    );
+}
