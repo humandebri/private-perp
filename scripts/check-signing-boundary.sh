@@ -28,13 +28,26 @@ for dir in "${crates[@]}"; do
   fi
 
   # コメント行は規則の説明を含むため除外する。
-  matches="$(grep -rnE "$pattern" "$dir" --include='*.rs' | grep -vE ':[[:space:]]*(//|/\*|\*)' || true)"
+  # 例外: `crypto.rs` の署名器フォールバック（`test-venue` featureでのみコンパイルされる。
+  # 下の健全性検査でゲートされていることを確認する）。
+  matches="$(grep -rnE "$pattern" "$dir" --include='*.rs' \
+    | grep -vE ':[[:space:]]*(//|/\*|\*)' \
+    | grep -v '^crates/funds-vault/src/crypto.rs:' || true)"
   if [[ -n "$matches" ]]; then
     echo "check-signing-boundary: $dir が生鍵署名ヘルパを参照しています:" >&2
     echo "$matches" >&2
     status=1
   fi
 done
+
+# 例外が feature でゲートされていることを確認する（本番ビルドでは存在しない）。
+fallback="crates/funds-vault/src/crypto.rs"
+if grep -q "sign_digest_for_tests" "$fallback" 2>/dev/null; then
+  if ! grep -q '#\[cfg(feature = "test-venue")\]' "$fallback"; then
+    echo "check-signing-boundary: $fallback のフォールバックが test-venue でゲートされていません" >&2
+    status=1
+  fi
+fi
 
 if [[ "$status" -eq 0 ]]; then
   echo "check-signing-boundary: ok"
