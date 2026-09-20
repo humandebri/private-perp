@@ -392,6 +392,8 @@ async fn dispatch_withdrawal(
                     now,
                     &event_id,
                 )?;
+                // 台帳で資金が動いたので予約（reservations表）も消費する。
+                db::repo::funds::consume_reservation(connection, &action.user_id, request_id)?;
                 db::repo::funds::set_request_state(
                     connection,
                     &action.user_id,

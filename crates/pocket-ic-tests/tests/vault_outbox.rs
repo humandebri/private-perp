@@ -439,9 +439,11 @@ fn a_withdrawal_is_dispatched_from_the_reserve() {
         events.expect("events").items[0].state,
         FundRequestState::Settled
     );
+    let settled = status(&pic, vault, caller, &session);
+    assert_eq!(settled.reserved_for_withdrawal, 0);
     assert_eq!(
-        status(&pic, vault, caller, &session).reserved_for_withdrawal,
-        0
+        settled.withdrawable, 700_000,
+        "払出し済みの分は出金可能額から除かれ、予約は二重に拘束しない"
     );
 }
 
