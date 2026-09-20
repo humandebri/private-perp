@@ -17,7 +17,9 @@ use db::error::Error as DbError;
 use ic_cdk::call::Call;
 use ic_cdk_management_canister::{EcdsaCurve, EcdsaKeyId, EcdsaPublicKeyArgs, ecdsa_public_key};
 #[cfg(feature = "test-venue")]
-use ic_cdk_management_canister::{SignWithEcdsaArgs, sign_with_ecdsa};
+use ic_cdk_management_canister::{
+    HttpHeader, HttpMethod, HttpRequest, SignWithEcdsaArgs, sign_with_ecdsa,
+};
 
 const MEMORY_ID: u8 = db::memory_id::TRADING_CORE_MAIN;
 
@@ -664,6 +666,221 @@ async fn test_sign_order_action(
         digest.to_vec().into(),
         signature.to_bytes65().to_vec().into(),
     ))
+}
+
+/// 取り引所の応答。
+#[cfg(feature = "test-venue")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExchangeOutcome {
+    Accepted,
+    Rejected,
+}
+
+/// 注文のaction JSON（HLの`/exchange`はJSON actionを取る）。
+#[cfg(feature = "test-venue")]
+fn order_action_json(order: &db::repo::orders::SignableOrder, price: &str) -> serde_json::Value {
+    let tif = if order.kind == "market_ioc" {
+        "Ioc"
+    } else {
+        "Gtc"
+    };
+    serde_json::json!({
+        "type": "order",
+        "orders": [{
+            "a": order.asset_index,
+            "b": order.is_buy,
+            "p": price,
+            "s": order.quantity,
+            "r": order.reduce_only,
+            "t": { "limit": { "tif": tif } },
+        }],
+        "grouping": "na",
+    })
+}
+
+/// 署名と送信本文を作る（action msgpackのハッシュへAgent鍵で署名）。
+#[cfg(feature = "test-venue")]
+async fn sign_and_build(
+    order: &db::repo::orders::SignableOrder,
+) -> Result<([u8; 32], hl_sign::Signature, Vec<u8>), ErrorCode> {
+    let price = order.price.clone().ok_or_else(|| {
+        bad(
+            BadRequestCode::MissingField,
+            "price is required for signing",
+        )
+    })?;
+    let tif = if order.kind == "market_ioc" {
+        hl_types::action::TimeInForce::Ioc
+    } else {
+        hl_types::action::TimeInForce::Gtc
+    };
+    let action = hl_types::action::OrderAction {
+        orders: vec![hl_types::action::OrderRequest {
+            asset_index: order.asset_index,
+            is_buy: order.is_buy,
+            price: hl_types::decimal::Decimal::parse(&price).map_err(bad_decimal)?,
+            size: hl_types::decimal::Decimal::parse(&order.quantity).map_err(bad_decimal)?,
+            reduce_only: order.reduce_only,
+            order_type: hl_types::action::OrderType::Limit { tif },
+            cloid: Some(format!("0x{}", hex::encode(order.cloid))),
+        }],
+        grouping: hl_types::action::Grouping::Na,
+    };
+    let msgpack = action.to_value().encode();
+    let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
+        action_msgpack: &msgpack,
+        nonce: order.created_at,
+        vault_address: None,
+        expires_after: None,
+    });
+    let digest = hl_sign::hash::signing_digest(action_hash, false);
+
+    let generation =
+        db::tx::query(|connection| db::repo::agents::latest(connection, &order.account_id))
+            .map_err(map_db)?
+            .ok_or(ErrorCode::NotAllowed {
+                code: api_types::error::NotAllowedCode::OperationNotAvailable,
+            })?;
+    let path = agent_derivation_path(&order.account_id, generation.generation);
+    let public_key: [u8; 33] = ecdsa_public_key(&EcdsaPublicKeyArgs {
+        canister_id: None,
+        derivation_path: path.clone(),
+        key_id: ecdsa_key_id(),
+    })
+    .await
+    .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
+    .public_key
+    .try_into()
+    .map_err(|_| internal("unexpected public key length".to_string()))?;
+    let signature = sign_with_ecdsa(&SignWithEcdsaArgs {
+        message_hash: digest.to_vec(),
+        derivation_path: path,
+        key_id: ecdsa_key_id(),
+    })
+    .await
+    .map_err(|error| internal(format!("sign_with_ecdsa failed: {error}")))?
+    .signature;
+    let bytes: [u8; 64] = signature
+        .try_into()
+        .map_err(|_| internal("unexpected signature length".to_string()))?;
+    let mut r = [0u8; 32];
+    let mut s = [0u8; 32];
+    r.copy_from_slice(&bytes[0..32]);
+    s.copy_from_slice(&bytes[32..64]);
+    let v = hl_sign::recover_v(&digest, r, s, &public_key)
+        .map_err(|error| internal(format!("cannot recover v: {error}")))?;
+    let signature = hl_sign::Signature { r, s, v };
+
+    let body = serde_json::json!({
+        "action": order_action_json(order, &price),
+        "nonce": order.created_at,
+        "signature": {
+            "r": format!("0x{}", hex::encode(signature.r)),
+            "s": format!("0x{}", hex::encode(signature.s)),
+            "v": signature.v,
+        },
+    });
+    let body = serde_json::to_vec(&body).map_err(|error| internal(error.to_string()))?;
+    Ok((digest, signature, body))
+}
+
+/// 注文を送信する（非replicated POST）。
+#[cfg(feature = "test-venue")]
+async fn post_order(body: &[u8]) -> Result<(ExchangeOutcome, Option<u64>), ErrorCode> {
+    let response = HttpRequest::new("https://api.hyperliquid-testnet.xyz/exchange")
+        .with_method(HttpMethod::POST)
+        .with_headers(vec![HttpHeader {
+            name: "Content-Type".to_string(),
+            value: "application/json".to_string(),
+        }])
+        .with_body(body.to_vec())
+        .with_max_response_bytes(8 * 1024)
+        .non_replicated()
+        .send()
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: error.to_string(),
+        })?;
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.body).map_err(|_| ErrorCode::UpstreamRejected {
+            code: "unparseable exchange response".to_string(),
+            retryable: false,
+        })?;
+    match value.get("status").and_then(|status| status.as_str()) {
+        Some("ok") => {
+            let oid = value
+                .get("response")
+                .and_then(|response| response.get("data"))
+                .and_then(|data| data.get("statuses"))
+                .and_then(|statuses| statuses.get(0))
+                .and_then(|status| status.get("resting"))
+                .and_then(|resting| resting.get("oid"))
+                .and_then(|oid| oid.as_u64());
+            Ok((ExchangeOutcome::Accepted, oid))
+        }
+        Some("err") => Ok((ExchangeOutcome::Rejected, None)),
+        _ => Err(ErrorCode::UpstreamRejected {
+            code: "unexpected exchange response".to_string(),
+            retryable: false,
+        }),
+    }
+}
+
+/// テスト専用：待ち注文を送信する（`test-venue` featureでのみ存在）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+async fn test_sweep_now() -> Result<u32, ErrorCode> {
+    let ids = db::tx::query(|connection| db::repo::orders::queued_orders(connection, 4))
+        .map_err(map_db)?;
+    let mut processed = 0;
+    for order_id in ids {
+        let claimed = db::tx::update(|connection| {
+            db::repo::orders::claim_for_dispatch(connection, &order_id)
+        })
+        .map_err(map_db)?;
+        if !claimed {
+            continue;
+        }
+        let now = ic_cdk::api::time() / 1_000_000;
+        let order = db::tx::query(|connection| db::repo::orders::signable(connection, &order_id))
+            .map_err(map_db)?
+            .ok_or_else(|| internal("missing order".to_string()))?;
+        let (_digest, signature, body) = sign_and_build(&order).await?;
+        db::tx::update(|connection| {
+            db::repo::orders::mark_dispatching(
+                connection,
+                &order_id,
+                &body,
+                &signature.to_bytes65(),
+                now,
+            )
+        })
+        .map_err(map_db)?;
+
+        match post_order(&body).await {
+            Ok((ExchangeOutcome::Accepted, oid)) => {
+                db::tx::update(|connection| {
+                    db::repo::orders::mark_venue_accepted(connection, &order_id, oid, now)
+                })
+                .map_err(map_db)?;
+            }
+            Ok((ExchangeOutcome::Rejected, _)) => {
+                db::tx::update(|connection| {
+                    db::repo::orders::mark_venue_rejected(connection, &order_id, now)
+                })
+                .map_err(map_db)?;
+            }
+            Err(_) => {
+                db::tx::update(|connection| {
+                    db::repo::orders::mark_unknown(connection, &order_id, now)
+                })
+                .map_err(map_db)?;
+            }
+        }
+        processed += 1;
+    }
+    Ok(processed)
 }
 
 fn init_db() {
