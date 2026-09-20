@@ -155,6 +155,23 @@ CREATE TABLE core_config (
 );
 ";
 
+/// Agent世代（`Implementation.md` 7章。鍵はcoreが導出・保管し、vaultはmaster署名で承認する）。
+const AGENTS: &str = "
+CREATE TABLE agent_generations (
+    account_id BLOB NOT NULL CHECK (length(account_id) = 32),
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    agent_address BLOB NOT NULL CHECK (length(agent_address) = 20),
+    derivation_path TEXT NOT NULL,
+    approved_at INTEGER,
+    expires_at INTEGER,
+    revoked_at INTEGER,
+    state TEXT NOT NULL CHECK (state IN ('requested', 'approving', 'active', 'expiring', 'revoked', 'failed')),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (account_id, generation),
+    UNIQUE (agent_address)
+);
+";
+
 /// `trading_core` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -168,5 +185,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 3,
         sql: CONFIG,
+    },
+    Migration {
+        version: 4,
+        sql: AGENTS,
     },
 ];

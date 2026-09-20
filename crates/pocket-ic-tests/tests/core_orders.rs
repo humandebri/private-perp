@@ -360,3 +360,91 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "{other:?}"
     );
 }
+
+/// Agent鍵はcoreが導出・保管する（`Implementation.md` 7章）。
+#[test]
+fn core_derives_agent_keys_for_the_account() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(116);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+
+    let caller = principal(117);
+    let session = open_session(&pic, vault, caller, &secret(183));
+    let credit: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (session.clone(), 1_000_000u64, blob(&[41u8; 32])),
+    )
+    .expect("call");
+    credit.expect("credit");
+    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_allocation",
+        AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(b"agent-alloc"),
+            amount: 100_000,
+            target: AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .expect("call");
+    allocated.expect("allocation");
+
+    let requested: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
+        &pic,
+        core,
+        caller,
+        "request_agent_generation",
+        session.clone(),
+    )
+    .expect("call");
+    let requested = requested.expect("generation");
+    assert_eq!(requested.generation, 1);
+    assert_eq!(requested.agent_address.len(), 20, "coreが導出したアドレス");
+    assert_eq!(requested.state, api_types::fund::AgentState::Requested);
+
+    // 再要求は同じ世代（未承認のうちは増やさない）。
+    let again: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
+        &pic,
+        core,
+        caller,
+        "request_agent_generation",
+        session.clone(),
+    )
+    .expect("call");
+    assert_eq!(again.expect("generation").generation, 1);
+
+    let status: Result<api_types::fund::AgentStatus, ErrorCode> =
+        update_args(&pic, core, caller, "get_agent_status", (session.clone(),)).expect("call");
+    let status = status.expect("status");
+    assert!(status.current.is_none(), "承認はvaultがmaster署名で行う");
+    assert_eq!(status.next.expect("next").generation, 1);
+
+    // 別principalは世代を要求できない。
+    let denied: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
+        &pic,
+        core,
+        principal(118),
+        "request_agent_generation",
+        session,
+    )
+    .expect("call");
+    assert!(
+        matches!(denied, Err(ErrorCode::Unauthenticated { .. })),
+        "{denied:?}"
+    );
+}

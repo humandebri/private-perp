@@ -15,6 +15,7 @@ use api_types::error::{BadRequestCode, ErrorCode};
 use candid::Principal;
 use db::error::Error as DbError;
 use ic_cdk::call::Call;
+use ic_cdk_management_canister::{EcdsaCurve, EcdsaKeyId, EcdsaPublicKeyArgs, ecdsa_public_key};
 
 const MEMORY_ID: u8 = db::memory_id::TRADING_CORE_MAIN;
 
@@ -276,6 +277,110 @@ async fn submit_order(
         cloid: accepted_cloid.to_vec().into(),
         accepted_at: now,
     })
+}
+
+/// Agent世代を要求する（**coreが鍵を導出・保管**し、vaultはmaster署名でアドレスを承認する）。
+///
+/// 未承認の世代があるうちは同じ世代を返す。注文はこの世代の鍵で署名する。
+#[ic_cdk::update]
+async fn request_agent_generation(
+    session: SessionHandle,
+) -> Result<api_types::fund::AgentGeneration, ErrorCode> {
+    let user_id = authorize(&session).await?;
+    let account_id = trading_account(&session).await?;
+    let now = ic_cdk::api::time() / 1_000_000;
+
+    if let Some(latest) =
+        db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
+            .map_err(map_db)?
+        && latest.state == api_types::fund::AgentState::Requested
+    {
+        return Ok(latest);
+    }
+
+    let generation =
+        db::tx::update(|connection| db::repo::agents::latest_generation(connection, &account_id))
+            .map_err(map_db)?
+            .saturating_add(1);
+
+    let path = agent_derivation_path(&account_id, generation);
+    let public_key = ecdsa_public_key(&EcdsaPublicKeyArgs {
+        canister_id: None,
+        derivation_path: path.clone(),
+        key_id: ecdsa_key_id(),
+    })
+    .await
+    .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
+    .public_key;
+    let public_key: [u8; 33] = public_key
+        .try_into()
+        .map_err(|_| internal("unexpected public key length".to_string()))?;
+    let address = hl_sign::address_from_public_key(&public_key)
+        .map_err(|error| internal(error.to_string()))?;
+
+    db::tx::update(|connection| {
+        db::repo::agents::insert_generation(
+            connection,
+            &account_id,
+            generation,
+            &address,
+            "private-perp/agent",
+            now,
+        )
+    })
+    .map_err(map_db)?;
+
+    Ok(api_types::fund::AgentGeneration {
+        account_id: account_id.to_vec().into(),
+        generation,
+        agent_address: address.to_vec().into(),
+        approved_at: None,
+        expires_at: None,
+        state: api_types::fund::AgentState::Requested,
+    })
+}
+
+/// Agent世代の状態（承認済みは`current`、要求中は`next`）。
+///
+/// 認可にvaultへのinter-canister呼び出しが必要なためqueryにはできない（updateで提供）。
+#[ic_cdk::update]
+async fn get_agent_status(
+    session: SessionHandle,
+) -> Result<api_types::fund::AgentStatus, ErrorCode> {
+    authorize(&session).await?;
+    let account_id = trading_account(&session).await?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    let latest = db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
+        .map_err(map_db)?;
+    let (current, next) = match latest {
+        Some(generation) if generation.state == api_types::fund::AgentState::Active => {
+            (Some(generation), None)
+        }
+        other => (None, other),
+    };
+    Ok(api_types::fund::AgentStatus {
+        current,
+        next,
+        revocation_pending: false,
+        observed_at: now,
+    })
+}
+
+/// Agent鍵の導出経路（口座と世代で分離する）。
+fn agent_derivation_path(account_id: &[u8; 32], generation: u64) -> Vec<Vec<u8>> {
+    vec![
+        b"private-perp".to_vec(),
+        b"agent".to_vec(),
+        hex::encode(account_id).into_bytes(),
+        generation.to_be_bytes().to_vec(),
+    ]
+}
+
+fn ecdsa_key_id() -> EcdsaKeyId {
+    EcdsaKeyId {
+        curve: EcdsaCurve::Secp256k1,
+        name: "test_key_1".to_string(),
+    }
 }
 
 /// 注文の取消を要求する（署名・送信はパイプラインが行う）。
