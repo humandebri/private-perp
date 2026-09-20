@@ -169,7 +169,7 @@ fn a_matching_reservation_executes_the_upgrade() {
         Some(vec![guard]),
         candid::encode_one(()).unwrap(),
     );
-    let policy_wasm = wasm(&POLICY_WASM);
+    let policy_wasm = wasm(POLICY_WASM);
     let wasm_hash = hash_of(&policy_wasm);
 
     let set: Result<(), ErrorCode> =
