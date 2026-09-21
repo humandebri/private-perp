@@ -13,8 +13,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, deploy, deploy_default, pic,
-    principal, update, update_args,
+    FUNDS_VAULT_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, configure_policy, deploy,
+    deploy_default, pic, principal, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -109,6 +109,8 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,

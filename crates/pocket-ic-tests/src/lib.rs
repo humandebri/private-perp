@@ -101,6 +101,55 @@ pub fn deploy_default(pic: &PocketIc, file: &str) -> Principal {
     deploy(pic, file, None, candid::encode_one(()).expect("encode ()"))
 }
 
+/// 注文を受け付けるための最小構成の `policy_registry` を用意する。
+///
+/// `trading_core` は停止状態とallowlistを policy へ照会し、未設定・照会失敗は
+/// fail-closed（`PolicyUnavailable`）で拒否する。注文を扱う試験はこれを呼んで
+/// allowlistと停止解除を設定する。戻り値は policy canister の principal。
+pub fn configure_policy(
+    pic: &PocketIc,
+    core: Principal,
+    controller: Principal,
+    markets: &[&str],
+) -> Principal {
+    let policy = deploy(
+        pic,
+        POLICY_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).expect("encode ()"),
+    );
+    for method in ["set_operator", "set_sns_principal", "set_guard_principal"] {
+        let result: Result<(), api_types::error::ErrorCode> =
+            update(pic, policy, controller, method, controller).expect("call");
+        result.unwrap_or_else(|error| panic!("{method}: {error:?}"));
+    }
+    let result: Result<(), api_types::error::ErrorCode> = update_args(
+        pic,
+        policy,
+        controller,
+        "set_policy_version",
+        (
+            1u64,
+            markets
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<String>>(),
+        ),
+    )
+    .expect("call");
+    result.expect("set_policy_version");
+
+    // 政策行が無い間は停止扱い（fail-closed）のため、SNS経路で解除する。
+    let result: Result<(), api_types::error::ErrorCode> =
+        update(pic, policy, controller, "clear_emergency_stop", ()).expect("call");
+    result.expect("clear_emergency_stop");
+
+    let result: Result<(), api_types::error::ErrorCode> =
+        update(pic, core, controller, "set_policy_principal", policy).expect("call");
+    result.expect("set_policy_principal");
+    policy
+}
+
 /// update呼び出しを行い、応答をデコードする。
 pub fn update<A, R>(
     pic: &PocketIc,

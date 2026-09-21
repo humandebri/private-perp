@@ -13,8 +13,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, TRADING_CORE_WASM, deploy, deploy_default, pic, principal, update,
-    update_args,
+    FUNDS_VAULT_WASM, TRADING_CORE_WASM, configure_policy, deploy, deploy_default, pic, principal,
+    update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -116,6 +116,10 @@ fn invalid_orders_are_rejected_without_side_effects() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    // allowlist外の銘柄（UNIVERSEにはあるがallowlistに無いSOL）を検証するため、
+    // BTCとETHだけを許可する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -249,4 +253,45 @@ fn invalid_orders_are_rejected_without_side_effects() {
     let snapshot = snapshot.expect("snapshot");
     assert_eq!(snapshot.margin_used, 0, "拒否された注文は予約を残さない");
     assert!(snapshot.pending_orders.is_empty());
+}
+
+/// 政策が未設定なら新規受注を拒否する（fail-closed）。
+///
+/// 以前は policy principal 未設定時に停止判定をskipしていたため、統制が
+/// 効かないまま注文を受け付けていた（`authority-matrix.md` は読み取り失敗時の
+/// 停止を要求する）。
+#[test]
+fn orders_are_rejected_when_the_policy_is_not_configured() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(181);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+
+    // policy principal を設定しない（既定の fail-closed を検証する）。
+    let caller = principal(182);
+    let session = open_session(&pic, vault, caller, &secret(191));
+    let denied: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            args(&session, b"no-policy", "ETH", "0.01", Some("2500"), 3),
+        ),
+    )
+    .expect("call");
+    assert_eq!(
+        denied.expect_err("must be rejected"),
+        ErrorCode::PolicyUnavailable,
+        "政策未設定はfail-closedで拒否する"
+    );
 }

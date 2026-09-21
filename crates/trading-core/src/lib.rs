@@ -23,6 +23,9 @@ use ic_cdk_management_canister::{
 
 const MEMORY_ID: u8 = db::memory_id::TRADING_CORE_MAIN;
 
+/// 1口座あたりの未終端注文（pending・open・partially_filled・unknown）の上限。
+const MAX_PENDING_ORDERS: u64 = 50;
+
 fn internal(message: String) -> ErrorCode {
     ErrorCode::Internal { code: message }
 }
@@ -94,11 +97,12 @@ fn get_policy_principal() -> Option<Principal> {
         .map(|bytes| Principal::from_slice(&bytes))
 }
 
-/// 政策が停止中なら拒否する（未設定時は判定しない。本番では設定必須）。
+/// 政策が停止中なら拒否する。**未設定・照会失敗はfail-closed**で拒否する
+/// （`authority-matrix.md`: 読み取り失敗時は新規受付・新規リスク増加を停止する）。
 async fn require_not_stopped() -> Result<(), ErrorCode> {
     let bytes = db::tx::query(db::repo::core_config::policy_principal).map_err(map_db)?;
     let Some(bytes) = bytes else {
-        return Ok(());
+        return Err(ErrorCode::PolicyUnavailable);
     };
     let policy = Principal::from_slice(&bytes);
     let response = Call::bounded_wait(policy, "get_stop_status")
@@ -116,6 +120,24 @@ async fn require_not_stopped() -> Result<(), ErrorCode> {
         });
     }
     Ok(())
+}
+
+/// 取引可能な銘柄のallowlist（policy_registry）。未設定・照会失敗はfail-closed。
+async fn policy_markets() -> Result<Vec<String>, ErrorCode> {
+    let bytes = db::tx::query(db::repo::core_config::policy_principal).map_err(map_db)?;
+    let Some(bytes) = bytes else {
+        return Err(ErrorCode::PolicyUnavailable);
+    };
+    let policy = Principal::from_slice(&bytes);
+    let response = Call::bounded_wait(policy, "get_policy")
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: format!("policy get_policy: {error}"),
+        })?;
+    let policy: Result<api_types::policy::Policy, ErrorCode> = response
+        .candid()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    Ok(policy?.markets)
 }
 
 /// vaultのprincipal（診断用）。
@@ -206,7 +228,12 @@ async fn submit_order(
     require_not_stopped().await?;
 
     let market = args.market.to_uppercase();
-    if market != "BTC" && market != "ETH" {
+    // 銘柄はpolicy_registryのallowlistで判定する（照会失敗・未設定はfail-closed）。
+    if !policy_markets()
+        .await?
+        .iter()
+        .any(|allowed| allowed == &market)
+    {
         return Err(ErrorCode::NotAllowed {
             code: api_types::error::NotAllowedCode::AssetNotAllowed,
         });
@@ -249,13 +276,20 @@ async fn submit_order(
         ));
     }
 
-    // 本文fingerprint（受付の冪等性）。
+    // 本文fingerprint（受付の冪等性）。**本文全体**を含める。side・reduce_only・
+    // leverage・kind を除くと、同一IDで反対売買やreduce_onlyを変えた再送が
+    // 「同一本文」と誤判定され、黙って捨てられる。
     let mut body = Vec::new();
     body.extend_from_slice(market.as_bytes());
     body.extend_from_slice(quantity.as_str().as_bytes());
-    if let Some(price) = &args.limit_price {
-        body.extend_from_slice(price.as_bytes());
-    }
+    body.extend_from_slice(args.limit_price.as_deref().unwrap_or("").as_bytes());
+    body.push(u8::from(matches!(args.side, api_types::order::Side::Buy)));
+    body.push(u8::from(args.reduce_only));
+    body.push(match args.kind {
+        api_types::order::OrderKind::MarketIoc => 1,
+        api_types::order::OrderKind::LimitGtc => 2,
+    });
+    body.extend_from_slice(&args.leverage.unwrap_or(3).to_be_bytes());
     let fingerprint = body_fingerprint(&body);
 
     let account_id = trading_account(&session).await?;
@@ -287,6 +321,10 @@ async fn submit_order(
         )?;
         if accepted != db::repo::core_requests::AcceptOutcome::Accepted {
             return Ok(accepted);
+        }
+        // 未終端の注文数に上限を設ける（1口座あたりのpending・open・unknown）。
+        if db::repo::orders::pending_order_count(connection, &account_id)? >= MAX_PENDING_ORDERS {
+            return Err(DbError::Invariant("too many pending orders"));
         }
         db::repo::orders::reserve_risk(
             connection,
@@ -1105,13 +1143,11 @@ async fn test_sweep_now() -> Result<u32, ErrorCode> {
                 .map_err(map_db)?;
             }
             Err(_) => {
+                // 送信した可能性がある。再送せず、**リスク予約も解放しない**
+                // （解放すると同一資金で追加の注文ができ、二重エクスポージャになる。
+                // 解消は照合の結果に従う）。
                 db::tx::update(|connection| {
                     db::repo::orders::mark_unknown(connection, &order_id, now)?;
-                    db::repo::orders::release_risk(
-                        connection,
-                        &order.account_id,
-                        &order.client_request_id,
-                    )?;
                     Ok(())
                 })
                 .map_err(map_db)?;

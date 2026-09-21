@@ -277,14 +277,8 @@ fn a_recovery_over_the_trading_equity_is_rejected() {
     assert_eq!(swept.expect("allocation sweep"), 1);
 
     // 着金を取り込んで取引口座のequityを400,000にする。
-    let trading: Result<api_types::Blob, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "get_trading_address",
-        session.clone(),
-    )
-    .expect("call");
+    let trading: Result<api_types::Blob, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone()).expect("call");
     let trading_address = blob(&trading.expect("trading address"));
     let credited: Result<bool, ErrorCode> = update_args(
         &pic,
@@ -384,14 +378,8 @@ fn a_direct_deposit_to_the_trading_account_is_credited() {
     credit(&pic, vault, caller, &session, 1_000_000, 6);
     allocate(&pic, vault, caller, &session, b"recv-direct", 100_000).expect("allocation");
 
-    let trading: Result<api_types::Blob, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "get_trading_address",
-        session.clone(),
-    )
-    .expect("call");
+    let trading: Result<api_types::Blob, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone()).expect("call");
     let trading_address = blob(&trading.expect("trading address"));
 
     // 配分の着金を取り込まずに、取引口座へ直接入金する。

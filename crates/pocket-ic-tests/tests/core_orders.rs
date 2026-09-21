@@ -12,8 +12,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, deploy,
-    deploy_default, pic, principal, query_args, update, update_args,
+    FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, configure_policy,
+    deploy, deploy_default, pic, principal, query_args, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -114,6 +114,8 @@ fn orders_are_accepted_idempotently_after_authorization() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -376,6 +378,8 @@ fn core_derives_agent_keys_for_the_account() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
 
     let caller = principal(117);
     let session = open_session(&pic, vault, caller, &secret(183));
@@ -464,6 +468,8 @@ fn core_signs_orders_with_the_agent_key() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -575,6 +581,8 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -687,6 +695,8 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -830,6 +840,8 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -926,6 +938,8 @@ fn fills_are_listed_only_for_the_authorized_caller() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
 
     let caller = principal(128);
     let session = open_session(&pic, vault, caller, &secret(188));
@@ -995,6 +1009,8 @@ fn fills_are_ingested_idempotently() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -1141,6 +1157,8 @@ fn order_status_updates_are_reflected() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -1314,6 +1332,8 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
+    // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
