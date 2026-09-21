@@ -189,6 +189,17 @@ where
     candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))
 }
 
+/// mockしたoutcallの送信内容（URL・メソッド・本文・replication）。
+///
+/// 「正しい送信先・正しい本文・非replicatedで送った」ことを試験で検証するために使う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedHttpCall {
+    pub url: String,
+    pub method: CanisterHttpMethod,
+    pub body: Vec<u8>,
+    pub replication: CanisterHttpReplication,
+}
+
 /// outcallを伴うupdate呼び出しを、応答をmockして完了させる。
 ///
 /// PocketICのoutcall mockは `subnet_id` + `request_id` 指定であり、URL一致ではない。
@@ -205,16 +216,41 @@ where
     A: candid::utils::ArgumentEncoder,
     R: CandidType + DeserializeOwned,
 {
+    call_with_mocked_outcall_captured(pic, canister, caller, method, arg, reply)
+        .map(|(value, _call)| value)
+}
+
+/// `call_with_mocked_outcall` の捕捉版。mockしたoutcallの送信内容も返す。
+///
+/// outcallが出ずに呼び出しが終わった場合（送信前の失敗など）は捕捉が `None` になる。
+pub fn call_with_mocked_outcall_captured<A, R>(
+    pic: &PocketIc,
+    canister: Principal,
+    caller: Principal,
+    method: &str,
+    arg: A,
+    reply: Result<(u16, Vec<u8>), (u64, String)>,
+) -> Result<(R, Option<CapturedHttpCall>), String>
+where
+    A: candid::utils::ArgumentEncoder,
+    R: CandidType + DeserializeOwned,
+{
     let payload = candid::encode_args(arg).map_err(|error| format!("encode {method}: {error}"))?;
     let message_id = pic
         .submit_call(canister, caller, method, payload)
         .map_err(|error| format!("submit {method}: {error:?}"))?;
 
-    let mut mocked = false;
+    let mut captured = None;
     for _ in 0..50 {
         pic.tick();
         let pending = pic.get_canister_http();
         if let Some(request) = pending.first() {
+            captured = Some(CapturedHttpCall {
+                url: request.url.clone(),
+                method: request.http_method.clone(),
+                body: request.body.clone(),
+                replication: request.replication.clone(),
+            });
             let response = match &reply {
                 Ok((status, body)) => CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
                     status: *status,
@@ -237,24 +273,27 @@ where
                 response,
                 additional_responses: Vec::new(),
             });
-            mocked = true;
             break;
         }
     }
-    if !mocked {
+    let Some(captured) = captured else {
         // outcallが出ないまま呼び出しが終わっている場合は、その応答を返す
         // （sweepが送信前に失敗した場合など、原因をテスト側で観測できるようにする）。
         if let Some(status) = pic.ingress_status(message_id) {
             let bytes = status.map_err(|error| format!("reject {method}: {error:?}"))?;
-            return candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"));
+            let value: R = candid::decode_one(&bytes)
+                .map_err(|error| format!("decode {method}: {error}"))?;
+            return Ok((value, None));
         }
         return Err(format!("{method}: no pending outcall to mock"));
-    }
+    };
 
     let bytes = pic
         .await_call(message_id)
         .map_err(|error| format!("reject {method}: {error:?}"))?;
-    candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))
+    let value: R =
+        candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))?;
+    Ok((value, Some(captured)))
 }
 
 /// Canisterをアップグレードする（`post_upgrade`の検証に使う）。
