@@ -28,8 +28,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master（1.97.0を下で固定）
         with:
           # rust-toolchain.toml と同じ版に固定する。
           toolchain: '1.97.0'
@@ -41,30 +41,52 @@ jobs:
         # 既定メンバーだけでは crates/pocket-ic-tests が漏れるため --workspace を使う。
         # Canisterクレートは `db` のwasm専用モジュール（repo/tx）に依存するためホストでは
         # ビルドできず、wasmターゲットのlintステップで別途検査する。
-        run: cargo clippy --workspace --all-targets --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy -- -D warnings
-      - name: Test (host, default members)
-        run: cargo test
+        run: cargo clippy --locked --workspace --all-targets --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy -- -D warnings
+      - name: Test (host, pure crates and test harness)
+        # ホストでビルドできるメンバーだけを対象にする（Canisterクレートはwasm専用モジュールに
+        # 依存するためホストではテストをビルドできない）。既定メンバーの固定ではなく除外指定に
+        # することで、純粋クレートを追加したときに自動で対象になる。
+        run: cargo test --locked --workspace --exclude pocket-ic-tests --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy
       - name: Forbid async in hl-sign and db
         run: bash scripts/check-no-await.sh
       - name: Forbid raw-key signing in canister crates
         run: bash scripts/check-signing-boundary.sh
       - name: Lint (wasm canisters)
-        run: cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -p db -- -D warnings
+        run: cargo clippy --locked --all-targets --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -p db -- -D warnings
       - name: Build canister wasm
-        run: cargo build --release --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core
+        run: cargo build --locked --release --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core
+      - name: Check the deployable wasm has no test-only entry points
+        # test-venue 付きのビルドが本番成果物へ混ざっていないことを検査する。
+        run: |
+          set -euo pipefail
+          for wasm in target/wasm32-unknown-unknown/release/policy.wasm \
+                      target/wasm32-unknown-unknown/release/funds_vault.wasm \
+                      target/wasm32-unknown-unknown/release/control_guard.wasm \
+                      target/wasm32-unknown-unknown/release/trading_core.wasm; do
+            test -f "$wasm"
+            for method in test_credit_deposit test_corrupt_action_digest test_hpke_seal \
+                          test_hpke_open test_ecdsa_roundtrip test_sweep_now test_ingest_fills \
+                          test_apply_order_status test_sign_order_action; do
+              if grep -q "$method" "$wasm"; then
+                echo "$wasm にテスト専用メソッド $method が含まれています" >&2
+                exit 1
+              fi
+            done
+          done
   pocket-ic:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master（1.97.0を下で固定）
         with:
           toolchain: '1.97.0'
           targets: wasm32-unknown-unknown
       # PocketICサーバ（pocket-ic-x86_64-linux.gz）を取得し、
       # wasmビルド → crates/pocket-ic-tests の試験を実行する。
+      # 取得時の完全性検証はプラットフォーム別checksumで行う（fetch-pocket-ic.sh）。
       - name: PocketIC integration tests
         run: bash scripts/pocket-ic-test.sh
       # 公式SDKのfixtureはコミット済み。生成器はネットワークとpnpmを要するため
       # CIでは再生成せず、固定したfixtureとの一致だけを検証する。
       - name: Official SDK fixture comparison
-        run: cargo test -p hl-sign --test fixtures
+        run: cargo test --locked -p hl-sign --test fixtures
