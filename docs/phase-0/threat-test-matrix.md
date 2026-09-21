@@ -1,7 +1,7 @@
 # 脅威と試験の対応表
 
 - 根拠：`Implementation.md` 9.2〜9.4、14.4、`Plan.md` 3.2、16章、ロードマップ4章・6章
-- 状態：設計契約。**一部実行済み**。実行済みの試験は実施日と証跡を付す（2026-09-19にT-101〜T-105を実行）。未実行のものは未実行のまま
+- 状態：設計契約。**一部実行済み**。実行済みの試験は実施日と証跡を付し、11節に実行済み・未実行の一覧を置く（2026-09-19〜21に認証・資金・outbox・guardのローカル分を実行）。未実行のものは未実行のまま
 
 ## 1. 読み方
 
@@ -35,11 +35,13 @@
 | T-108 | 失効伝達前に`trading_core`を呼ぶ | 未確認セッションを受理しない | PocketIC | 拒否（`SessionIssuedByUnregisteredVault`等） | 試験ログ | 2 |
 | T-109 | セッション鍵・本人キャッシュのブラウザ永続化 | 永続化しない設計 | Playwright, レビュー | 保存領域に残らない | 画面記録 | 2 |
 
-実行済み（2026-09-19、`crates/pocket-ic-tests/tests/vault_auth.rs`）: T-101（別鍵の署名を拒否）、T-103（期限切れを拒否）、T-104（challenge再使用を拒否）、T-105（別origin/networkの署名を拒否）。T-102は未実行。
+実行済み（2026-09-19〜21、`crates/pocket-ic-tests/tests/vault_auth.rs`・7件）: T-101（別鍵の署名を拒否）、T-102（challengeを発行時のprincipalへ束縛し、別principalでの引換えを拒否。`a_challenge_bound_to_a_principal_cannot_be_redeemed_by_another`と`a_challenge_principal_must_match_the_caller`）、T-103（期限切れを拒否）、T-104（challenge再使用を拒否）、T-105（別origin/networkの署名を拒否）。T-106〜T-109は未実行。
 
 実行済み（2026-09-19、`crates/pocket-ic-tests/tests/vault_outbox.rs`）: T-205（送金成功後の応答喪失で自動再送しない）。T-206（時間経過で不明を解放・再送しない）も実行済み（10分経過後も保持を確認）。
 
-実行済み（2026-09-19、`crates/pocket-ic-tests/tests/guard_upgrade.rs`）: T-501（非SNSの予約拒否）、T-502（早期実行拒否）、T-503/T-504（内容不一致拒否）、T-506（取消＋新規予約で新しい猶予）。一致する予約の実行（`install_code`）も検証済み。
+実行済み（2026-09-19、`crates/pocket-ic-tests/tests/guard_upgrade.rs`）: T-501（非SNSの予約拒否）、T-502（早期実行拒否）、T-503/T-504（内容不一致拒否）、T-506（取消＋新規予約で新しい猶予）。一致する予約の実行（`install_code`）も極小wasmで検証済み。
+
+実行済み（その他、証跡 `docs/phase-1/evidence/P1-010.md` の対応表）: T-201・T-202〜T-204・T-207・T-211・T-212の一部・T-307、T-407とT-705のローカル部分（`vault_deposits.rs`・`vault_reconcile.rs`・`vault_funds.rs`・`vault_upgrade.rs`）。T-212は同一`client_request_id`の二重受付拒否まで。
 
 ## 4. 資金・台帳・出金
 
@@ -135,8 +137,18 @@
 | T-802 | Confidential Subnetの利用可否、outcall・upgrade・復旧の動作、未検証の信頼仮定 | 記録（信頼仮定を明示） | 1 |
 | T-803 | A/B0/B1相関評価（`privacy-evaluation.md`） | 評価レポート | 1 |
 
-## 11. 未実行であることの明示
+## 11. 実行済み・未実行の一覧
 
-- 本表の試験はすべて設計であり、2026-09-19時点で1件も実行していない。
+実行済み（ローカル、PocketIC。証跡は `docs/phase-1/evidence/`）:
+
+- T-101・T-102・T-103・T-104・T-105（`vault_auth.rs`・7件）
+- T-201（重複計上の拒否）・T-211（安定イベントIDの検証）（`vault_deposits.rs`・2件、`vault_reconcile.rs`・1件）
+- T-202〜T-204・T-207・T-307（`vault_funds.rs`・6件）
+- T-205・T-206（`vault_outbox.rs`・9件。T-212の一部を含む）
+- T-407・T-705のローカル部分（`vault_upgrade.rs`・1件）
+- T-501・T-502・T-503・T-504・T-506（`guard_upgrade.rs`・5件）
+
+未実行: 上記以外（T-106〜T-109、T-208〜T-210、T-301〜T-306、T-401〜T-406・T-408〜T-410、T-505、T-507〜T-509、T-601〜T-608、T-701、T-702、T-703〜T-710、T-801〜T-803）。testnet・Playwright・手動・レビュー層の試験は未実施。
+
 - UIデモの成功、ユニットテストの成功、ビルド成功を、本表の試験合格として扱わない。
 - 資金・署名・認証・guardに関わる変更は、正常系の成功だけでは完了としない。

@@ -1,7 +1,7 @@
 # Phase 0：実装契約・画面仕様
 
 - 作成日：2026-09-19
-- 状態：契約を固定。Canister実装・実資金・testnet接続は未着手
+- 状態：契約を固定。実資金・testnet接続は未着手（Canister実装はPhase 1でローカル範囲まで進行。`docs/phase-1/README.md` と `docs/implementation-status.md` を参照）
 - 基準文書：`Plan.md` v0.9（特に3章・16章）、`Implementation.md` v0.5（特に3章・4章・5章・9章・14章）、`Implementation-Roadmap.md` v1.1（特に4章・10章・12章）
 
 ## 1. 目的
