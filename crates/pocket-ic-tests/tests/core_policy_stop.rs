@@ -18,7 +18,7 @@ use pocket_ic_tests::{
 };
 
 const ORIGIN: &str = "https://app.example.test";
-const UNIVERSE: &str = r#"[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]"#;
+const UNIVERSE: &str = r#"[{"name":"SOL","szDecimals":0},{"name":"ETH","szDecimals":5},{"name":"BTC","szDecimals":5}]"#;
 
 fn secret(seed: u8) -> [u8; 32] {
     let mut bytes = [0u8; 32];

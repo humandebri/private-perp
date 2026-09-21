@@ -239,7 +239,6 @@ async fn submit_order(
             code: api_types::error::NotAllowedCode::AssetNotAllowed,
         });
     }
-    let asset_index = resolve_asset_index(&market)?;
 
     // 数量・価格は正規化十進で検証し、丸めない。
     let quantity = hl_types::decimal::Decimal::parse(&args.quantity).map_err(bad_decimal)?;
@@ -249,7 +248,7 @@ async fn submit_order(
             "quantity must be positive",
         ));
     }
-    match (&args.kind, &args.limit_price) {
+    let price = match (&args.kind, &args.limit_price) {
         (api_types::order::OrderKind::MarketIoc, None) => {
             return Err(bad(
                 BadRequestCode::MissingField,
@@ -264,17 +263,30 @@ async fn submit_order(
                     "price must be positive",
                 ));
             }
+            Some(price)
         }
         _ => {
             // 成行（Market IOC）も指値（スリッページ上限）と同様に価格を必須とする。
             return Err(bad(BadRequestCode::MissingField, "limit price is required"));
         }
-    }
+    };
     if args.leverage.unwrap_or(3) > 5 {
         return Err(bad(
             BadRequestCode::QuantityOutOfRange,
             "leverage exceeds the UI limit",
         ));
+    }
+
+    // 数量・価格の精度を銘柄の `szDecimals` で検査する（HLはperpsで有効数字5桁まで、
+    // 価格は 6-szDecimals 桁まで）。metaに無い場合は設定不備としてfail-closedで拒否する。
+    let (asset_index, sz_decimals) = resolve_asset(&market)?;
+    quantity
+        .validate_precision(sz_decimals, 5)
+        .map_err(|error| bad(BadRequestCode::PrecisionExceeded, &error.to_string()))?;
+    if let Some(price) = &price {
+        price
+            .validate_precision(6u32.saturating_sub(sz_decimals), 5)
+            .map_err(|error| bad(BadRequestCode::PrecisionExceeded, &error.to_string()))?;
     }
 
     // 本文fingerprint（受付の冪等性）。**本文全体**を含める。side・reduce_only・
@@ -594,13 +606,29 @@ async fn list_fills(
     let user_id = authorize(&session).await?;
     let limit = limit.clamp(1, 100);
     let now = ic_cdk::api::time() / 1_000_000;
-    let _ = cursor;
-    let rows =
-        db::tx::query(|connection| db::repo::orders::list_fills(connection, &user_id, limit))
-            .map_err(map_db)?;
+    let before = match cursor.as_ref() {
+        Some(cursor) => {
+            let bytes: [u8; 8] = cursor
+                .as_ref()
+                .try_into()
+                .map_err(|_| bad(BadRequestCode::MalformedPayload, "invalid cursor"))?;
+            Some(i64::from_be_bytes(bytes))
+        }
+        None => None,
+    };
+    let rows = db::tx::query(|connection| {
+        db::repo::orders::list_fills(connection, &user_id, before, limit)
+    })
+    .map_err(map_db)?;
+    let next_cursor = if rows.len() == limit as usize {
+        rows.last()
+            .map(|(rowid, _)| rowid.to_be_bytes().to_vec().into())
+    } else {
+        None
+    };
     Ok(api_types::Paged {
         items: rows.into_iter().map(|(_, fill)| fill).collect(),
-        next_cursor: None,
+        next_cursor,
         observed_at: now,
         revision: 1,
     })
@@ -870,8 +898,8 @@ fn vault_principal() -> Result<Principal, ErrorCode> {
     Ok(Principal::from_slice(&bytes))
 }
 
-/// metaからasset indexを解決する（未取得はfail-closed）。
-fn resolve_asset_index(market: &str) -> Result<u32, ErrorCode> {
+/// metaからasset indexと `szDecimals` を解決する（未取得・欠落はfail-closed）。
+fn resolve_asset(market: &str) -> Result<(u32, u32), ErrorCode> {
     // network・dexは設定から解決する（固定値を埋め込まない）。未設定はfail-closed。
     let (network, dex) = db::tx::query(db::repo::core_config::market_context)
         .map_err(map_db)?
@@ -884,7 +912,15 @@ fn resolve_asset_index(market: &str) -> Result<u32, ErrorCode> {
         serde_json::from_str(&universe).map_err(|error| internal(error.to_string()))?;
     for (index, entry) in entries.iter().enumerate() {
         if entry.get("name").and_then(|name| name.as_str()) == Some(market) {
-            return u32::try_from(index).map_err(|_| internal("index overflow".to_string()));
+            let index =
+                u32::try_from(index).map_err(|_| internal("index overflow".to_string()))?;
+            let sz_decimals = entry
+                .get("szDecimals")
+                .and_then(|value| value.as_u64())
+                .ok_or(ErrorCode::PolicyUnavailable)?;
+            let sz_decimals =
+                u32::try_from(sz_decimals).map_err(|_| internal("szDecimals overflow".to_string()))?;
+            return Ok((index, sz_decimals));
         }
     }
     Err(ErrorCode::NotAllowed {
