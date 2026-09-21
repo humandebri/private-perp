@@ -1475,3 +1475,201 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         "一括取消で全て取消済みになる"
     );
 }
+
+/// 取引所のoidが同じでも、他人の注文の状態は変わらない。
+///
+/// 取引所のoidは口座ごとに採番されるため、口座で絞らずにoidだけで更新すると
+/// 他人の注文を書き換え得る（`apply_order_status` の所有者スコープの回帰試験）。
+#[test]
+fn order_status_is_scoped_to_the_account() {
+    let pic = pic();
+    let controller = principal(130);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    set.expect("set_vault_principal");
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    let meta: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_meta_cache",
+        (
+            "local".to_string(),
+            "hyperliquid".to_string(),
+            UNIVERSE.to_string(),
+        ),
+    )
+    .expect("call");
+    meta.expect("set_meta_cache");
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .expect("call");
+    context.expect("set_market_context");
+
+    let venue_body =
+        br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":777}}]}}}"#
+            .to_vec();
+
+    // 利用者A: 入金→発注→送信（oid 777で受理）。
+    let caller_a = principal(131);
+    let session_a = open_session(&pic, vault, caller_a, &secret(201));
+    fund_trading_account(
+        &pic,
+        vault,
+        controller,
+        caller_a,
+        &session_a,
+        b"scope-a",
+        5_000_000_000,
+        202,
+    );
+    let agent_a: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
+        &pic,
+        core,
+        caller_a,
+        "request_agent_generation",
+        session_a.clone(),
+    )
+    .expect("call");
+    let agent_a = agent_a.expect("agent").agent_address;
+    approve_agent_at_vault(&pic, vault, caller_a, &session_a, 1, agent_a.as_ref())
+        .expect("approved");
+
+    let submitted_a: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller_a,
+        "submit_order",
+        (
+            session_a.clone(),
+            order_args(&session_a, b"scope-order-a", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    submitted_a.expect("accepted order");
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        core,
+        caller_a,
+        "test_sweep_now",
+        (),
+        Ok((200, venue_body.clone())),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+
+    // 利用者B: 同じoidを返すmockで受理させる。
+    let caller_b = principal(132);
+    let session_b = open_session(&pic, vault, caller_b, &secret(203));
+    fund_trading_account(
+        &pic,
+        vault,
+        controller,
+        caller_b,
+        &session_b,
+        b"scope-b",
+        5_000_000_000,
+        204,
+    );
+    let agent_b: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
+        &pic,
+        core,
+        caller_b,
+        "request_agent_generation",
+        session_b.clone(),
+    )
+    .expect("call");
+    let agent_b = agent_b.expect("agent").agent_address;
+    approve_agent_at_vault(&pic, vault, caller_b, &session_b, 1, agent_b.as_ref())
+        .expect("approved");
+
+    let submitted_b: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller_b,
+        "submit_order",
+        (
+            session_b.clone(),
+            order_args(&session_b, b"scope-order-b", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    submitted_b.expect("accepted order");
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        core,
+        caller_b,
+        "test_sweep_now",
+        (),
+        Ok((200, venue_body)),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+
+    // Bが同じoid(777)のorderStatusを適用する。
+    let applied: Result<bool, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller_b,
+        "test_apply_order_status",
+        (
+            session_b.clone(),
+            r#"{"status":"filled","order":{"oid":777}}"#.to_string(),
+        ),
+    )
+    .expect("call");
+    applied.expect("applied");
+
+    // Aの注文はopenのまま、Bの注文だけがfilledになる。
+    let listed_a: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller_a,
+        "list_orders",
+        (session_a.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    let listed_a = listed_a.expect("orders");
+    assert!(
+        listed_a
+            .items
+            .iter()
+            .all(|order| order.state == api_types::order::OrderState::Open),
+        "他人のoidでAの注文を書き換えない: {:?}",
+        listed_a.items.iter().map(|o| o.state).collect::<Vec<_>>()
+    );
+
+    let listed_b: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller_b,
+        "list_orders",
+        (session_b, None::<Blob>, 10u32),
+    )
+    .expect("call");
+    let listed_b = listed_b.expect("orders");
+    assert!(
+        listed_b
+            .items
+            .iter()
+            .any(|order| order.state == api_types::order::OrderState::Filled),
+        "本人の注文は更新される"
+    );
+}
