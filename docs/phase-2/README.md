@@ -24,3 +24,23 @@
 
 ## Phase 2で扱わないもの
 Phase 3以降（複数ユーザー分離・負荷・backup復元・cycles通知・eligibility/監査/保持削除）、実資金・mainnet（E-2で**拒否**を試験）、Phase 1の細部（UIの磨き込み等）。ただし `reconcile_all` の固定窓（入金先が3件以上で古い口座が対象外）は実バグのためM3までに修正する。
+
+## 残りの実装（次セッションで着手）
+
+### 1. SL/TP（トリガー注文）
+- 型は `hl-types` に既存：`OrderType::Trigger(TriggerOrder { is_market, .., tpsl })`、`Tpsl::{NormalTpsl, PositionTpsl}`、`OrderRequest.reduce_only`。coreの`SubmitOrderArgs.trigger`は受け取れるが**未配線**。
+- 手順：(a) `orders`表へ `trigger_price TEXT`・`trigger_is_market INTEGER`・`trigger_tpsl TEXT` を追加（coreスキーマは未リリースなのでv6定義を編集可）。(b) `submit_order` の受付で `args.trigger` を検証（価格>0、SL/TPの向きと建玉の整合、reduce_only必須）。(c) `sign_and_build` の action 構築と JSON本文で `t: {"trigger": {...}}` を出す分岐。(d) 試験：SL付き注文の署名actionに `trigger` が入り、`orderStatus` 反映で状態が変わること。
+- 参照：`crates/db/src/schema/core.rs`、`crates/trading-core/src/lib.rs`（`submit_order`・`sign_and_build`）、`crates/hl-types/src/action.rs`。
+
+### 2. 全決済・部分決済（reduce-only）
+- 手順：(a) `submit_order` の受付〜action作成〜署名を**内部ヘルパ `submit_inner(user_id, args)` に抽出**（現在は`submit_order`内に直書き）。(b) `close_position(session, market, ratio_bps)` を追加：`positions`の `size` を読み、符号で売買を決め、`reduce_only=true` の IOC 指値を `submit_inner` で送る。(c) `close_all(session)` は建玉ごとに繰り返す。(d) 試験：建玉取り込み→全決済で反対売買のreduce-only注文が出て、`orderStatus`/約定取り込みで建玉が0になること。
+- 参照：`crates/db/src/repo/positions.rs`、`crates/trading-core/src/lib.rs`。
+
+### 3. HPKE封筒の個人API適用（T-605）
+- 現状：封筒（`seal`/`open`/`envelope_aad`）と鍵レジストリは **funds_vault のみ**（`crates/funds-vault/src/hpke.rs`）。coreには無い。
+- 手順：(a) **共有クレート `crates/hpke-envelope` を新設**し、`funds-vault`の封筒実装（`SeededRng`・`seal`・`open`・`envelope_aad`）を移設して`funds-vault`から再輸出（他canisterでも使えるようにする）。(b) coreへ `key_registry`（世代・秘密鍵・公開鍵、`raw_rand`由来）と `get_hpke_public_key` を追加。(c) 契約§6の `HpkeRequest`/`HpkeResponse` に沿って、個人API（`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`）を**封筒必須**にし、`request_id`再送拒否と`aad`（network/canister/method/caller/request_id/期限）を検証。(d) 試験：正しい封筒のみ通る・再利用拒否・`aad`改竄拒否・鍵更新中の挙動。
+- 参照：`docs/phase-0/api-contract.md` §6、`crates/funds-vault/src/hpke.rs`、`crates/trading-core/src/lib.rs`。
+
+### 実行上の注意（並行作業対策）
+- PocketICは必ずスクリプト経由：`POCKET_IC_TEST_DIR=$PWD/target/test-venue-mine bash scripts/pocket-ic-test.sh --test <name>`。
+- 素の `cargo test` は本番用wasm（feature無し）を読むため偽の失敗になる。
