@@ -132,7 +132,7 @@ DFINITYのエンジニアは「`sign_with_ecdsa` を呼ぶcanisterを署名subne
 6. 応答は照合の手掛かりとして保存する。dispatching以降は照合専用とし、タイムアウトやcallback trapを未送信扱いに戻さない。
 7. HLでactionの結果と各注文のライフサイクルを照合する。cancelも独立した署名actionとして処理する。
 
-sweepは件数・cycles・API予算を制限する。queued/signing/signedはepochを更新して回収できるが、dispatching/unknownは照合のみ。永続状態が正本であり、spawnやtimerの継続を正しさの前提にしない。
+sweepの起動はグローバルtimerで行い（アップグレードで再arm）、件数・cycles・API予算を制限する。queued/signing/signedはepochを更新して回収できるが、dispatching/unknownは照合のみ。永続状態が正本であり、spawnやtimerの継続を正しさの前提にしない。
 
 ### 2.4 Phase 1のGo/No-Goゲート（数値）
 

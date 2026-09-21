@@ -128,7 +128,7 @@ accepted ──▶ reserved ──▶ executing ──▶ settled
 | 照合で取消済みと判明 | `cancelled`へ遷移し、取消actionの照合根拠を残す |
 | 照合で部分約定と判明 | `partially_filled`。リスク予約は約定分だけ消費する |
 
-- sweepは件数・cycles・API予算を制限する。永続状態が正本であり、spawnやtimerの継続を正しさの前提にしない。
+- sweepの起動はグローバルtimer（5秒間隔。`init`／`post_upgrade`で再armする）で行い、件数・cycles・API予算を制限する。永続状態が正本であり、timer・spawnの継続を正しさの前提にしない（停止時は手動`sweep`で再開する）。
 - 結果不明が解消できなければ自動再送せず、予約を保持して安全側に停止する。
 - 障害時は新規リスク増加停止、照合継続、可能な取消・reduce-only・確認済み出金を優先する。
 

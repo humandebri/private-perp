@@ -29,6 +29,7 @@ candid = "=0.10.35"
 hex = "=0.4.3"
 ic-cdk = "=0.20.3"
 ic-cdk-management-canister = "=0.2.0"
+ic-cdk-timers = "=1.0.0"
 ic-management-canister-types = "=0.10.0"
 ic-sqlite-vfs = { version = "=2.0.0", default-features = false, features = ["sqlite-precompiled"] }
 k256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa"] }

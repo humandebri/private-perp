@@ -22,16 +22,6 @@ use ic_cdk_management_canister::{EcdsaCurve, EcdsaKeyId, EcdsaPublicKeyArgs, ecd
 
 const MEMORY_ID: u8 = db::memory_id::TRADING_CORE_MAIN;
 
-// 直近のsweep時刻（heartbeatの間隔ゲート）。
-//
-// 試験ビルド（`test-venue`）では自動sweepを行わない。PocketICの時刻前進で
-// heartbeatが動くと、試験が待っているoutcallと取り違えるため、明示的な
-// `test_sweep_now`で駆動する。
-#[cfg(not(feature = "test-venue"))]
-thread_local! {
-    static LAST_SWEEP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
 /// 取引所データを「古い」とみなす閾値（ミリ秒）。
 const STALE_DATA_MS: u64 = 10_000;
 
@@ -1646,27 +1636,23 @@ async fn sweep() -> Result<api_types::order::SweepOutcome, ErrorCode> {
     pipeline::sweep_once(ic_cdk::api::time() / 1_000_000).await
 }
 
-/// 未処理の注文・取消を送信し、取引所状態を照合する（本番の自動経路）。
+/// sweepの起動を予約する（本番のみ・5秒間隔）。
 ///
-/// 建玉の鮮度（`STALE_DATA_MS`）より短い間隔で巡回し、新規リスクの受付を止めない。
+/// **heartbeatではなくグローバルtimer**を使う（heartbeatはメッセージが無くても
+/// 毎ラウンド呼ばれ、アイドル時もコストが乗る）。timerはアップグレードで失われる
+/// ため`init`と`post_upgrade`の両方で予約する。正しさは永続状態（`queued`／
+/// `dispatching`）と手動`sweep`が担保し、timerの継続には依存しない
+/// （`state-machines.md` 5節）。
 #[cfg(not(feature = "test-venue"))]
-#[ic_cdk::heartbeat]
-async fn heartbeat() {
-    let now = ic_cdk::api::time() / 1_000_000;
-    let due = LAST_SWEEP.with(|cell| {
-        let previous = cell.get();
-        if now.saturating_sub(previous) < pipeline::SWEEP_INTERVAL_MS {
-            false
-        } else {
-            cell.set(now);
-            true
-        }
-    });
-    if !due {
-        return;
-    }
-    // 1回の失敗でheartbeatを止めない（次の間隔で再試行する）。
-    let _ = pipeline::sweep_once(now).await;
+fn schedule_sweep() {
+    ic_cdk_timers::set_timer_interval(
+        core::time::Duration::from_millis(pipeline::SWEEP_INTERVAL_MS),
+        || async {
+            // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
+            let now = ic_cdk::api::time() / 1_000_000;
+            let _ = pipeline::sweep_once(now).await;
+        },
+    );
 }
 
 /// テスト専用：`/info`の`userFills`相当を取り込む（`test-venue`のみ）。
@@ -1728,11 +1714,18 @@ fn init_db() {
 #[ic_cdk::init]
 fn init() {
     init_db();
+    // 試験ビルドでは自動sweepを組まない（PocketICの時刻前進で、試験が待つoutcallと
+    // 取り違えるため）。同じ`sweep_once`を`test_sweep_now`で決定的に駆動する。
+    #[cfg(not(feature = "test-venue"))]
+    schedule_sweep();
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     init_db();
+    // グローバルtimerはアップグレードで失われるため予約し直す。
+    #[cfg(not(feature = "test-venue"))]
+    schedule_sweep();
 }
 
 ic_cdk::export_candid!();

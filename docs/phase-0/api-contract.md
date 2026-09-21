@@ -297,13 +297,13 @@ type OrderSummary = record {
 
 ### 3.3 送信と照合（sweep）
 
-受付（`submit_order`・`cancel_order`・`cancel_all`・`close_position`・`close_all`）はローカル状態だけを確定し、署名・送信・照合は`sweep`が行う。本番は`heartbeat`が5秒間隔で、停止時の手動実行は`sweep`（controllerのみ）が呼ぶ。
+受付（`submit_order`・`cancel_order`・`cancel_all`・`close_position`・`close_all`）はローカル状態だけを確定し、署名・送信・照合は`sweep`が行う。本番はグローバルtimer（`ic-cdk-timers`の`set_timer_interval`）が5秒間隔で起動し（timerはアップグレードで失われるため`init`／`post_upgrade`で再armする）、停止時の手動実行は`sweep`（controllerのみ）が呼ぶ。heartbeatは使わない（メッセージが無くても毎ラウンド呼ばれ、アイドル時もコストが乗るため）。
 
 - 1回の上限：送信4件・取消4件・照合2口座・注文状態4件/口座（outcallの回数を抑える）。
 - 送信（`/exchange`）は**非replicated** POST。受理は`open`＋取引所oid、拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`とし**再送しない**（リスク予約も解放しない。解消は照合で行う）。
 - 照合（`/info`）は**replicated** outcall＋決定論的な変換関数（`transform_info`）で行う。約定（`userFills`）は`tid`で冪等に取り込み、建玉（`clearinghouseState`）は**観測の全量**で置き換え、注文状態（`orderStatus`）はoidが分かる未終端注文だけに反映する。
 - 照合の対象は`accounts`に取引所アドレスを保存済みの有効口座で、`account_id`順のカーソルで巡回する（先頭N件固定にしない）。アドレスは本人の署名済み要求の処理中にvaultから一度だけ取得して保存する。
-- 自動sweep（`heartbeat`）は本番ビルドのみで動く。試験ビルドでは明示的な`test_sweep_now`で同じ経路を駆動する（PocketICで試験が待つoutcallと取り違えないため）。
+- 自動sweep（timer）は本番ビルドのみで組む。試験ビルドでは明示的な`test_sweep_now`で同じ経路を駆動する（PocketICで試験が待つoutcallと取り違えないため）。
 
 ## 4. control_guard
 
