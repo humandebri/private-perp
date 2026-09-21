@@ -55,6 +55,29 @@ impl Signature {
         bytes[32..64].copy_from_slice(&self.s);
         K256Signature::from_slice(&bytes).map_err(|_| SignError::InvalidSignature)
     }
+
+    /// `s` を low-s 形（EIP-2）へ正規化する。反転した場合は `v` も反転させる。
+    ///
+    /// 閾値ECDSAの応答は `s > n/2` を取り得る。`recover_v` は候補を総当たりするため
+    /// high-s でも公開鍵を復元できるが、Ethereum系の検証は high-s を拒否するため、
+    /// **送信する署名**は正規形へ揃える。
+    pub fn normalized_low_s(&self) -> Result<Self, SignError> {
+        if self.v != 27 && self.v != 28 {
+            return Err(SignError::InvalidRecoveryId);
+        }
+        let normalized = self.k256_signature()?.normalize_s();
+        let bytes = normalized.to_bytes();
+        if bytes[32..64] == self.s[..] {
+            return Ok(*self);
+        }
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&bytes[32..64]);
+        Ok(Self {
+            r: self.r,
+            s,
+            v: if self.v == 27 { 28 } else { 27 },
+        })
+    }
 }
 
 /// 秘密鍵から圧縮公開鍵（33バイト）を導出する。
@@ -171,8 +194,8 @@ fn secret_key_from_bytes(secret_key: &[u8; 32]) -> Result<k256::SecretKey, SignE
 #[cfg(test)]
 mod tests {
     use super::{
-        address_from_public_key, address_from_secret, public_key_compressed, recover_address,
-        recover_v, sign_digest_for_tests,
+        Signature, address_from_public_key, address_from_secret, public_key_compressed,
+        recover_address, recover_v, sign_digest_for_tests,
     };
     use crate::error::SignError;
 
@@ -184,6 +207,61 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[31] = seed;
         bytes
+    }
+
+    /// secp256k1の位数 n。
+    const ORDER: [u8; 32] = [
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36,
+        0x41, 0x41,
+    ];
+
+    /// `s` を `n - s` にする（high-s 版を作る）。
+    fn negate_s(s: &[u8; 32]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        let mut borrow = 0i16;
+        for index in (0..32).rev() {
+            let diff = ORDER[index] as i16 - s[index] as i16 - borrow;
+            if diff < 0 {
+                out[index] = (diff + 256) as u8;
+                borrow = 1;
+            } else {
+                out[index] = diff as u8;
+                borrow = 0;
+            }
+        }
+        out
+    }
+
+    /// high-s の署名を low-s へ正規化しても、同じアドレスが復元できる。
+    ///
+    /// 閾値ECDSAは high-s を返し得るが、Ethereum系の検証は high-s を拒否する。
+    #[test]
+    fn high_s_signatures_are_normalized_to_low_s() {
+        let digest = [7u8; 32];
+        let key = secret(21);
+        let low = sign_digest_for_tests(&digest, &key).expect("sign");
+        let public_key = public_key_compressed(&key).expect("public key");
+        let address = address_from_secret(&key).expect("address");
+
+        // low-s はそのまま（vも変わらない）。
+        assert_eq!(low.normalized_low_s().expect("normalize"), low);
+
+        // 同じ署名の high-s 版（s → n-s、v 反転）を作る。
+        let high = Signature {
+            r: low.r,
+            s: negate_s(&low.s),
+            v: if low.v == 27 { 28 } else { 27 },
+        };
+        assert_ne!(high, low);
+
+        let normalized = high.normalized_low_s().expect("normalize");
+        assert_eq!(normalized, low, "正規化でlow-s形へ戻る");
+        assert_eq!(
+            recover_address(&digest, &normalized, Some(&public_key)).expect("recover"),
+            address,
+            "正規化後も同じアドレスを復元する"
+        );
     }
 
     #[test]

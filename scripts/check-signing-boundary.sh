@@ -17,7 +17,8 @@ crates=(
 )
 
 # 生の秘密鍵で署名するヘルパ（`public_key_compressed` は導出鍵の照合に使うため許可する）。
-pattern='sign_digest|sign_action|_for_tests'
+# `sign_with_domain` は独自EIP-712型へ秘密鍵で署名するヘルパで、canisterから参照してはならない。
+pattern='sign_digest|sign_action|sign_with_domain|_for_tests'
 
 status=0
 for dir in "${crates[@]}"; do
@@ -28,7 +29,7 @@ for dir in "${crates[@]}"; do
   fi
 
   # コメント行は規則の説明を含むため除外する。
-  matches="$(grep -rnE "$pattern" "$dir" --include='*.rs' | grep -vE ':[[:space:]]*(//|/\*|\*)' || true)"
+  matches="$(grep -rnE "$pattern" "$dir" --include='*.rs' | grep -vE ':[0-9]+:[[:space:]]*(//|/\*|\*)' || true)"
   if [[ -n "$matches" ]]; then
     echo "check-signing-boundary: $dir が生鍵署名ヘルパを参照しています:" >&2
     echo "$matches" >&2

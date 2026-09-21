@@ -85,7 +85,11 @@ pub async fn sign_with_key(
             code: format!("cannot recover v: {error}"),
         }
     })?;
-    Ok(hl_sign::Signature { r, s, v })
+    // 閾値署名は high-s を返し得る。Ethereum系の検証は high-s を拒否するため、
+    // 送信する署名は low-s 形へ正規化する（v も反転させる）。
+    hl_sign::Signature { r, s, v }
+        .normalized_low_s()
+        .map_err(|error| internal(&format!("cannot normalize s: {error}")))
 }
 
 #[cfg(test)]

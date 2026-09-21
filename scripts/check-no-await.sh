@@ -13,7 +13,9 @@ targets=(
 )
 
 # 検査対象のパターン。`ic_cdk::call` は `ic_cdk::caller` に部分一致しないように末尾を限定する。
-pattern='\.await|async[[:space:]]+fn|call_perform|ic_cdk::call([^[:alnum:]_]|$)|call_raw'
+# `async fn` だけでなく async ブロック（`async {`／`async move {`）と生の `ic0.call_new` も
+# 検出する（トランザクションを跨ぐ呼び出しの入口になるため）。
+pattern='\.await|async[[:space:]]+fn|async[[:space:]]*\{|async[[:space:]]+move|call_perform|call_new|ic_cdk::call([^[:alnum:]_]|$)|call_raw'
 
 status=0
 for dir in "${targets[@]}"; do
@@ -24,7 +26,7 @@ for dir in "${targets[@]}"; do
   fi
 
   # コメント行（// と * で始まる行）は規則の説明を含むため除外する。
-  matches="$(grep -rnE "$pattern" "$dir" --include='*.rs' | grep -vE ':[[:space:]]*(//|/\*|\*)' || true)"
+  matches="$(grep -rnE "$pattern" "$dir" --include='*.rs' | grep -vE ':[0-9]+:[[:space:]]*(//|/\*|\*)' || true)"
   if [[ -n "$matches" ]]; then
     echo "check-no-await: $dir に非同期・inter-canister callの記述があります:" >&2
     echo "$matches" >&2
