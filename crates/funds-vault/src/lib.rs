@@ -287,10 +287,14 @@ fn get_trading_account(session: SessionHandle) -> Result<Option<api_types::Blob>
     Ok(account.map(|account| account.account_id.to_vec().into()))
 }
 
-/// 渡されたAgentアドレスを承認する（master鍵で署名して送信する）。
+/// 渡されたAgentアドレスを世代へ承認する（master鍵で署名して送信し、結果を永続化する）。
+///
+/// `generation` は `trading_core` が採番した世代を渡す。承認はvaultの
+/// `agent_generations` に保存され、取引所の応答が不明な場合は `active` にしない。
 #[ic_cdk::update]
 async fn approve_agent_generation(
     session: SessionHandle,
+    generation: u64,
     agent_address: api_types::Blob,
 ) -> Result<api_types::fund::AgentGeneration, ErrorCode> {
     let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
@@ -302,7 +306,25 @@ async fn approve_agent_generation(
                 code: api_types::error::BadRequestCode::MalformedPayload,
                 detail: "agent_address must be 20 bytes".to_string(),
             })?;
-    fund::approve_agent_generation(&verified, agent_address).await
+    fund::approve_agent_generation(&verified, generation, agent_address).await
+}
+
+/// 口座・世代の承認状態（`trading_core` が状態表示と署名可否の判断に使う）。
+#[ic_cdk::query]
+fn get_agent_approval(
+    account_id: api_types::Blob,
+    generation: u64,
+) -> Result<Option<api_types::fund::AgentGeneration>, ErrorCode> {
+    let account_id: [u8; 32] =
+        account_id
+            .as_ref()
+            .try_into()
+            .map_err(|_| ErrorCode::BadRequest {
+                code: api_types::error::BadRequestCode::MalformedPayload,
+                detail: "account_id must be 32 bytes".to_string(),
+            })?;
+    db::tx::query(|connection| db::repo::agents::generation(connection, &account_id, generation))
+        .map_err(|error| auth::map_db(error, None))
 }
 
 /// セッションの有効性（canister間の検証経路。呼び出し元は返却されたprincipalを検証する）。

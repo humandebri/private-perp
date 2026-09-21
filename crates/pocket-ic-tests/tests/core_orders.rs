@@ -435,8 +435,37 @@ fn core_derives_agent_keys_for_the_account() {
     let status: Result<api_types::fund::AgentStatus, ErrorCode> =
         update_args(&pic, core, caller, "get_agent_status", (session.clone(),)).expect("call");
     let status = status.expect("status");
-    assert!(status.current.is_none(), "承認はvaultがmaster署名で行う");
+    assert!(
+        status.current.is_none(),
+        "vaultがmaster署名で承認するまでは未承認"
+    );
     assert_eq!(status.next.expect("next").generation, 1);
+
+    // vaultで承認すると、coreの状態表示も承認済みになる（承認はvaultが永続化する）。
+    let approved: Result<api_types::fund::AgentGeneration, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "approve_agent_generation",
+        (
+            session.clone(),
+            1u64,
+            api_types::Blob::from(requested.agent_address.as_ref().to_vec()),
+        ),
+        Ok((200, br#"{"status":"ok","response":{"type":"default"}}"#.to_vec())),
+    )
+    .expect("call");
+    assert_eq!(
+        approved.expect("approved").state,
+        api_types::fund::AgentState::Active
+    );
+
+    let status: Result<api_types::fund::AgentStatus, ErrorCode> =
+        update_args(&pic, core, caller, "get_agent_status", (session.clone(),)).expect("call");
+    let status = status.expect("status");
+    let current = status.current.expect("vaultの承認が反映される");
+    assert_eq!(current.generation, 1);
+    assert_eq!(current.state, api_types::fund::AgentState::Active);
 
     // 別principalは世代を要求できない。
     let denied: Result<api_types::fund::AgentGeneration, ErrorCode> = update(

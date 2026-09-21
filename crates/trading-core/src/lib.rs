@@ -460,20 +460,52 @@ async fn get_agent_status(
     authorize(&session).await?;
     let account_id = trading_account(&session).await?;
     let now = ic_cdk::api::time() / 1_000_000;
-    let latest = db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
+    let next = db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
         .map_err(map_db)?;
-    let (current, next) = match latest {
-        Some(generation) if generation.state == api_types::fund::AgentState::Active => {
-            (Some(generation), None)
+    // 承認はvaultがmaster署名で行い、vaultのDBへ永続化される。coreは自分の行を
+    // 「承認済み」と推測せず、vaultの状態を正とする。
+    let current = match next.as_ref() {
+        Some(generation) if generation.state != api_types::fund::AgentState::Active => {
+            agent_approval(&account_id, generation.generation).await?
         }
-        other => (None, other),
+        Some(generation) => Some(generation.clone()),
+        None => None,
     };
+    let next = next.filter(|generation| {
+        !matches!(
+            current.as_ref(),
+            Some(approved) if approved.generation == generation.generation
+        )
+    });
     Ok(api_types::fund::AgentStatus {
         current,
         next,
         revocation_pending: false,
         observed_at: now,
     })
+}
+
+/// vaultに永続化された承認状態（未承認・照会失敗は `None`）。
+///
+/// 署名可否の判断にも使うため、照会できない場合は「承認済み」と扱わない。
+async fn agent_approval(
+    account_id: &[u8; 32],
+    generation: u64,
+) -> Result<Option<api_types::fund::AgentGeneration>, ErrorCode> {
+    let vault = vault_principal()?;
+    // 2引数は `with_args`（`with_arg` は1引数としてエンコードする）。
+    let response = Call::bounded_wait(vault, "get_agent_approval")
+        .with_args(&(api_types::Blob::from(account_id.to_vec()), generation))
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: format!("vault get_agent_approval: {error}"),
+        })?;
+    let approval: Result<Option<api_types::fund::AgentGeneration>, ErrorCode> =
+        response
+            .candid()
+            .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let approval = approval?;
+    Ok(approval.filter(|row| row.state == api_types::fund::AgentState::Active))
 }
 
 /// Agent鍵の導出経路（口座と世代で分離する）。

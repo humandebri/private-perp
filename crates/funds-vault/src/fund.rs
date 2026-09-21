@@ -541,20 +541,54 @@ pub fn test_credit_deposit(
 /// Agentアドレスを承認する（master鍵で`approveAgent`を署名して送信する）。
 ///
 /// 鍵は `trading_core` が導出・保管するため、vaultは**渡されたアドレス**をmaster署名で
-/// 承認する（`Implementation.md` 7章）。
+/// 承認する（`Implementation.md` 7章）。承認結果は `agent_generations` へ**永続化**する。
+/// 取引所の応答が不明な場合は `Active` と偽らず、`requested` のまま失敗を返す
+/// （同じアドレスの再承認は取引所側で冪等）。
 pub async fn approve_agent_generation(
     session: &VerifiedSession,
+    generation: u64,
     agent_address: [u8; 20],
 ) -> Result<AgentGeneration, ErrorCode> {
+    if generation == 0 {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "generation must be positive".to_string(),
+        });
+    }
     let now = clock::now_ms();
     // Agent承認は取引口座のmaster鍵で署名する（署名者＝保存済みの取引口座）。
     let (account, master_path, master_public_key) =
         crate::outbox::signer_material(&session.user_id, AccountKind::Trading, now).await?;
     let account_id = account.account_id;
 
-    let latest = db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
+    // 既に同じ世代の行があれば、同じアドレスの再承認だけを冪等に扱う。
+    if let Some(existing) = db::tx::query(|connection| {
+        db::repo::agents::generation(connection, &account_id, generation)
+    })
+    .map_err(|error| map_db(error, None))?
+    {
+        if existing.agent_address.as_ref() != agent_address.as_slice() {
+            return Err(ErrorCode::BadRequest {
+                code: BadRequestCode::MalformedPayload,
+                detail: "generation is already used by another agent address".to_string(),
+            });
+        }
+        if existing.state == AgentState::Active {
+            return Ok(existing);
+        }
+    } else {
+        db::tx::update(|connection| {
+            db::repo::agents::insert_generation(
+                connection,
+                &account_id,
+                generation,
+                &agent_address,
+                "private-perp/agent",
+                now,
+            )
+        })
         .map_err(|error| map_db(error, None))?;
-    let generation = latest.as_ref().map(|row| row.generation).unwrap_or(1);
+    }
 
     let payload = crate::venue::ApproveAgent {
         agent: agent_address,
@@ -567,9 +601,7 @@ pub async fn approve_agent_generation(
     match crate::venue::post_approve_agent(&payload, &signature).await {
         Ok((crate::venue::ExchangeOutcome::Accepted, _response)) => {
             db::tx::update(|connection| {
-                if let Some(row) = db::repo::agents::latest(connection, &account_id)? {
-                    db::repo::agents::mark_active(connection, &account_id, row.generation, now)?;
-                }
+                db::repo::agents::mark_active(connection, &account_id, generation, now)?;
                 db::repo::events::insert_audit(
                     connection,
                     "user",
@@ -580,21 +612,34 @@ pub async fn approve_agent_generation(
                 )
             })
             .map_err(|error| map_db(error, None))?;
-            Ok(AgentGeneration {
-                account_id: account_id.to_vec().into(),
-                generation,
-                agent_address: agent_address.to_vec().into(),
-                approved_at: Some(now),
-                expires_at: None,
-                state: AgentState::Active,
+            let stored = db::tx::query(|connection| {
+                db::repo::agents::generation(connection, &account_id, generation)
             })
+            .map_err(|error| map_db(error, None))?
+            .ok_or_else(|| ErrorCode::Internal {
+                code: "approved generation disappeared".to_string(),
+            })?;
+            Ok(stored)
         }
         Ok((crate::venue::ExchangeOutcome::Rejected { message }, _response)) => {
+            db::tx::update(|connection| {
+                db::repo::agents::mark_failed(connection, &account_id, generation)?;
+                db::repo::events::insert_audit(
+                    connection,
+                    "system",
+                    "approve_agent_generation",
+                    None,
+                    Some("rejected"),
+                    now,
+                )
+            })
+            .map_err(|error| map_db(error, None))?;
             Err(ErrorCode::UpstreamRejected {
                 code: message,
                 retryable: false,
             })
         }
+        // 送信した可能性がある。`Active` とは扱わず、`requested` のまま失敗を返す。
         Err(error) => Err(error),
     }
 }

@@ -143,15 +143,41 @@ pub fn mark_active(
     connection
         .execute(
             "UPDATE agent_generations SET state = 'active', approved_at = ?3
-              WHERE account_id = ?1 AND generation = ?2 AND state = 'requested'",
+              WHERE account_id = ?1 AND generation = ?2 AND state IN ('requested', 'failed')",
             params![account_id.as_slice(), generation as i64, approved_at as i64],
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
     if changed == 0 {
         return Err(Error::StateConflict {
-            expected: "requested".to_string(),
-            actual: "missing or already approved".to_string(),
+            expected: "requested or failed".to_string(),
+            actual: "missing or already active".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// 世代を`failed`へ遷移させる（取引所が承認を拒否した）。
+///
+/// 不明（送信した可能性がある）は `failed` にしない。同じアドレスでの再承認は
+/// 取引所側で冪等なため、`requested` のまま再試行できる。
+pub fn mark_failed(
+    connection: &mut UpdateConnection<'_>,
+    account_id: &[u8; 32],
+    generation: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE agent_generations SET state = 'failed'
+              WHERE account_id = ?1 AND generation = ?2 AND state IN ('requested', 'approving')",
+            params![account_id.as_slice(), generation as i64],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    if changed == 0 {
+        return Err(Error::StateConflict {
+            expected: "requested or approving".to_string(),
+            actual: "missing or terminal".to_string(),
         });
     }
     Ok(())
