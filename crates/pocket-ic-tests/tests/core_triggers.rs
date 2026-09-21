@@ -521,18 +521,24 @@ fn trigger_orders_are_dispatched_with_the_position_tpsl_action() {
     let venue_body =
         br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":777}}]}}}"#
             .to_vec();
-    let (swept, captured) =
-        pocket_ic_tests::call_with_mocked_outcall_captured::<(), Result<u32, ErrorCode>>(
-            &pic,
-            core,
-            caller,
-            "test_sweep_now",
-            (),
-            Ok((200, venue_body)),
-        )
-        .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
-    let captured = captured.expect("outcall");
+    let (swept, captured) = pocket_ic_tests::call_with_routed_outcalls::<
+        (),
+        Result<api_types::order::SweepOutcome, ErrorCode>,
+        _,
+    >(
+        &pic,
+        core,
+        caller,
+        "test_sweep_now",
+        (),
+        pocket_ic_tests::venue_router_default(&venue_body),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
+    let captured = captured
+        .into_iter()
+        .find(|call| call.url.contains("/exchange"))
+        .expect("exchange outcall");
 
     let body: serde_json::Value = serde_json::from_slice(&captured.body).expect("json body");
     let action = &body["action"];

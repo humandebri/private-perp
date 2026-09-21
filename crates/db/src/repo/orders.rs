@@ -623,6 +623,9 @@ pub fn ingest_fill(
     let Some((order_id, ordered_quantity)) = order else {
         return Ok(false);
     };
+    let order_id: [u8; 32] = order_id
+        .try_into()
+        .map_err(|_| Error::Invariant("expected a 32-byte order id"))?;
     let existing = connection
         .query_optional_scalar::<i64>("SELECT tid FROM fills WHERE tid = ?1", params![tid as i64])
         .map_err(sql)?;
@@ -636,7 +639,7 @@ pub fn ingest_fill(
             params![
                 tid as i64,
                 user_id.as_slice(),
-                order_id,
+                order_id.as_slice(),
                 market,
                 price,
                 quantity,
@@ -655,9 +658,13 @@ pub fn ingest_fill(
     connection
         .execute(
             "UPDATE orders SET state = ?2, filled_quantity = ?3, updated_at = ?4 WHERE order_id = ?1",
-            params![order_id, state, quantity, filled_at as i64],
+            params![order_id.as_slice(), state, quantity, filled_at as i64],
         )
         .map_err(sql)?;
+    if state == "filled" {
+        // 約定した注文の予約は未約定リスクではなくなったため解放する。
+        release_risk_for_order(connection, &order_id, filled_at)?;
+    }
     Ok(true)
 }
 
@@ -680,6 +687,10 @@ pub fn apply_order_status(
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
+    if changed > 0 && matches!(state, "filled" | "cancelled" | "rejected") {
+        // 終端に達した注文の予約は未約定リスクではなくなったため解放する。
+        release_risk_for_oid(connection, account_id, hl_oid, now)?;
+    }
     Ok(changed > 0)
 }
 
@@ -698,6 +709,48 @@ pub fn release_risk(
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
     Ok(changed > 0)
+}
+
+/// 終端に達した注文のリスク予約を解放する（注文IDで引く）。
+///
+/// 約定・取消・拒否で注文が終端になると、その想定元本は未約定注文のリスクでは
+/// なくなる（建玉の証拠金は取引所の観測が表す）。解放しないと予約が永久に残り、
+/// equityに対する新規注文の枠を食い潰す。
+fn release_risk_for_order(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE risk_reservations SET state = 'released', released_at = ?2
+              WHERE state = 'held'
+                AND account_id = (SELECT account_id FROM orders WHERE order_id = ?1)
+                AND client_request_id = (SELECT client_request_id FROM orders WHERE order_id = ?1)",
+            params![order_id.as_slice(), now as i64],
+        )
+        .map_err(sql)?;
+    Ok(())
+}
+
+/// 終端に達した注文のリスク予約を解放する（口座と取引所oidで引く）。
+fn release_risk_for_oid(
+    connection: &mut UpdateConnection<'_>,
+    account_id: &[u8; 32],
+    hl_oid: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE risk_reservations SET state = 'released', released_at = ?3
+              WHERE state = 'held' AND account_id = ?2
+                AND client_request_id IN (
+                    SELECT client_request_id FROM orders
+                     WHERE account_id = ?2 AND hl_oid = ?1)",
+            params![hl_oid as i64, account_id.as_slice(), now as i64],
+        )
+        .map_err(sql)?;
+    Ok(())
 }
 
 /// 注文を署名用に取得する（列順はこの関数内で完結させる）。
@@ -761,6 +814,29 @@ pub fn signable(
     .transpose()
 }
 
+/// 取引所へ状態を問い合わせる注文のoid（未終端でoidが分かっているもの）。
+///
+/// 結果不明（`unknown`）でもoidがあれば照合で解消できるため対象に含める。
+pub fn oids_awaiting_status(
+    connection: &Connection,
+    account_id: &[u8; 32],
+    limit: u32,
+) -> Result<Vec<u64>, Error> {
+    let rows = connection
+        .query_all(
+            "SELECT hl_oid FROM orders
+              WHERE account_id = ?1 AND hl_oid IS NOT NULL
+                AND state IN ('open', 'partially_filled', 'unknown')
+              ORDER BY rowid LIMIT ?2",
+            params![account_id.as_slice(), limit as i64],
+            |row| row.get::<i64>(0),
+        )
+        .map_err(sql)?;
+    rows.into_iter()
+        .map(|oid| u64::try_from(oid).map_err(|_| Error::Invariant("bad oid")))
+        .collect()
+}
+
 /// 取消送信の対象（取消要求済みで未送信、`hl_oid`既知の未終端注文）。
 pub fn cancel_candidates(connection: &Connection, limit: u32) -> Result<Vec<[u8; 32]>, Error> {
     let rows = connection
@@ -813,7 +889,9 @@ pub fn mark_cancel_sent(
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
-    crate::cas::ensure_changed(changed, "signing", "not claimed")
+    crate::cas::ensure_changed(changed, "signing", "not claimed")?;
+    // 取消済みとして扱う注文の予約は解放する（照合の結果で状態は修正され得る）。
+    release_risk_for_order(connection, order_id, now)
 }
 
 /// 取消の送信結果が不明。

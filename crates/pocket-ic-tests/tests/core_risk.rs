@@ -13,8 +13,9 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, configure_policy, deploy,
-    envelope, fund_trading_account, pic, principal, rotate_hpke_key, update, update_args,
+    FUNDS_VAULT_WASM, TRADING_CORE_WASM, approve_agent_at_vault, configure_policy, deploy,
+    envelope, fund_trading_account, pic, principal, rotate_hpke_key, sweep_with_venue_outcalls,
+    update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -161,7 +162,9 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
         session.clone(),
     )
     .expect("call");
-    agent.expect("agent");
+    let agent_address = agent.expect("agent").agent_address;
+    approve_agent_at_vault(&pic, vault, caller, &session, 1, agent_address.as_ref())
+        .expect("approve agent");
 
     let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
@@ -184,16 +187,9 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
 
     // 取引所が拒否したら解放する。
     let rejected = br#"{"status":"err","response":"insufficient margin"}"#.to_vec();
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller,
-        "test_sweep_now",
-        (),
-        Ok((200, rejected)),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller, rejected).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
 
     let snapshot: Result<AccountSnapshot, ErrorCode> =
         envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");

@@ -240,6 +240,15 @@ CREATE TABLE hpke_requests (
 CREATE INDEX hpke_requests_by_expiry ON hpke_requests (expires_at);
 ";
 
+/// 照合の巡回カーソル（有効な口座を順に巡回する）。
+const RECONCILE_CURSOR: &str = "
+CREATE TABLE reconcile_cursor (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    last_account_id BLOB NOT NULL CHECK (length(last_account_id) = 32),
+    updated_at INTEGER NOT NULL
+);
+";
+
 /// `trading_core` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -273,5 +282,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 8,
         sql: HPKE_REQUESTS,
+    },
+    Migration {
+        version: 9,
+        sql: RECONCILE_CURSOR,
     },
 ];

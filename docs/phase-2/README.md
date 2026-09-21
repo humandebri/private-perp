@@ -47,6 +47,17 @@ Phase 3以降（複数ユーザー分離・負荷・backup復元・cycles通知�
 - 未適用：`submit_order`・`cancel_all`・`close_position`・`close_all`・`request_agent_generation`・`get_agent_status`（契約§6の適用範囲を4メソッドとしたため）。
 - 試験：`crates/pocket-ic-tests/tests/core_hpke.rs`（正規の往復・期限・改竄・caller/canister/network/method束縛・request_id再利用拒否・鍵更新）。
 
+### 4. 本番の注文パイプラインと照合（M3残余）— **完了**
+- `test-venue`限定だった署名・送信・照合を `crates/trading-core/src/venue.rs`（outcall・変換）と `pipeline.rs`（送信・照合）へ移し、**feature無しの本番wasmで動作**するようにした。`submit_order` は従来どおり受付（`pending`）だけを確定する。
+- 送信（`/exchange`）は非replicated POST。受理は`open`＋oid、拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`（**再送しない**・予約も解放しない）。取消も同じ経路で送る。
+- 照合（`/info`）はreplicated outcall＋決定論的な変換関数`transform_info`（用途別に必要な要素だけを残す）。`userFills`は`tid`で冪等に取り込み、`clearinghouseState`は観測の全量で置き換え、`orderStatus`はoidが分かる未終端注文だけに反映する。
+- `heartbeat`（本番ビルドのみ・5秒間隔）と`sweep`（controller手動）が同じ`sweep_once`を呼ぶ。試験ビルドでは自動sweepを止め、`test_sweep_now`で決定的に駆動する（PocketICで試験が待つoutcallと取り違えないため）。
+- 照合対象は`accounts`に取引所アドレスを保存済みの有効口座で、`account_id`順のカーソルで巡回する（固定窓にしない）。アドレスは本人の署名済み要求の処理中にvaultから一度だけ取得して保存する（`cache_trading_address`）。
+- 上限：送信4件・取消4件・照合2口座・注文状態4件/口座。結果は`SweepOutcome{dispatched, cancels, reconciled}`で返す。
+- リスク予約の解放：注文が終端（約定・取消・拒否）になった時点で予約を解放する（`state-machines.md` 5節）。解放しないと予約が永久に残り、equityに対する新規注文の枠を食い潰す。建玉の証拠金は取引所の観測（`clearinghouseState`）が表すため、予約は未約定注文のリスクを表す。
+- 試験：`crates/pocket-ic-tests/tests/core_pipeline.rs`（送信→照合の往復、拒否・不明の分類と非再送、約定後の予約解放、3口座の巡回、controller限定の手動sweep）。既存の送信試験は`venue_router_default`（送信応答のみ指定し、照合は既定応答）で駆動する。
+- 未実施：実HLへの送信はGATE 0後。自動heartbeatは本番ビルドにしか存在しないため、間隔と周期コストはtestnetデプロイ時に実測する。`state-machines.md` 5節が求めるcycles予算の上限（残cyclesが閾値未満ならsweepを休止する等）は件数上限のみで未実装。建玉の証拠金は取引所の`marginSummary.totalMarginUsed`を取り込んでおらず、`margin_used`は未約定注文の予約合計を表す。
+
 ### 実行上の注意（並行作業対策）
 - PocketICは必ずスクリプト経由：`POCKET_IC_TEST_DIR=$PWD/target/test-venue-mine bash scripts/pocket-ic-test.sh --test <name>`。
 - 素の `cargo test` は本番用wasm（feature無し）を読むため偽の失敗になる。

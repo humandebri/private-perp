@@ -286,6 +286,7 @@ type OrderSummary = record {
 | 17b | `close_all` | update | `client_request_id` |
 | 17c | `get_hpke_public_key` | query | なし |
 | 17d | `rotate_hpke_key` | update（controllerのみ） | なし |
+| 17e | `sweep` | update（controllerのみ） | なし（維持運用。冪等） |
 
 - `close_position`は`(session, client_request_id, market, ratio_bps, limit_price)`を取る。`limit_price`はスリッページ上限で、省略時は観測した建玉から導出する。
 - `close_all`は`(session, client_request_id)`を取り、建玉ごとに`client_request_id`から導出した受付IDで反対売買を送る。
@@ -293,6 +294,16 @@ type OrderSummary = record {
   `Paged<FillView>`を返す。`FillView`は約定時刻・価格・数量・手数料・cloid・`hl_oid`を持つ。
 - 受付はHLの受理でも約定でもない。`submit_order`の応答は`queued`のみを返し、HL状態は`get_account_snapshot`または`list_orders`の照合結果で更新する（`Implementation.md` 6.3）。
 - 封筒必須のメソッドの要求・応答は6節の`HpkeRequest`・`HpkeResponse`で包む。平文はCandidで符号化した上記の引数（`session`とメソッド固有の引数）と応答値である。
+
+### 3.3 送信と照合（sweep）
+
+受付（`submit_order`・`cancel_order`・`cancel_all`・`close_position`・`close_all`）はローカル状態だけを確定し、署名・送信・照合は`sweep`が行う。本番は`heartbeat`が5秒間隔で、停止時の手動実行は`sweep`（controllerのみ）が呼ぶ。
+
+- 1回の上限：送信4件・取消4件・照合2口座・注文状態4件/口座（outcallの回数を抑える）。
+- 送信（`/exchange`）は**非replicated** POST。受理は`open`＋取引所oid、拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`とし**再送しない**（リスク予約も解放しない。解消は照合で行う）。
+- 照合（`/info`）は**replicated** outcall＋決定論的な変換関数（`transform_info`）で行う。約定（`userFills`）は`tid`で冪等に取り込み、建玉（`clearinghouseState`）は**観測の全量**で置き換え、注文状態（`orderStatus`）はoidが分かる未終端注文だけに反映する。
+- 照合の対象は`accounts`に取引所アドレスを保存済みの有効口座で、`account_id`順のカーソルで巡回する（先頭N件固定にしない）。アドレスは本人の署名済み要求の処理中にvaultから一度だけ取得して保存する。
+- 自動sweep（`heartbeat`）は本番ビルドのみで動く。試験ビルドでは明示的な`test_sweep_now`で同じ経路を駆動する（PocketICで試験が待つoutcallと取り違えないため）。
 
 ## 4. control_guard
 

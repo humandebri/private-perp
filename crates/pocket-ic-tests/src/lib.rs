@@ -461,6 +461,180 @@ where
     Ok((value, Some(captured)))
 }
 
+/// outcallを伴うupdate呼び出しを、**送信内容で振り分けて**複数のoutcallをmockし完了させる。
+///
+/// sweep（送信＋照合）のように1回の呼び出しで複数のoutcallが出る経路を試験する。
+/// `route` は観測した送信内容から応答を決める（URL・本文の種別で振り分ける）。
+pub fn call_with_routed_outcalls<A, R, F>(
+    pic: &PocketIc,
+    canister: Principal,
+    caller: Principal,
+    method: &str,
+    arg: A,
+    route: F,
+) -> Result<(R, Vec<CapturedHttpCall>), String>
+where
+    A: candid::utils::ArgumentEncoder,
+    R: CandidType + DeserializeOwned,
+    F: Fn(&CapturedHttpCall) -> Result<(u16, Vec<u8>), (u64, String)>,
+{
+    let payload = candid::encode_args(arg).map_err(|error| format!("encode {method}: {error}"))?;
+    let message_id = pic
+        .submit_call(canister, caller, method, payload)
+        .map_err(|error| format!("submit {method}: {error:?}"))?;
+
+    let mut captured: Vec<CapturedHttpCall> = Vec::new();
+    let mut completed = false;
+    for _ in 0..200 {
+        pic.tick();
+        for request in pic.get_canister_http() {
+            let call = CapturedHttpCall {
+                url: request.url.clone(),
+                method: request.http_method.clone(),
+                body: request.body.clone(),
+                replication: request.replication.clone(),
+            };
+            let reply = route(&call);
+            captured.push(call);
+            let response = match reply {
+                Ok((status, body)) => CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                    status,
+                    headers: vec![CanisterHttpHeader {
+                        name: "Content-Type".to_string(),
+                        value: "application/json".to_string(),
+                    }],
+                    body,
+                }),
+                Err((code, message)) => {
+                    CanisterHttpResponse::CanisterHttpReject(CanisterHttpReject {
+                        reject_code: code,
+                        message,
+                    })
+                }
+            };
+            pic.mock_canister_http_response(MockCanisterHttpResponse {
+                subnet_id: request.subnet_id,
+                request_id: request.request_id,
+                response,
+                additional_responses: Vec::new(),
+            });
+        }
+        if pic.ingress_status(message_id.clone()).is_some() {
+            completed = true;
+            break;
+        }
+    }
+    if !completed {
+        return Err(format!("{method}: the call did not complete"));
+    }
+    let bytes = pic
+        .await_call(message_id)
+        .map_err(|error| format!("reject {method}: {error:?}"))?;
+    let value: R =
+        candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))?;
+    Ok((value, captured))
+}
+
+/// Hyperliquidの`/info`（建玉なし）への既定応答。
+pub const EMPTY_POSITIONS: &[u8] = br#"{"assetPositions":[]}"#;
+/// Hyperliquidの`/info`（約定なし）への既定応答。
+pub const NO_FILLS: &[u8] = b"[]";
+
+/// HLの`/exchange`と`/info`へ、用途別の応答を返すルータ。
+///
+/// `sweep`は1回の呼び出しで送信と照合の複数のoutcallを出すため、送信内容
+/// （URLと本文の`type`）で応答を振り分ける。
+pub fn venue_router(
+    exchange: &[u8],
+    positions: &[u8],
+    fills: &[u8],
+    status: &[u8],
+) -> impl Fn(&CapturedHttpCall) -> Result<(u16, Vec<u8>), (u64, String)> {
+    let exchange = exchange.to_vec();
+    let positions = positions.to_vec();
+    let fills = fills.to_vec();
+    let status = status.to_vec();
+    move |call| {
+        if call.url.contains("/exchange") {
+            return Ok((200, exchange.clone()));
+        }
+        let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap_or_default();
+        match query.get("type").and_then(|value| value.as_str()) {
+            Some("clearinghouseState") => Ok((200, positions.clone())),
+            Some("userFills") => Ok((200, fills.clone())),
+            Some("orderStatus") => Ok((200, status.clone())),
+            other => Err((1, format!("unexpected info query: {other:?}"))),
+        }
+    }
+}
+
+/// 送信応答だけを指定し、照合は「建玉なし・約定なし・問い合わせたoidはopen」を返すルータ。
+pub fn venue_router_default(
+    exchange: &[u8],
+) -> impl Fn(&CapturedHttpCall) -> Result<(u16, Vec<u8>), (u64, String)> {
+    let exchange = exchange.to_vec();
+    move |call| {
+        if call.url.contains("/exchange") {
+            return Ok((200, exchange.clone()));
+        }
+        let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap_or_default();
+        match query.get("type").and_then(|value| value.as_str()) {
+            Some("clearinghouseState") => Ok((200, EMPTY_POSITIONS.to_vec())),
+            Some("userFills") => Ok((200, NO_FILLS.to_vec())),
+            Some("orderStatus") => {
+                let oid = query.get("oid").cloned().unwrap_or(serde_json::Value::Null);
+                let body = serde_json::json!({ "status": "open", "order": { "oid": oid } });
+                Ok((200, body.to_string().into_bytes()))
+            }
+            other => Err((1, format!("unexpected info query: {other:?}"))),
+        }
+    }
+}
+
+/// `sweep`（`test_sweep_now`）を、送信応答を指定して実行する。
+///
+/// 照合のoutcallには既定応答を返す。送信だけを検証する試験で使う。
+pub fn sweep_with_venue_outcalls<R>(
+    pic: &PocketIc,
+    canister: Principal,
+    caller: Principal,
+    exchange: Vec<u8>,
+) -> Result<R, String>
+where
+    R: CandidType + DeserializeOwned,
+{
+    call_with_routed_outcalls::<(), R, _>(
+        pic,
+        canister,
+        caller,
+        "test_sweep_now",
+        (),
+        venue_router_default(&exchange),
+    )
+    .map(|(value, _calls)| value)
+}
+
+/// `sweep`を、送信のoutcallが失敗する状況（応答喪失）で実行する。
+///
+/// 照合のoutcallには既定応答を返す。結果不明の分類を検証する試験で使う。
+pub fn sweep_with_failed_send<R>(
+    pic: &PocketIc,
+    canister: Principal,
+    caller: Principal,
+) -> Result<R, String>
+where
+    R: CandidType + DeserializeOwned,
+{
+    call_with_routed_outcalls::<(), R, _>(pic, canister, caller, "test_sweep_now", (), |call| {
+        if call.url.contains("/exchange") {
+            Err((3, "outcall failed".to_string()))
+        } else {
+            venue_router_default(b"")(call)
+        }
+    })
+    .map(|(value, _calls)| value)
+}
+
 /// Canisterをアップグレードする（`post_upgrade`の検証に使う）。
 pub fn upgrade(pic: &PocketIc, canister: Principal, file: &str, init_arg: Vec<u8>) {
     pic.upgrade_canister(canister, wasm(file), init_arg, None)

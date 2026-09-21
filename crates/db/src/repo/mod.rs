@@ -3,6 +3,7 @@
 //! 1つの論理操作（受付＋予約＋action作成など）は1つの同期トランザクションで
 //! 完結させる。`repo` の関数はトランザクションを開かない。
 
+pub mod accounts;
 pub mod actions;
 pub mod agents;
 pub mod auth;

@@ -13,7 +13,7 @@ use pocket_ic::PocketIc;
 use pocket_ic_tests::{
     FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, approve_agent_at_vault,
     call_with_mocked_outcall, configure_policy, deploy, envelope, fund_trading_account, pic,
-    principal, query_args, rotate_hpke_key, update, update_args,
+    principal, query_args, rotate_hpke_key, sweep_with_venue_outcalls, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -634,7 +634,9 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
         session.clone(),
     )
     .expect("call");
-    agent.expect("agent");
+    let agent_address = agent.expect("agent").agent_address;
+    approve_agent_at_vault(&pic, vault, caller, &session, 1, agent_address.as_ref())
+        .expect("approve agent");
 
     let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
@@ -650,16 +652,9 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
     submitted.expect("accepted order");
 
     let venue_body = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":12345}}]}}}"#.to_vec();
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller,
-        "test_sweep_now",
-        (),
-        Ok((200, venue_body.clone())),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller, venue_body.clone()).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
 
     let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
         envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
@@ -801,7 +796,9 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
         session.clone(),
     )
     .expect("call");
-    agent.expect("agent");
+    let agent_address = agent.expect("agent").agent_address;
+    approve_agent_at_vault(&pic, vault, caller, &session, 1, agent_address.as_ref())
+        .expect("approve agent");
 
     let submit = |request_id: &[u8]| -> Result<SubmitOrderResult, ErrorCode> {
         update_args(
@@ -820,16 +817,9 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
     // 取引所の拒否 → rejected（再送しない）。
     submit(b"outcome-reject").expect("accepted order");
     let rejected = br#"{"status":"err","response":"insufficient margin"}"#.to_vec();
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller,
-        "test_sweep_now",
-        (),
-        Ok((200, rejected)),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller, rejected).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
     let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
         envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
             .expect("call");
@@ -840,16 +830,9 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
 
     // 応答喪失 → unknown（再送しない）。
     submit(b"outcome-unknown").expect("accepted order");
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller,
-        "test_sweep_now",
-        (),
-        Err((3, "outcall failed".to_string())),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        pocket_ic_tests::sweep_with_failed_send(&pic, core, caller).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
     let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
         envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
             .expect("call");
@@ -857,9 +840,13 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
     assert_eq!(listed.items[0].state, api_types::order::OrderState::Unknown);
 
     // どちらも再送しない。
-    let swept_again: Result<u32, ErrorCode> =
-        update_args(&pic, core, caller, "test_sweep_now", ()).expect("call");
-    assert_eq!(swept_again.expect("sweep"), 0, "自動再送しない");
+    let accepted =
+        br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":1}}]}}}"#
+            .to_vec();
+    let swept_again: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller, accepted).expect("call");
+    let again = swept_again.expect("sweep");
+    assert_eq!((again.dispatched, again.cancels), (0, 0), "自動再送しない");
 }
 
 /// 口座snapshotはvaultの残高とcoreの注文を統合して返す。
@@ -1094,7 +1081,9 @@ fn fills_are_ingested_idempotently() {
         session.clone(),
     )
     .expect("call");
-    agent.expect("agent");
+    let agent_address = agent.expect("agent").agent_address;
+    approve_agent_at_vault(&pic, vault, caller, &session, 1, agent_address.as_ref())
+        .expect("approve agent");
     let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
         core,
@@ -1109,16 +1098,9 @@ fn fills_are_ingested_idempotently() {
     submitted.expect("accepted order");
 
     let venue_body = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":777}}]}}}"#.to_vec();
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller,
-        "test_sweep_now",
-        (),
-        Ok((200, venue_body)),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller, venue_body).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
 
     let fills = r#"[{"tid":1,"oid":777,"coin":"ETH","px":"2500","sz":"0.05","fee":12,"time":1758000000000}]"#;
     let ingested: Result<u32, ErrorCode> = update_args(
@@ -1225,7 +1207,9 @@ fn order_status_updates_are_reflected() {
         session.clone(),
     )
     .expect("call");
-    agent.expect("agent");
+    let agent_address = agent.expect("agent").agent_address;
+    approve_agent_at_vault(&pic, vault, caller, &session, 1, agent_address.as_ref())
+        .expect("approve agent");
     let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
         core,
@@ -1240,16 +1224,9 @@ fn order_status_updates_are_reflected() {
     submitted.expect("accepted order");
 
     let venue_body = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":888}}]}}}"#.to_vec();
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller,
-        "test_sweep_now",
-        (),
-        Ok((200, venue_body)),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller, venue_body).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
 
     let applied: Result<bool, ErrorCode> = update_args(
         &pic,
@@ -1388,7 +1365,9 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         session.clone(),
     )
     .expect("call");
-    agent.expect("agent");
+    let agent_address = agent.expect("agent").agent_address;
+    approve_agent_at_vault(&pic, vault, caller, &session, 1, agent_address.as_ref())
+        .expect("approve agent");
 
     let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
@@ -1403,16 +1382,9 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     .expect("call");
     let submitted = submitted.expect("accepted order");
     let venue_body: Vec<u8> = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":999}}]}}}"#.to_vec();
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller,
-        "test_sweep_now",
-        (),
-        Ok((200, venue_body.clone())),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller, venue_body.clone()).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
 
     // 取消を要求し、sweepで取引所へ送る。
     let cancelled: Result<(), ErrorCode> = envelope::cancel_order(
@@ -1424,19 +1396,14 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     )
     .expect("call");
     cancelled.expect("cancel requested");
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> = sweep_with_venue_outcalls(
         &pic,
         core,
         caller,
-        "test_sweep_now",
-        (),
-        Ok((
-            200,
-            br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
-        )),
+        br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
     )
     .expect("call");
-    assert_eq!(swept.expect("cancel sweep"), 1, "取消が送信される");
+    assert_eq!(swept.expect("cancel sweep").cancels, 1, "取消が送信される");
 
     let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
         envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
@@ -1459,16 +1426,11 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     )
     .expect("call");
     second.expect("accepted order");
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller,
-        "test_sweep_now",
-        (),
-        Ok((200, venue_body.clone())),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    // 取引所のoidは注文ごとに異なる（同じoidを使い回すと照合が取り違える）。
+    let second_body: Vec<u8> = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":1000}}]}}}"#.to_vec();
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller, second_body).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
 
     let marked: Result<u64, ErrorCode> =
         update(&pic, core, caller, "cancel_all", session.clone()).expect("call");
@@ -1477,19 +1439,14 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         1,
         "未終端の注文に取消要求が付く"
     );
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> = sweep_with_venue_outcalls(
         &pic,
         core,
         caller,
-        "test_sweep_now",
-        (),
-        Ok((
-            200,
-            br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
-        )),
+        br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
     )
     .expect("call");
-    assert_eq!(swept.expect("cancel sweep"), 1);
+    assert_eq!(swept.expect("cancel sweep").cancels, 1);
 
     let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
         envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
@@ -1500,7 +1457,17 @@ fn a_cancellation_is_dispatched_to_the_venue() {
             .items
             .iter()
             .all(|order| order.state == api_types::order::OrderState::Cancelled),
-        "一括取消で全て取消済みになる"
+        "一括取消で全て取消済みになる: {:?}",
+        listed
+            .items
+            .iter()
+            .map(|order| (
+                order.state,
+                order.cancel_requested,
+                order.hl_oid,
+                order.dispatch_state
+            ))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1593,16 +1560,9 @@ fn order_status_is_scoped_to_the_account() {
     )
     .expect("call");
     submitted_a.expect("accepted order");
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller_a,
-        "test_sweep_now",
-        (),
-        Ok((200, venue_body.clone())),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller_a, venue_body.clone()).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
 
     // 利用者B: 同じoidを返すmockで受理させる。
     let caller_b = principal(132);
@@ -1641,16 +1601,9 @@ fn order_status_is_scoped_to_the_account() {
     )
     .expect("call");
     submitted_b.expect("accepted order");
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        core,
-        caller_b,
-        "test_sweep_now",
-        (),
-        Ok((200, venue_body)),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller_b, venue_body).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
 
     // Bが同じoid(777)のorderStatusを適用する。
     let applied: Result<bool, ErrorCode> = update_args(

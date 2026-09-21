@@ -16,6 +16,7 @@ db = { path = "../db" }
 hpke-envelope = { path = "../hpke-envelope" }
 ic-cdk.workspace = true
 ic-cdk-management-canister.workspace = true
+ic-sqlite-vfs.workspace = true
 hl-types = { path = "../hl-types" }
 hl-sign = { path = "../hl-sign" }
 hex.workspace = true

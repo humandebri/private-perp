@@ -10,18 +10,27 @@
 //! 認可は `funds_vault` の `session_status` に問い合わせ、返却されたprincipalをこの
 //! Canisterが受け取ったcallerと比較する（vaultはcoreのcallerを知らないため）。
 
+mod pipeline;
+mod venue;
+
 use api_types::auth::{SessionHandle, SessionStatus};
 use api_types::error::{BadRequestCode, ErrorCode};
 use candid::Principal;
 use db::error::Error as DbError;
 use ic_cdk::call::Call;
 use ic_cdk_management_canister::{EcdsaCurve, EcdsaKeyId, EcdsaPublicKeyArgs, ecdsa_public_key};
-#[cfg(feature = "test-venue")]
-use ic_cdk_management_canister::{
-    HttpHeader, HttpMethod, HttpRequest, SignWithEcdsaArgs, sign_with_ecdsa,
-};
 
 const MEMORY_ID: u8 = db::memory_id::TRADING_CORE_MAIN;
+
+// 直近のsweep時刻（heartbeatの間隔ゲート）。
+//
+// 試験ビルド（`test-venue`）では自動sweepを行わない。PocketICの時刻前進で
+// heartbeatが動くと、試験が待っているoutcallと取り違えるため、明示的な
+// `test_sweep_now`で駆動する。
+#[cfg(not(feature = "test-venue"))]
+thread_local! {
+    static LAST_SWEEP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// 取引所データを「古い」とみなす閾値（ミリ秒）。
 const STALE_DATA_MS: u64 = 10_000;
@@ -540,6 +549,8 @@ async fn submit_inner(
     let fingerprint = body_fingerprint(&body);
 
     let account_id = trading_account(session).await?;
+    // 照合（sweep）はセッションを持たないため、取引所アドレスをここで保存しておく。
+    let _ = cache_trading_address(session, &account_id, &user_id).await;
     // 取引所データが古い場合は新規リスクを増やさない（観測が無い口座は対象外）。
     // reduce-onlyはリスクを減らす方向にしか作用しないため、鮮度に関わらず受け付ける
     // （建玉があるときに保護・決済を打てなくなる方が危険である）。
@@ -1187,6 +1198,7 @@ async fn account_snapshot(
 ) -> Result<api_types::order::AccountSnapshot, ErrorCode> {
     let user_id = authorize(session).await?;
     let account_id = trading_account(session).await?;
+    let _ = cache_trading_address(session, &account_id, &user_id).await;
     let now = ic_cdk::api::time() / 1_000_000;
 
     let vault = vault_principal()?;
@@ -1424,6 +1436,42 @@ async fn trading_account(session: &SessionHandle) -> Result<[u8; 32], ErrorCode>
         .map_err(|_| internal("account_id must be 32 bytes".to_string()))
 }
 
+/// 取引所アドレスを一度だけvaultへ問い合わせて保存する（照合に必要）。
+///
+/// 署名済み要求の処理中に呼ぶ（sweep中はセッションが無いため事前に保存しておく）。
+/// 取得に失敗しても受付は続ける（照合は次回の要求で保存できてから始まる）。
+async fn cache_trading_address(
+    session: &SessionHandle,
+    account_id: &[u8; 32],
+    user_id: &[u8; 32],
+) -> Result<(), ErrorCode> {
+    let cached =
+        db::tx::query(|connection| db::repo::accounts::master_address(connection, account_id))
+            .map_err(map_db)?;
+    if cached.is_some() {
+        return Ok(());
+    }
+    let vault = vault_principal()?;
+    let response = Call::bounded_wait(vault, "get_trading_address")
+        .with_arg(session.clone())
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: format!("vault get_trading_address: {error}"),
+        })?;
+    let address: Result<api_types::Blob, ErrorCode> = response
+        .candid()
+        .map_err(|error| internal(error.to_string()))?;
+    let address: [u8; 20] = address?
+        .as_ref()
+        .try_into()
+        .map_err(|_| internal("trading address must be 20 bytes".to_string()))?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| {
+        db::repo::accounts::upsert(connection, account_id, user_id, &address, now)
+    })
+    .map_err(map_db)
+}
+
 async fn vault_session_status(session: &SessionHandle) -> Result<SessionStatus, ErrorCode> {
     let vault = vault_principal()?;
     let response = Call::bounded_wait(vault, "session_status")
@@ -1536,58 +1584,6 @@ fn validate_trigger(
     Ok(())
 }
 
-/// 署名対象の`order` actionを組み立てる（通常注文・トリガ注文の共通経路）。
-///
-/// 実装は`test-venue`ビルドでのみ使う（本番の署名パイプラインは未実装）。
-/// トリガは建玉単位（`positionTpsl`）として送る（`docs/phase-0/api-contract.md` 3.1）。
-#[cfg(feature = "test-venue")]
-fn order_action(
-    order: &db::repo::orders::SignableOrder,
-    price: &str,
-) -> Result<hl_types::action::OrderAction, ErrorCode> {
-    let cloid = format!("0x{}", hex::encode(order.cloid));
-    let (order_type, grouping) = match &order.trigger {
-        Some(trigger) => {
-            let tpsl = match trigger.kind.as_str() {
-                "stop_loss" => hl_types::action::Tpsl::StopLoss,
-                "take_profit" => hl_types::action::Tpsl::TakeProfit,
-                other => return Err(internal(format!("unknown trigger kind: {other}"))),
-            };
-            (
-                hl_types::action::OrderType::Trigger(hl_types::action::TriggerOrder {
-                    is_market: trigger.is_market,
-                    trigger_price: hl_types::decimal::Decimal::parse(&trigger.price)
-                        .map_err(bad_decimal)?,
-                    tpsl,
-                }),
-                hl_types::action::Grouping::PositionTpsl,
-            )
-        }
-        None => (
-            hl_types::action::OrderType::Limit {
-                tif: if order.kind == "market_ioc" {
-                    hl_types::action::TimeInForce::Ioc
-                } else {
-                    hl_types::action::TimeInForce::Gtc
-                },
-            },
-            hl_types::action::Grouping::Na,
-        ),
-    };
-    Ok(hl_types::action::OrderAction {
-        orders: vec![hl_types::action::OrderRequest {
-            asset_index: order.asset_index,
-            is_buy: order.is_buy,
-            price: hl_types::decimal::Decimal::parse(price).map_err(bad_decimal)?,
-            size: hl_types::decimal::Decimal::parse(&order.quantity).map_err(bad_decimal)?,
-            reduce_only: order.reduce_only,
-            order_type,
-            cloid: Some(cloid),
-        }],
-        grouping,
-    })
-}
-
 /// テスト専用：注文actionへAgent鍵で署名する（`test-venue` featureでのみ存在）。
 ///
 /// 戻り値は `(署名対象ダイジェスト, 65バイト署名)`。署名経路の検証に使う。
@@ -1605,14 +1601,13 @@ async fn test_sign_order_action(
     let order = db::tx::query(|connection| db::repo::orders::signable(connection, &order_id))
         .map_err(map_db)?
         .ok_or_else(|| bad(BadRequestCode::MalformedPayload, "unknown order"))?;
-
     let price = order.price.clone().ok_or_else(|| {
         bad(
             BadRequestCode::MissingField,
             "price is required for signing",
         )
     })?;
-    let action = order_action(&order, &price)?;
+    let action = pipeline::order_action(&order, &price)?;
     let msgpack = action.to_value().encode();
     let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
         action_msgpack: &msgpack,
@@ -1621,290 +1616,62 @@ async fn test_sign_order_action(
         expires_after: None,
     });
     let digest = hl_sign::hash::signing_digest(action_hash, false);
-
-    // Agent鍵（coreが導出・保管）で署名し、`v`を復元する。
-    let generation =
-        db::tx::query(|connection| db::repo::agents::latest(connection, &order.account_id))
-            .map_err(map_db)?
-            .ok_or(ErrorCode::NotAllowed {
-                code: api_types::error::NotAllowedCode::OperationNotAvailable,
-            })?;
-    // 未承認の世代では署名しない。承認はvaultがmaster署名で行い永続化するため、
-    // vaultの状態を確認してから鍵を使う（取引所に拒否される署名を送らない）。
-    let approved = agent_approval(&order.account_id, generation.generation).await?;
-    match approved {
-        Some(approved)
-            if approved.agent_address.as_ref() == generation.agent_address.as_slice() => {}
-        _ => {
-            return Err(ErrorCode::NotAllowed {
-                code: api_types::error::NotAllowedCode::OperationNotAvailable,
-            });
-        }
-    }
-    let path = agent_derivation_path(&order.account_id, generation.generation);
-    let public_key: [u8; 33] = ecdsa_public_key(&EcdsaPublicKeyArgs {
-        canister_id: None,
-        derivation_path: path.clone(),
-        key_id: ecdsa_key_id(),
-    })
-    .await
-    .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
-    .public_key
-    .try_into()
-    .map_err(|_| internal("unexpected public key length".to_string()))?;
-    let signature = sign_with_ecdsa(&SignWithEcdsaArgs {
-        message_hash: digest.to_vec(),
-        derivation_path: path,
-        key_id: ecdsa_key_id(),
-    })
-    .await
-    .map_err(|error| internal(format!("sign_with_ecdsa failed: {error}")))?
-    .signature;
-    let bytes: [u8; 64] = signature
-        .try_into()
-        .map_err(|_| internal("unexpected signature length".to_string()))?;
-    let mut r = [0u8; 32];
-    let mut s = [0u8; 32];
-    r.copy_from_slice(&bytes[0..32]);
-    s.copy_from_slice(&bytes[32..64]);
-    let v = hl_sign::recover_v(&digest, r, s, &public_key)
-        .map_err(|error| internal(format!("cannot recover v: {error}")))?;
-    let signature = hl_sign::Signature { r, s, v };
-
+    let signature = pipeline::sign_with_agent_key(&order.account_id, digest).await?;
     Ok((
         digest.to_vec().into(),
         signature.to_bytes65().to_vec().into(),
     ))
 }
 
-/// 取り引所の応答。
-#[cfg(feature = "test-venue")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ExchangeOutcome {
-    Accepted,
-    Rejected,
-}
-
-/// 注文のaction JSON（HLの`/exchange`はJSON actionを取る）。
-#[cfg(feature = "test-venue")]
-fn order_action_json(order: &db::repo::orders::SignableOrder, price: &str) -> serde_json::Value {
-    let order_type = match &order.trigger {
-        Some(trigger) => serde_json::json!({
-            "trigger": {
-                "isMarket": trigger.is_market,
-                "triggerPx": trigger.price,
-                "tpsl": if trigger.kind == "stop_loss" { "sl" } else { "tp" },
-            }
-        }),
-        None => serde_json::json!({
-            "limit": {
-                "tif": if order.kind == "market_ioc" { "Ioc" } else { "Gtc" },
-            }
-        }),
-    };
-    serde_json::json!({
-        "type": "order",
-        "orders": [{
-            "a": order.asset_index,
-            "b": order.is_buy,
-            "p": price,
-            "s": order.quantity,
-            "r": order.reduce_only,
-            "t": order_type,
-        }],
-        "grouping": if order.trigger.is_some() { "positionTpsl" } else { "na" },
-    })
-}
-
-/// 署名と送信本文を作る（action msgpackのハッシュへAgent鍵で署名）。
-#[cfg(feature = "test-venue")]
-async fn sign_and_build(
-    order: &db::repo::orders::SignableOrder,
-) -> Result<([u8; 32], hl_sign::Signature, Vec<u8>), ErrorCode> {
-    let price = order.price.clone().ok_or_else(|| {
-        bad(
-            BadRequestCode::MissingField,
-            "price is required for signing",
-        )
-    })?;
-    let action = order_action(order, &price)?;
-    let msgpack = action.to_value().encode();
-    let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
-        action_msgpack: &msgpack,
-        nonce: order.created_at,
-        vault_address: None,
-        expires_after: None,
-    });
-    let digest = hl_sign::hash::signing_digest(action_hash, false);
-
-    let generation =
-        db::tx::query(|connection| db::repo::agents::latest(connection, &order.account_id))
-            .map_err(map_db)?
-            .ok_or(ErrorCode::NotAllowed {
-                code: api_types::error::NotAllowedCode::OperationNotAvailable,
-            })?;
-    let path = agent_derivation_path(&order.account_id, generation.generation);
-    let public_key: [u8; 33] = ecdsa_public_key(&EcdsaPublicKeyArgs {
-        canister_id: None,
-        derivation_path: path.clone(),
-        key_id: ecdsa_key_id(),
-    })
-    .await
-    .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
-    .public_key
-    .try_into()
-    .map_err(|_| internal("unexpected public key length".to_string()))?;
-    let signature = sign_with_ecdsa(&SignWithEcdsaArgs {
-        message_hash: digest.to_vec(),
-        derivation_path: path,
-        key_id: ecdsa_key_id(),
-    })
-    .await
-    .map_err(|error| internal(format!("sign_with_ecdsa failed: {error}")))?
-    .signature;
-    let bytes: [u8; 64] = signature
-        .try_into()
-        .map_err(|_| internal("unexpected signature length".to_string()))?;
-    let mut r = [0u8; 32];
-    let mut s = [0u8; 32];
-    r.copy_from_slice(&bytes[0..32]);
-    s.copy_from_slice(&bytes[32..64]);
-    let v = hl_sign::recover_v(&digest, r, s, &public_key)
-        .map_err(|error| internal(format!("cannot recover v: {error}")))?;
-    let signature = hl_sign::Signature { r, s, v };
-
-    let body = serde_json::json!({
-        "action": order_action_json(order, &price),
-        "nonce": order.created_at,
-        "signature": {
-            "r": format!("0x{}", hex::encode(signature.r)),
-            "s": format!("0x{}", hex::encode(signature.s)),
-            "v": signature.v,
-        },
-    });
-    let body = serde_json::to_vec(&body).map_err(|error| internal(error.to_string()))?;
-    Ok((digest, signature, body))
-}
-
-/// 注文を送信する（非replicated POST）。
-#[cfg(feature = "test-venue")]
-async fn post_order(body: &[u8]) -> Result<(ExchangeOutcome, Option<u64>), ErrorCode> {
-    let response = HttpRequest::new("https://api.hyperliquid-testnet.xyz/exchange")
-        .with_method(HttpMethod::POST)
-        .with_headers(vec![HttpHeader {
-            name: "Content-Type".to_string(),
-            value: "application/json".to_string(),
-        }])
-        .with_body(body.to_vec())
-        .with_max_response_bytes(8 * 1024)
-        .non_replicated()
-        .send()
-        .await
-        .map_err(|error| ErrorCode::UpstreamUnavailable {
-            venue: error.to_string(),
-        })?;
-
-    let value: serde_json::Value =
-        serde_json::from_slice(&response.body).map_err(|_| ErrorCode::UpstreamRejected {
-            code: "unparseable exchange response".to_string(),
-            retryable: false,
-        })?;
-    match value.get("status").and_then(|status| status.as_str()) {
-        Some("ok") => {
-            let oid = value
-                .get("response")
-                .and_then(|response| response.get("data"))
-                .and_then(|data| data.get("statuses"))
-                .and_then(|statuses| statuses.get(0))
-                .and_then(|status| status.get("resting"))
-                .and_then(|resting| resting.get("oid"))
-                .and_then(|oid| oid.as_u64());
-            Ok((ExchangeOutcome::Accepted, oid))
-        }
-        Some("err") => Ok((ExchangeOutcome::Rejected, None)),
-        _ => Err(ErrorCode::UpstreamRejected {
-            code: "unexpected exchange response".to_string(),
-            retryable: false,
-        }),
-    }
-}
-
-/// テスト専用：待ち注文を送信する（`test-venue` featureでのみ存在）。
+/// テスト専用：待ち注文を今すぐ送信する（`test-venue` featureでのみ存在）。
+///
+/// 本番の送信経路（`heartbeat`・`sweep`）と同じ`pipeline::sweep_once`を呼ぶ。
 #[cfg(feature = "test-venue")]
 #[ic_cdk::update]
-async fn test_sweep_now() -> Result<u32, ErrorCode> {
-    let ids = db::tx::query(|connection| db::repo::orders::queued_orders(connection, 4))
-        .map_err(map_db)?;
-    let mut processed = 0;
-    for order_id in ids {
-        let claimed = db::tx::update(|connection| {
-            db::repo::orders::claim_for_dispatch(connection, &order_id)
-        })
-        .map_err(map_db)?;
-        if !claimed {
-            continue;
-        }
-        let now = ic_cdk::api::time() / 1_000_000;
-        let order = db::tx::query(|connection| db::repo::orders::signable(connection, &order_id))
-            .map_err(map_db)?
-            .ok_or_else(|| internal("missing order".to_string()))?;
-        let (_digest, signature, body) = sign_and_build(&order).await?;
-        db::tx::update(|connection| {
-            db::repo::orders::mark_dispatching(
-                connection,
-                &order_id,
-                &body,
-                &signature.to_bytes65(),
-                now,
-            )
-        })
-        .map_err(map_db)?;
-
-        match post_order(&body).await {
-            Ok((ExchangeOutcome::Accepted, oid)) => {
-                db::tx::update(|connection| {
-                    db::repo::orders::mark_venue_accepted(connection, &order_id, oid, now)
-                })
-                .map_err(map_db)?;
-            }
-            Ok((ExchangeOutcome::Rejected, _)) => {
-                db::tx::update(|connection| {
-                    db::repo::orders::mark_venue_rejected(connection, &order_id, now)?;
-                    db::repo::orders::release_risk(
-                        connection,
-                        &order.account_id,
-                        &order.client_request_id,
-                    )?;
-                    Ok(())
-                })
-                .map_err(map_db)?;
-            }
-            Err(_) => {
-                // 送信した可能性がある。再送せず、**リスク予約も解放しない**
-                // （解放すると同一資金で追加の注文ができ、二重エクスポージャになる。
-                // 解消は照合の結果に従う）。
-                db::tx::update(|connection| {
-                    db::repo::orders::mark_unknown(connection, &order_id, now)?;
-                    Ok(())
-                })
-                .map_err(map_db)?;
-            }
-        }
-        processed += 1;
-    }
-
-    // 取消の送信（取消要求済みで未送信の注文）。
-    let cancels = db::tx::query(|connection| db::repo::orders::cancel_candidates(connection, 4))
-        .map_err(map_db)?;
-    for order_id in cancels {
-        if dispatch_cancel(&order_id, ic_cdk::api::time() / 1_000_000).await? {
-            processed += 1;
-        }
-    }
-    Ok(processed)
+async fn test_sweep_now() -> Result<api_types::order::SweepOutcome, ErrorCode> {
+    pipeline::sweep_once(ic_cdk::api::time() / 1_000_000).await
 }
 
-/// テスト専用：`/info`の`userFills`相当を取り込む（`test-venue` featureでのみ存在）。
+/// 未処理の注文・取消を送信し、取引所状態を照合する（controllerのみ）。
+///
+/// 本番は `heartbeat` が間隔を空けて呼ぶ。停止した場合の手動実行の入口でもある。
+#[ic_cdk::update]
+async fn sweep() -> Result<api_types::order::SweepOutcome, ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can sweep".to_string(),
+        });
+    }
+    pipeline::sweep_once(ic_cdk::api::time() / 1_000_000).await
+}
+
+/// 未処理の注文・取消を送信し、取引所状態を照合する（本番の自動経路）。
+///
+/// 建玉の鮮度（`STALE_DATA_MS`）より短い間隔で巡回し、新規リスクの受付を止めない。
+#[cfg(not(feature = "test-venue"))]
+#[ic_cdk::heartbeat]
+async fn heartbeat() {
+    let now = ic_cdk::api::time() / 1_000_000;
+    let due = LAST_SWEEP.with(|cell| {
+        let previous = cell.get();
+        if now.saturating_sub(previous) < pipeline::SWEEP_INTERVAL_MS {
+            false
+        } else {
+            cell.set(now);
+            true
+        }
+    });
+    if !due {
+        return;
+    }
+    // 1回の失敗でheartbeatを止めない（次の間隔で再試行する）。
+    let _ = pipeline::sweep_once(now).await;
+}
+
+/// テスト専用：`/info`の`userFills`相当を取り込む（`test-venue`のみ）。
+///
+/// 本番は`heartbeat`の照合が取引所から取得する。同じ取り込み関数を使う。
 #[cfg(feature = "test-venue")]
 #[ic_cdk::update]
 async fn test_ingest_fills(
@@ -1912,66 +1679,12 @@ async fn test_ingest_fills(
     fills_json: String,
 ) -> Result<u32, ErrorCode> {
     let user_id = authorize(&session).await?;
-    let fills: Vec<serde_json::Value> =
-        serde_json::from_str(&fills_json).map_err(|error| internal(error.to_string()))?;
     let now = ic_cdk::api::time() / 1_000_000;
-    let mut ingested = 0;
-    for fill in fills {
-        let tid = fill
-            .get("tid")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0);
-        let oid = fill
-            .get("oid")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0);
-        let coin = fill
-            .get("coin")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string();
-        let price = fill
-            .get("px")
-            .and_then(|value| value.as_str())
-            .unwrap_or("0")
-            .to_string();
-        let quantity = fill
-            .get("sz")
-            .and_then(|value| value.as_str())
-            .unwrap_or("0")
-            .to_string();
-        let fee = fill
-            .get("fee")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0);
-        let at = fill
-            .get("time")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(now);
-        let inserted = db::tx::update(|connection| {
-            db::repo::orders::ingest_fill(
-                connection,
-                &user_id,
-                &db::repo::orders::NewFill {
-                    tid,
-                    hl_oid: oid,
-                    market: &coin,
-                    price: &price,
-                    quantity: &quantity,
-                    fee,
-                    filled_at: at,
-                },
-            )
-        })
-        .map_err(map_db)?;
-        if inserted {
-            ingested += 1;
-        }
-    }
-    Ok(ingested)
+    db::tx::update(|connection| pipeline::ingest_fills_json(connection, &user_id, &fills_json, now))
+        .map_err(map_db)
 }
 
-/// テスト専用：`orderStatus`相当を反映する（`test-venue` featureでのみ存在）。
+/// テスト専用：`/info`の`orderStatus`相当を反映する（`test-venue`のみ）。
 #[cfg(feature = "test-venue")]
 #[ic_cdk::update]
 async fn test_apply_order_status(
@@ -1981,126 +1694,16 @@ async fn test_apply_order_status(
     authorize(&session).await?;
     // 本人の取引口座の注文だけを更新対象にする（oidは口座ごとに採番される）。
     let account_id = trading_account(&session).await?;
-    let value: serde_json::Value =
-        serde_json::from_str(&status_json).map_err(|error| internal(error.to_string()))?;
-    let status = value
-        .get("status")
-        .and_then(|status| status.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let oid = value
-        .get("order")
-        .and_then(|order| order.get("oid"))
-        .and_then(|oid| oid.as_u64())
-        .ok_or_else(|| bad(BadRequestCode::MissingField, "order.oid is required"))?;
-    // 取引所の語彙をこちらの状態へ写す（未知はunknownとして保持）。
-    let state = match status.as_str() {
-        "open" => "open",
-        "filled" => "filled",
-        "canceled" | "cancelled" => "cancelled",
-        "rejected" => "rejected",
-        _ => "unknown",
-    };
     let now = ic_cdk::api::time() / 1_000_000;
     db::tx::update(|connection| {
-        db::repo::orders::apply_order_status(connection, &account_id, oid, state, now)
+        pipeline::apply_order_status_json(connection, &account_id, &status_json, now)
     })
     .map_err(map_db)
 }
 
-/// 取消actionをAgent鍵で署名して送信する（受理で`cancelled`へ）。
-#[cfg(feature = "test-venue")]
-async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCode> {
-    let claimed = db::tx::update(|connection| db::repo::orders::claim_cancel(connection, order_id))
-        .map_err(map_db)?;
-    if !claimed {
-        return Ok(false);
-    }
-    let (account_id, asset_index, oid) =
-        db::tx::query(|connection| db::repo::orders::cancel_target(connection, order_id))
-            .map_err(map_db)?
-            .ok_or_else(|| bad(BadRequestCode::MalformedPayload, "unknown order"))?;
-
-    let action = hl_types::action::CancelAction {
-        cancels: vec![(asset_index, oid)],
-    };
-    let msgpack = action.to_value().encode();
-    let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
-        action_msgpack: &msgpack,
-        nonce: now,
-        vault_address: None,
-        expires_after: None,
-    });
-    let digest = hl_sign::hash::signing_digest(action_hash, false);
-
-    let generation = db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
-        .map_err(map_db)?
-        .ok_or(ErrorCode::NotAllowed {
-            code: api_types::error::NotAllowedCode::OperationNotAvailable,
-        })?;
-    let path = agent_derivation_path(&account_id, generation.generation);
-    let public_key: [u8; 33] = ecdsa_public_key(&EcdsaPublicKeyArgs {
-        canister_id: None,
-        derivation_path: path.clone(),
-        key_id: ecdsa_key_id(),
-    })
-    .await
-    .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
-    .public_key
-    .try_into()
-    .map_err(|_| internal("unexpected public key length".to_string()))?;
-    let signature = sign_with_ecdsa(&SignWithEcdsaArgs {
-        message_hash: digest.to_vec(),
-        derivation_path: path,
-        key_id: ecdsa_key_id(),
-    })
-    .await
-    .map_err(|error| internal(format!("sign_with_ecdsa failed: {error}")))?
-    .signature;
-    let bytes: [u8; 64] = signature
-        .try_into()
-        .map_err(|_| internal("unexpected signature length".to_string()))?;
-    let mut r = [0u8; 32];
-    let mut s = [0u8; 32];
-    r.copy_from_slice(&bytes[0..32]);
-    s.copy_from_slice(&bytes[32..64]);
-    let v = hl_sign::recover_v(&digest, r, s, &public_key)
-        .map_err(|error| internal(format!("cannot recover v: {error}")))?;
-    let signature = hl_sign::Signature { r, s, v };
-
-    let body = serde_json::json!({
-        "action": {
-            "type": "cancel",
-            "cancels": [{ "a": asset_index, "o": oid }],
-        },
-        "nonce": now,
-        "signature": {
-            "r": format!("0x{}", hex::encode(signature.r)),
-            "s": format!("0x{}", hex::encode(signature.s)),
-            "v": signature.v,
-        },
-    });
-    let body = serde_json::to_vec(&body).map_err(|error| internal(error.to_string()))?;
-
-    match post_order(&body).await {
-        Ok((ExchangeOutcome::Accepted, _)) => {
-            db::tx::update(|connection| {
-                db::repo::orders::mark_cancel_sent(connection, order_id, &body, now)
-            })
-            .map_err(map_db)?;
-        }
-        Ok((ExchangeOutcome::Rejected, _)) | Err(_) => {
-            // 拒否・不明のいずれも「送ったか不明」として保持する（再送しない）。
-            db::tx::update(|connection| {
-                db::repo::orders::mark_cancel_unknown(connection, order_id, now)
-            })
-            .map_err(map_db)?;
-        }
-    }
-    Ok(true)
-}
-
-/// テスト専用：`clearinghouseState`相当の建玉を取り込む（`test-venue`限定）。
+/// テスト専用：`clearinghouseState`相当の建玉を取り込む（`test-venue`のみ）。
+///
+/// 本番は`heartbeat`の照合が取引所から取得する。同じ取り込み関数を使う。
 #[cfg(feature = "test-venue")]
 #[ic_cdk::update]
 async fn test_ingest_positions(
@@ -2110,69 +1713,10 @@ async fn test_ingest_positions(
     authorize(&session).await?;
     let account_id = trading_account(&session).await?;
     let now = ic_cdk::api::time() / 1_000_000;
-    let value: serde_json::Value =
-        serde_json::from_str(&positions_json).map_err(|error| internal(error.to_string()))?;
-    let entries = value
-        .get("assetPositions")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let mut count = 0;
-    let mut observed = Vec::new();
-    for entry in entries {
-        let Some(position) = entry.get("position") else {
-            continue;
-        };
-        let Some(coin) = position.get("coin").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        // 未実現損益はUSD建ての十進文字列。ローカルではf64で近似する（厳密な桁は照合段階の課題）。
-        let unrealized_pnl = position
-            .get("unrealizedPnl")
-            .and_then(|value| value.as_str())
-            .and_then(|text| text.parse::<f64>().ok())
-            .map(|value| (value * 1_000_000.0).round() as i64)
-            .unwrap_or(0);
-        let view = api_types::order::PositionView {
-            market: coin.to_string(),
-            size: position
-                .get("szi")
-                .and_then(|value| value.as_str())
-                .unwrap_or("0")
-                .to_string(),
-            entry_price: position
-                .get("entryPx")
-                .and_then(|value| value.as_str())
-                .unwrap_or("0")
-                .to_string(),
-            liquidation_price: position
-                .get("liquidationPx")
-                .and_then(|value| value.as_str())
-                .map(|text| text.to_string()),
-            unrealized_pnl,
-            leverage: position
-                .get("leverage")
-                .and_then(|value| value.get("value"))
-                .and_then(|value| value.as_u64())
-                .and_then(|value| u32::try_from(value).ok())
-                .unwrap_or(0),
-            margin_mode: position
-                .get("marginMode")
-                .and_then(|value| value.as_str())
-                .unwrap_or("cross")
-                .to_string(),
-            stop_loss: None,
-            take_profit: None,
-        };
-        observed.push(view);
-        count += 1;
-    }
-    // 観測は建玉の全量であるため、消えた建玉（決済済み）を残さない。
     db::tx::update(|connection| {
-        db::repo::positions::replace_all(connection, &account_id, &observed, now)
+        pipeline::ingest_positions_json(connection, &account_id, &positions_json, now)
     })
-    .map_err(map_db)?;
-    Ok(count)
+    .map_err(map_db)
 }
 
 fn init_db() {

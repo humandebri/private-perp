@@ -15,7 +15,7 @@ use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
     FUNDS_VAULT_WASM, TRADING_CORE_WASM, approve_agent_at_vault, configure_policy, deploy,
-    envelope, pic, principal, rotate_hpke_key, update, update_args,
+    envelope, pic, principal, rotate_hpke_key, sweep_with_venue_outcalls, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -516,16 +516,9 @@ fn a_closed_position_reaches_zero_after_dispatch_and_fills() {
     let venue_body =
         br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":4242}}]}}}"#
             .to_vec();
-    let swept: Result<u32, ErrorCode> = pocket_ic_tests::call_with_mocked_outcall(
-        &pic,
-        core,
-        caller,
-        "test_sweep_now",
-        (),
-        Ok((200, venue_body)),
-    )
-    .expect("call");
-    assert_eq!(swept.expect("sweep"), 1);
+    let swept: Result<api_types::order::SweepOutcome, ErrorCode> =
+        sweep_with_venue_outcalls(&pic, core, caller, venue_body).expect("call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
 
     let ingested: Result<u32, ErrorCode> = update_args(
         &pic,

@@ -60,6 +60,17 @@ pub struct SubmitOrderResult {
     pub accepted_at: Timestamp,
 }
 
+/// `sweep`の結果（送信・取消・照合の件数）。失敗の内訳はログ・DBの状態で確認する。
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct SweepOutcome {
+    /// 送信した注文の件数（受理・拒否・不明を含む）。
+    pub dispatched: u32,
+    /// 送信した取消の件数。
+    pub cancels: u32,
+    /// 照合した口座の件数。
+    pub reconciled: u32,
+}
+
 /// `close_all` の結果（建玉ごとの受付結果と、受付できなかった銘柄）。
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CloseAllOutcome {
