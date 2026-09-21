@@ -290,6 +290,85 @@ fn withdrawal_requires_a_valid_intent_signature() {
 }
 
 #[test]
+fn a_withdrawal_reservation_over_half_the_balance_keeps_reads_working() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(25);
+    let key = secret(206);
+    let (session, eoa) = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 3);
+
+    let now = pic.get_time().as_nanos_since_unix_epoch() / 1_000_000;
+    let withdraw =
+        |amount: u64, nonce: u64, request: &[u8]| -> Result<FundRequestAccepted, ErrorCode> {
+            let intent = private_perp::Withdrawal {
+                eoa,
+                amount,
+                asset: "usdc".to_string(),
+                destination: format!("0x{}", hex::encode(eoa)),
+                network: "local".to_string(),
+                nonce,
+                expires_at: now + 600_000,
+                canister: vault.as_slice().to_vec(),
+            };
+            update(
+                &pic,
+                vault,
+                caller,
+                "request_withdrawal",
+                WithdrawalRequest {
+                    session: session.clone(),
+                    client_request_id: request_id(request),
+                    amount,
+                    asset: AssetId::Usdc,
+                    destination: Destination::AuthenticatedEoaHlAccount,
+                    network: Network::Local,
+                    nonce,
+                    expires_at: intent.expires_at,
+                    intent_signature: intent
+                        .sign_for_tests(&key)
+                        .expect("sign")
+                        .to_bytes65()
+                        .to_vec()
+                        .into(),
+                },
+            )
+            .expect("call")
+        };
+
+    // 残高の6割を出金予約する（未配分から出金予約へ移る）。
+    withdraw(600_000, 1, b"wd-big").expect("accepted");
+
+    // 以前は withdrawable の計算が「予約を二重に引く」ため、ここで
+    // BadRequest(MalformedPayload "withdrawal reservation exceeds the balance") になった。
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
+    let status = status.expect("出金予約後も資金状態を読める");
+    assert_eq!(status.reserve_unallocated, 400_000);
+    assert_eq!(status.reserved_for_withdrawal, 600_000);
+    assert_eq!(
+        status.withdrawable, 400_000,
+        "出金予約は台帳側で拘束済み（二重に引かない）"
+    );
+
+    // 残りの全額は配分に出せる（出金予約は台帳、配分は予約表で別々に数える）。
+    allocation(&pic, vault, caller, &session, b"alloc-after-wd", 400_000).expect("accepted");
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
+    let status = status.expect("status");
+    assert_eq!(status.reserve_unallocated, 400_000);
+    assert_eq!(status.withdrawable, 0, "配分の拘束だけが残る");
+
+    // 拘束済みの額を超える出金は「内部エラー」ではなく残高不足として拒否する。
+    let over = withdraw(400_000, 2, b"wd-over");
+    let over = over.expect_err("must reject over the available balance");
+    assert!(
+        matches!(over, ErrorCode::InsufficientFunds { .. }),
+        "{over:?}"
+    );
+}
+
+#[test]
 fn a_session_from_another_caller_is_rejected() {
     let pic = pic();
     let vault = deploy_default(&pic, FUNDS_VAULT_WASM);

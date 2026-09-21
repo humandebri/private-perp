@@ -102,7 +102,26 @@ pub fn decimal_micros(text: &str) -> Result<u64, ErrorCode> {
     })
 }
 
+/// 入金として計上できる額（マイクロUSDC）だけを返す。
+///
+/// `userNonFundingLedgerUpdates` には送金・出金などの**負の**deltaやゼロ・非十進が混ざる。
+/// これらは入金ではないため `None` とし、照合側は読み飛ばす（1件の負値で巡回全体を
+/// 止めない）。
+pub fn deposit_amount_micros(text: &str) -> Option<u64> {
+    if text.starts_with('-') || text.starts_with('+') {
+        return None;
+    }
+    match decimal_micros(text) {
+        Ok(amount) if amount > 0 => Some(amount),
+        _ => None,
+    }
+}
+
 /// 入金を取り込む。既知の`tx_hash`なら`false`。
+///
+/// 宛先が未知の入金も資金は既に動いているため、suspense勘定へ計上して記録に残す
+/// （イベント行を先に入れるため、後から `credit` を呼び直して計上することはできない。
+/// 写像が判明した時点で controller が `claim_unmatched_deposit` で本人へ振り替える）。
 pub fn credit(
     connection: &mut UpdateConnection<'_>,
     tx_hash: &[u8],
@@ -129,8 +148,8 @@ pub fn credit(
     if !db::repo::events::ingest_external_event(connection, &event, now)? {
         return Ok(false);
     }
-    if let Some(owner) = db::repo::ledger::custody_account_by_address(connection, address)? {
-        if owner.kind == "trading" {
+    match db::repo::ledger::custody_account_by_address(connection, address)? {
+        Some(owner) if owner.kind == "trading" => {
             // 取引口座への着金＝配分の確定（移動中→取引）。
             db::repo::ledger::allocation_confirm(
                 connection,
@@ -140,7 +159,8 @@ pub fn credit(
                 now,
                 &event_id,
             )?;
-        } else {
+        }
+        Some(owner) => {
             // 準備口座への着金＝利用者への与信。
             db::repo::ledger::deposit_confirmed(
                 connection,
@@ -148,6 +168,17 @@ pub fn credit(
                 amount,
                 now,
                 &event_id,
+            )?;
+        }
+        None => {
+            db::repo::ledger::unmatched_deposit(connection, amount, now, &event_id)?;
+            db::repo::events::insert_audit(
+                connection,
+                "system",
+                "unmatched_deposit",
+                None,
+                Some(&hex::encode(address)),
+                now,
             )?;
         }
     }
@@ -159,16 +190,43 @@ pub fn now_ms() -> u64 {
     clock::now_ms()
 }
 
-/// 有界な定期照合（先頭から`limit`件の入金先を確認して計上する）。
+/// 有界な定期照合。カーソルの位置から `limit` 件の入金先を確認して計上する。
+///
+/// 先頭N件固定では3人目以降が永久に対象外になるため、`(created_at, master_address)` の
+/// キーセットで巡回し、末尾まで到達したら次回は先頭から始める。1件の取得失敗や
+/// 解釈できないイベントで巡回全体を止めない（次のheartbeatで再試行される）。
 pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
-    let addresses =
-        db::tx::query(|connection| db::repo::ledger::reserve_addresses(connection, limit))
-            .map_err(|error| ErrorCode::Internal {
-                code: format!("{error:?}"),
-            })?;
+    let internal = |error: DbError| ErrorCode::Internal {
+        code: format!("{error:?}"),
+    };
+    let cursor = db::tx::query(db::repo::ledger::reconcile_cursor).map_err(internal)?;
+    let addresses = db::tx::query(|connection| {
+        db::repo::ledger::reserve_addresses_after(connection, limit, cursor)
+    })
+    .map_err(internal)?;
+
     let mut credited = 0;
-    for address in addresses {
-        let body = fetch_ledger_updates(&format!("0x{}", hex::encode(address))).await?;
+    let mut last = None;
+    for (address, created_at) in addresses {
+        last = Some((created_at, address));
+        let body = match fetch_ledger_updates(&format!("0x{}", hex::encode(address))).await {
+            Ok(body) => body,
+            Err(error) => {
+                let now = now_ms();
+                db::tx::update(|connection| {
+                    db::repo::events::insert_audit(
+                        connection,
+                        "system",
+                        "reconcile_fetch_failed",
+                        None,
+                        Some(&format!("{error:?}")),
+                        now,
+                    )
+                })
+                .map_err(internal)?;
+                continue;
+            }
+        };
         let Ok(entries) = serde_json::from_slice::<Vec<serde_json::Value>>(&body) else {
             continue;
         };
@@ -180,11 +238,14 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
             let Some(usdc) = entry.get("usdc").and_then(|value| value.as_str()) else {
                 continue;
             };
+            // 負値・ゼロ・非十進は入金ではない（送金・出金など）。
+            let Some(amount) = deposit_amount_micros(usdc) else {
+                continue;
+            };
             let hash = hash.strip_prefix("0x").unwrap_or(hash);
             let Ok(tx_hash) = hex::decode(hash) else {
                 continue;
             };
-            let amount = decimal_micros(usdc)?;
             let at = entry
                 .get("time")
                 .and_then(|value| value.as_u64())
@@ -192,12 +253,25 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
             let inserted = db::tx::update(|connection| {
                 credit(connection, &tx_hash, amount, &address, "usdc", at)
             })
-            .map_err(|error| ErrorCode::Internal {
-                code: format!("{error:?}"),
-            })?;
+            .map_err(internal)?;
             if inserted {
                 credited += 1;
             }
+        }
+    }
+
+    let now = now_ms();
+    match last {
+        Some((created_at, address)) => {
+            db::tx::update(|connection| {
+                db::repo::ledger::set_reconcile_cursor(connection, created_at, &address, now)
+            })
+            .map_err(internal)?;
+        }
+        None => {
+            // 末尾まで到達した（または対象が無い）。次回は先頭から巡回する。
+            db::tx::update(|connection| db::repo::ledger::reset_reconcile_cursor(connection, now))
+                .map_err(internal)?;
         }
     }
     Ok(credited)

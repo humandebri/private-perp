@@ -181,6 +181,11 @@ pub async fn request_allocation(
     let now = clock::now_ms();
     let fingerprint = body_hash(&[b"allocation", &request.amount.to_be_bytes(), request_id]);
 
+    // 払出し先（取引口座）を先に用意する。宛先を受付行へ保存し、送信時は必ずこの値を
+    // 使う（受付後に口座を用意すると、予約確定後に失敗して資金が拘束されたまま残る）。
+    let trading = crate::outbox::ensure_trading_account(&session.user_id, now).await?;
+    let destination_address = format!("0x{}", hex::encode(trading.master_address));
+
     let outcome = db::tx::update(|connection| {
         let accepted = db::repo::funds::accept_fund_request(
             connection,
@@ -191,7 +196,7 @@ pub async fn request_allocation(
                 kind: RequestKind::Allocation,
                 account_id: None,
                 amount: request.amount,
-                destination: None,
+                destination: Some(destination_address.as_str()),
             },
             now,
         )?;
@@ -237,16 +242,14 @@ pub async fn request_allocation(
         }
     };
 
-    // 新規受付のときだけ、払出し先（取引口座）を用意してactionを登録する。
+    // 新規受付のときだけ、準備口座からの配分actionを登録する（署名・送信はsweep）。
     if state == FundRequestState::Reserved {
-        let (_account_id, _path, _public_key, address) =
-            crate::outbox::provision_trading_account(&session.user_id, now).await?;
         let nonce = db::tx::update(|connection| {
             db::repo::actions::allocate_master_nonce(connection, "reserve", now)
         })
         .map_err(|error| map_db(error, None))?;
         let payload = crate::venue::UsdSend {
-            destination: format!("0x{}", hex::encode(address)),
+            destination: destination_address,
             amount_micros: request.amount,
             time: nonce,
         };
@@ -480,14 +483,11 @@ pub async fn request_withdrawal(
 }
 
 /// 拘束中の予約を差し引いた出金可能額を含む資金状態を返す。
+///
+/// 拘束は `ledger::user_balances` が種別ごとに一度だけ数える（配分は`reservations`表、
+/// 出金は台帳）。ここで再度引かない。
 pub fn fund_status_with_holds(session: &VerifiedSession) -> Result<FundStatus, ErrorCode> {
-    let mut status = fund_status(session)?;
-    let held = db::tx::query(|connection| {
-        db::repo::funds::held_reservation_total(connection, &session.user_id)
-    })
-    .map_err(|error| map_db(error, None))?;
-    status.withdrawable = status.withdrawable.saturating_sub(held);
-    Ok(status)
+    fund_status(session)
 }
 
 /// テスト専用の入金計上（`test-venue` featureでのみコンパイルされる）。
@@ -528,8 +528,10 @@ pub async fn approve_agent_generation(
     agent_address: [u8; 20],
 ) -> Result<AgentGeneration, ErrorCode> {
     let now = clock::now_ms();
-    let (account_id, master_path, _master_public_key, _address) =
-        crate::outbox::provision_trading_account(&session.user_id, now).await?;
+    // Agent承認は取引口座のmaster鍵で署名する（署名者＝保存済みの取引口座）。
+    let (account, master_path, master_public_key) =
+        crate::outbox::signer_material(&session.user_id, AccountKind::Trading, now).await?;
+    let account_id = account.account_id;
 
     let latest = db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
         .map_err(|error| map_db(error, None))?;
@@ -541,7 +543,6 @@ pub async fn approve_agent_generation(
         time: now,
     };
     let digest = payload.digest()?;
-    let master_public_key = crate::crypto::public_key(master_path.clone()).await?;
     let signature = crate::crypto::sign_with_key(&digest, master_path, &master_public_key).await?;
 
     match crate::venue::post_approve_agent(&payload, &signature).await {

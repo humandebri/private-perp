@@ -152,6 +152,19 @@ pub fn post_journal(
             .map_err(sql)?;
     }
 
+    // 同一 `request_id`・同一種別の仕訳二重計上を拒否する（`journals.request_id` は
+    // 一意制約を持てないため別表の主キーで担保する。予約と解放のように1つの要求へ
+    // 複数種別の仕訳が対応するため、要求IDだけでは一意にできない）。
+    if let Some(request_id) = request_id {
+        connection
+            .execute(
+                "INSERT INTO journal_requests (request_id, kind, journal_id, at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![request_id, kind, journal_id, at as i64],
+            )
+            .map_err(sql)?;
+    }
+
     Ok(journal_id)
 }
 
@@ -188,6 +201,12 @@ pub struct UserBalances {
 }
 
 /// 本人の残高区分を導出する。二重計上しない。
+///
+/// 拘束の持ち方を種別ごとに1箇所へ寄せる（同じ額を二度引かない）。
+/// - 出金の拘束は台帳（`user_reserved_for_withdrawal`）。`user_reserve` から
+///   既に移されているため `reserve_unallocated` に含まれない。
+/// - 配分の拘束は `reservations` 表のみ（受付〜送信完了まで台帳は動かない）。
+///   したがって `reserve_unallocated` から**配分拘束だけ**を引く。
 pub fn user_balances(connection: &Connection, user_id: &[u8; 32]) -> Result<UserBalances, Error> {
     let reserve_unallocated = liability_balance(connection, &user_reserve(user_id))?;
     let in_transit = liability_balance(connection, &user_in_transit(user_id))?;
@@ -211,11 +230,10 @@ pub fn user_balances(connection: &Connection, user_id: &[u8; 32]) -> Result<User
             .ok_or(Error::Overflow)?;
     }
 
+    let allocation_holds = crate::repo::funds::held_allocation_total(connection, user_id)?;
     let withdrawable = reserve_unallocated
-        .checked_sub(reserved_for_withdrawal)
-        .ok_or(Error::Invariant(
-            "withdrawal reservation exceeds the balance",
-        ))?;
+        .checked_sub(allocation_holds)
+        .ok_or(Error::Invariant("allocation holds exceed the balance"))?;
 
     Ok(UserBalances {
         reserve_unallocated,
@@ -376,6 +394,83 @@ pub fn deposit_confirmed(
             },
         ],
     )
+}
+
+/// 宛先が未解決の入金の計上（共通保管へ着金し、相手方はsuspenseのまま）。
+///
+/// 所有者が判明した後で `claim_unmatched_deposit` により本人へ振り替える。
+pub fn unmatched_deposit(
+    connection: &mut UpdateConnection<'_>,
+    amount: u64,
+    at: u64,
+    external_event_id: &[u8; 32],
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "deposit_unmatched",
+        at,
+        Some(external_event_id),
+        None,
+        &[
+            Posting {
+                account: CASH_RESERVE.to_string(),
+                kind: AccountKind::Asset,
+                amount,
+            },
+            Posting {
+                account: EXTERNAL.to_string(),
+                kind: AccountKind::Suspense,
+                amount: -amount,
+            },
+        ],
+    )
+}
+
+/// 未解決入金を本人へ振り替える（controllerの判断）。
+///
+/// `event_id` を要求IDとして使い、同一イベントの二重請求を `journal_requests` の
+/// 主キーで拒否する。
+pub fn claim_unmatched_deposit(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    amount: u64,
+    at: u64,
+    event_id: &[u8; 32],
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "deposit_claimed",
+        at,
+        None,
+        Some(event_id),
+        &[
+            Posting {
+                account: EXTERNAL.to_string(),
+                kind: AccountKind::Suspense,
+                amount,
+            },
+            Posting {
+                account: user_reserve(user_id),
+                kind: AccountKind::Liability,
+                amount: -amount,
+            },
+        ],
+    )
+}
+
+/// 外部イベントIDに対応する仕訳の種別（未計上は `None`）。
+pub fn journal_kind_by_external_event(
+    connection: &Connection,
+    external_event_id: &[u8; 32],
+) -> Result<Option<String>, Error> {
+    connection
+        .query_optional_scalar::<String>(
+            "SELECT kind FROM journals WHERE external_event_id = ?1",
+            params![external_event_id.as_slice()],
+        )
+        .map_err(sql)
 }
 
 /// 出金予約の仕訳（未配分→出金予約）。
@@ -616,21 +711,109 @@ pub struct CustodyOwner {
     pub kind: String,
 }
 
-/// 入金先（準備口座）のアドレス（新しい順）。定期照合の対象。
-pub fn reserve_addresses(connection: &Connection, limit: u32) -> Result<Vec<[u8; 20]>, Error> {
+/// 定期照合のカーソル（最後に処理した入金先の `(created_at, master_address)`）。
+pub fn reconcile_cursor(connection: &Connection) -> Result<Option<(u64, [u8; 20])>, Error> {
+    let raw = connection
+        .query_optional(
+            "SELECT last_created_at, last_address FROM reconcile_cursor WHERE singleton = 1",
+            params![],
+            |row| Ok((row.get::<i64>(0)?, row.get::<Vec<u8>>(1)?)),
+        )
+        .map_err(sql)?;
+    raw.map(|(created_at, address)| {
+        Ok((
+            u64::try_from(created_at).map_err(|_| Error::Invariant("negative timestamp"))?,
+            address
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 20-byte address"))?,
+        ))
+    })
+    .transpose()
+}
+
+/// 定期照合のカーソルを更新する。
+pub fn set_reconcile_cursor(
+    connection: &mut UpdateConnection<'_>,
+    created_at: u64,
+    address: &[u8; 20],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "INSERT INTO reconcile_cursor (singleton, last_created_at, last_address, updated_at)
+             VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(singleton) DO UPDATE SET
+               last_created_at = excluded.last_created_at,
+               last_address = excluded.last_address,
+               updated_at = excluded.updated_at",
+            params![created_at as i64, address.as_slice(), now as i64],
+        )
+        .map_err(sql)
+}
+
+/// 定期照合のカーソルを先頭へ戻す（末尾まで到達したとき）。
+pub fn reset_reconcile_cursor(
+    connection: &mut UpdateConnection<'_>,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "INSERT INTO reconcile_cursor (singleton, last_created_at, last_address, updated_at)
+             VALUES (1, 0, ?1, ?2)
+             ON CONFLICT(singleton) DO UPDATE SET
+               last_created_at = 0,
+               last_address = excluded.last_address,
+               updated_at = excluded.updated_at",
+            params![[0u8; 20].as_slice(), now as i64],
+        )
+        .map_err(sql)
+}
+
+/// カーソルより後の入金先（準備口座）を `(created_at, master_address)` 昇順で返す。
+///
+/// 先頭N件固定では3人目以降が永久に対象外になるため、キーセットで巡回する。
+pub fn reserve_addresses_after(
+    connection: &Connection,
+    limit: u32,
+    cursor: Option<(u64, [u8; 20])>,
+) -> Result<Vec<([u8; 20], u64)>, Error> {
+    let cursor_address_bytes: [u8; 20] = match cursor {
+        Some((_, address)) => address,
+        None => [0u8; 20],
+    };
+    let (cursor_created, cursor_address) = match cursor {
+        Some((created_at, _)) => (
+            ic_sqlite_vfs::db::Value::Integer(
+                i64::try_from(created_at).map_err(|_| Error::Overflow)?,
+            ),
+            ic_sqlite_vfs::db::Value::Blob(cursor_address_bytes.as_slice()),
+        ),
+        None => (
+            ic_sqlite_vfs::db::Value::Null,
+            ic_sqlite_vfs::db::Value::Null,
+        ),
+    };
     let rows = connection
         .query_all(
-            "SELECT master_address FROM custody_accounts WHERE kind = 'reserve'
-              ORDER BY created_at DESC LIMIT ?1",
-            params![limit as i64],
-            |row| row.get::<Vec<u8>>(0),
+            "SELECT master_address, created_at FROM custody_accounts
+              WHERE kind = 'reserve'
+                AND (?1 IS NULL
+                     OR created_at > ?1
+                     OR (created_at = ?1 AND master_address > ?2))
+              ORDER BY created_at, master_address
+              LIMIT ?3",
+            params![cursor_created, cursor_address, limit as i64],
+            |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<i64>(1)?)),
         )
         .map_err(sql)?;
     rows.into_iter()
-        .map(|bytes| {
-            bytes
-                .try_into()
-                .map_err(|_| Error::Invariant("expected a 20-byte address"))
+        .map(|(address, created_at)| {
+            Ok((
+                address
+                    .try_into()
+                    .map_err(|_| Error::Invariant("expected a 20-byte address"))?,
+                u64::try_from(created_at).map_err(|_| Error::Invariant("negative timestamp"))?,
+            ))
         })
         .collect()
 }

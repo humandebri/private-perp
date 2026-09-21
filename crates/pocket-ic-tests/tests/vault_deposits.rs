@@ -2,6 +2,7 @@
 
 use api_types::auth::{
     ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
+    SessionStatus,
 };
 use api_types::error::ErrorCode;
 use api_types::fund::{FundStatus, FundingInstructions};
@@ -10,7 +11,7 @@ use candid::Principal;
 use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
-use pocket_ic_tests::{FUNDS_VAULT_WASM, deploy, pic, principal, update, update_args};
+use pocket_ic_tests::{FUNDS_VAULT_WASM, deploy, pic, principal, query, update, update_args};
 
 const ORIGIN: &str = "https://app.example.test";
 
@@ -161,5 +162,112 @@ fn venue_deposits_credit_the_owner_once() {
     assert!(
         matches!(denied, Err(ErrorCode::Unauthenticated { .. })),
         "{denied:?}"
+    );
+}
+
+/// イベントID（`keccak256("deposit" ‖ tx_hash)`）をテスト側で独立に計算する。
+fn deposit_event_id(tx_hash: &[u8; 32]) -> [u8; 32] {
+    let mut input = b"deposit".to_vec();
+    input.extend_from_slice(tx_hash);
+    hl_sign::keccak256(&input)
+}
+
+/// 未知宛先の入金はsuspenseへ計上し、controllerが後から本人へ振り替えられる。
+///
+/// 以前はイベント行だけを残して台帳へ何も書かなかったため、同じイベントは以後
+/// 重複扱いになり、修復用の `credit_venue_deposit` でも計上できなかった。
+#[test]
+fn an_unmatched_deposit_can_be_claimed_by_the_controller() {
+    let pic = pic();
+    let controller = principal(180);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let caller = principal(181);
+    let session = open_session(&pic, vault, caller, &secret(230));
+
+    let session_status: Result<SessionStatus, ErrorCode> =
+        query(&pic, vault, caller, "session_status", session.clone()).expect("call");
+    let user_id = session_status.expect("status").user_id;
+
+    // 未知の宛先への入金（500,000マイクロUSDC）。
+    let tx_hash = [21u8; 32];
+    let unknown_address = blob(&[9u8; 20]);
+    let recorded = credit(&pic, vault, controller, &tx_hash, 500_000, &unknown_address);
+    assert!(recorded.expect("recorded"), "未知宛先でも取り込む");
+
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
+    let status = status.expect("status");
+    assert_eq!(
+        status.reserve_unallocated, 0,
+        "未知宛先の入金を本人へ与信しない（suspenseに留める）"
+    );
+
+    // controllerが本人へ振り替える。
+    let event_id = deposit_event_id(&tx_hash);
+    let claimed: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "claim_unmatched_deposit",
+        (blob(&event_id), user_id.clone()),
+    )
+    .expect("call");
+    claimed.expect("claimed");
+
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
+    assert_eq!(
+        status.expect("status").reserve_unallocated,
+        500_000,
+        "振替で本人の未配分残高へ入る"
+    );
+
+    // 同じイベントの二重請求は拒否する。
+    let again: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "claim_unmatched_deposit",
+        (blob(&event_id), user_id.clone()),
+    )
+    .expect("call");
+    assert!(again.is_err(), "二重請求は拒否する: {again:?}");
+
+    // 本人へ直接計上済みのイベントは請求できない（suspenseに無い）。
+    let provisioned: Result<Vec<u8>, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .expect("call");
+    let address = provisioned.expect("provisioned");
+    let direct_tx = [22u8; 32];
+    let direct = credit(
+        &pic,
+        vault,
+        controller,
+        &direct_tx,
+        100_000,
+        &blob(&address),
+    );
+    assert!(direct.expect("credited"));
+    let direct_claim: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "claim_unmatched_deposit",
+        (blob(&deposit_event_id(&direct_tx)), user_id),
+    )
+    .expect("call");
+    assert!(
+        direct_claim.is_err(),
+        "本人へ計上済みのイベントは請求できない: {direct_claim:?}"
     );
 }

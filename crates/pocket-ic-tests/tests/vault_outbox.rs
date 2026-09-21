@@ -18,8 +18,8 @@ use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic::common::rest::{CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse};
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy, deploy_default, pic, principal, update,
-    update_args,
+    FUNDS_VAULT_WASM, call_with_mocked_outcall, call_with_mocked_outcall_captured, deploy,
+    deploy_default, pic, principal, update, update_args,
 };
 use std::time::Duration;
 
@@ -666,4 +666,121 @@ fn an_unknown_action_can_be_resolved_as_not_executed() {
     )
     .expect("call");
     assert!(again.is_err(), "解消済みは再度解消できない");
+}
+
+/// vaultのconfig（`HL_CHAIN_NAME` / `HL_USER_SIGNED_CHAIN_ID`）と同じ値。
+/// 送信内容を独立に検証するため、テスト側にも同じ値を置く（不一致なら署名検証が落ちる）。
+const HL_CHAIN_NAME: &str = "Testnet";
+const HL_USER_SIGNED_CHAIN_ID: u64 = 421_614;
+const HL_EXCHANGE_URL: &str = "https://api.hyperliquid-testnet.xyz/exchange";
+
+/// 送信された `usdSend` のbodyから署名対象ダイジェストを独立に再構成する。
+fn usd_send_digest(action: &serde_json::Value) -> [u8; 32] {
+    use hl_sign::user_signed::{self, TypedValue};
+    let destination = action["destination"].as_str().expect("destination");
+    let amount = action["amount"].as_str().expect("amount");
+    let time = action["time"].as_u64().expect("time");
+    let values = vec![
+        TypedValue::String(HL_CHAIN_NAME.to_string()),
+        TypedValue::String(destination.to_string()),
+        TypedValue::String(amount.to_string()),
+        TypedValue::Uint64(time),
+    ];
+    user_signed::digest(
+        HL_USER_SIGNED_CHAIN_ID,
+        user_signed::USD_SEND_PRIMARY_TYPE,
+        user_signed::USD_SEND_FIELDS,
+        &values,
+    )
+    .expect("digest")
+}
+
+fn blob20(value: &Blob) -> [u8; 20] {
+    value.as_ref().try_into().expect("20 bytes")
+}
+
+/// `usdSend` の署名から復元した送信元アドレスを返す。
+fn recover_signer(action: &serde_json::Value, signature: &serde_json::Value) -> [u8; 20] {
+    let digest = usd_send_digest(action);
+    let signature = hl_sign::Signature {
+        r: hex::decode(signature["r"].as_str().expect("r").trim_start_matches("0x"))
+            .expect("r hex")
+            .try_into()
+            .expect("r len"),
+        s: hex::decode(signature["s"].as_str().expect("s").trim_start_matches("0x"))
+            .expect("s hex")
+            .try_into()
+            .expect("s len"),
+        v: signature["v"].as_u64().expect("v") as u8,
+    };
+    hl_sign::recover_address(&digest, &signature, None).expect("recover")
+}
+
+/// 配分の送信内容を検証する（宛先が取引口座、署名者が**準備口座**、非replicated）。
+///
+/// 以前は署名者が保存済み口座と一致しない新しい導出鍵で、宛先も取引口座自身だった。
+/// mockはどの鍵で署名しても受理を返すため、送信内容を検査しないと検出できない。
+#[test]
+fn an_allocation_is_sent_from_the_reserve_to_the_trading_account() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(45);
+    let key = secret(141);
+    let session = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 15);
+
+    // 入金先（準備口座）を用意する。署名者はこの口座でなければならない。
+    let provisioned: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .expect("call");
+    let reserve_address = blob20(&provisioned.expect("provisioned"));
+
+    allocate(&pic, vault, caller, &session, b"out-send", 400_000).expect("accepted");
+    let trading: Result<Blob, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone()).expect("call");
+    let trading_address = blob20(&trading.expect("trading address"));
+
+    let (swept, captured): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+    let captured = captured.expect("outcallが送信される");
+
+    assert_eq!(captured.url, HL_EXCHANGE_URL);
+    assert_eq!(
+        captured.replication,
+        pocket_ic::common::rest::CanisterHttpReplication::NonReplicated,
+        "状態変更POSTは非replicatedで送る"
+    );
+
+    let body: serde_json::Value = serde_json::from_slice(&captured.body).expect("body json");
+    let action = &body["action"];
+    assert_eq!(action["type"], "usdSend");
+    assert_eq!(
+        action["destination"].as_str().expect("destination"),
+        format!("0x{}", hex::encode(trading_address)),
+        "宛先は本人の取引口座"
+    );
+    assert_eq!(action["amount"].as_str().expect("amount"), "0.4");
+    assert_eq!(
+        recover_signer(action, &body["signature"]),
+        reserve_address,
+        "配分は準備口座のmaster鍵で署名する"
+    );
+    assert_ne!(
+        recover_signer(action, &body["signature"]),
+        trading_address,
+        "署名者は取引口座であってはならない（資金は準備口座から出る）"
+    );
 }

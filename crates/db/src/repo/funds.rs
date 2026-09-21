@@ -229,7 +229,27 @@ pub fn held_reservation_total(connection: &Connection, user_id: &[u8; 32]) -> Re
     u64::try_from(total).map_err(|_| Error::Invariant("negative reservation total"))
 }
 
+/// 配分（allocation）で拘束中の合計。
+///
+/// 出金の拘束は台帳側（`user_reserved_for_withdrawal`）にあるため含めない。
+/// 同じ額を二度引かないための境界である。
+pub fn held_allocation_total(connection: &Connection, user_id: &[u8; 32]) -> Result<u64, Error> {
+    let total = connection
+        .query_scalar::<i64>(
+            "SELECT COALESCE(SUM(r.amount), 0)
+               FROM reservations r
+               JOIN fund_requests f
+                 ON f.user_id = r.user_id AND f.client_request_id = r.client_request_id
+              WHERE r.user_id = ?1 AND r.state = 'held' AND f.kind = 'allocation'",
+            params![user_id.as_slice()],
+        )
+        .map_err(sql)?;
+    u64::try_from(total).map_err(|_| Error::Invariant("negative reservation total"))
+}
+
 /// 残高を拘束する。未配分残高が不足する場合は拒否する。
+///
+/// 出金の拘束は `withdrawal_reserve` が台帳で行うため、ここで引くのは配分の拘束だけ。
 pub fn reserve_funds(
     connection: &mut UpdateConnection<'_>,
     user_id: &[u8; 32],
@@ -239,11 +259,10 @@ pub fn reserve_funds(
     now: u64,
 ) -> Result<(), Error> {
     let balances = crate::repo::ledger::user_balances(connection, user_id)?;
-    let held = held_reservation_total(connection, user_id)?;
     let available = balances
         .reserve_unallocated
-        .checked_sub(held)
-        .ok_or(Error::Invariant("held reservations exceed the balance"))?;
+        .checked_sub(held_allocation_total(connection, user_id)?)
+        .ok_or(Error::Invariant("allocation holds exceed the balance"))?;
     if available < amount {
         return Err(Error::InsufficientFunds {
             available: i64::try_from(available).unwrap_or(i64::MAX),

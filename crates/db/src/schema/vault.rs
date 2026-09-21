@@ -226,6 +226,39 @@ CREATE TABLE hpke_keys (
 );
 ";
 
+/// v7: 定期照合のカーソル、出金intentのnonce単回使用、仕訳の要求ID一意。
+///
+/// - `reconcile_cursor`: 入金先の定期照合を `(created_at, master_address)` のキーセットで
+///   巡回する（先頭N件固定だと3人目以降が永久に対象外になる）。
+/// - `used_intent_nonces`: 署名済み出金intentのnonceを単回使用にする（リプレイ防止）。
+/// - `journal_requests`: 同一 `request_id` の**同じ種別**の仕訳二重計上をDBで拒否する
+///   （`journals.request_id` は一意制約を持てないため別表で担保する。予約と解放のように
+///   1つの要求に複数種別の仕訳が対応するため、要求IDだけでは一意にできない）。
+const RECONCILE_AND_UNIQUENESS: &str = "
+CREATE TABLE reconcile_cursor (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    last_created_at INTEGER NOT NULL,
+    last_address BLOB NOT NULL CHECK (length(last_address) = 20),
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE used_intent_nonces (
+    user_id BLOB NOT NULL CHECK (length(user_id) = 32),
+    nonce INTEGER NOT NULL,
+    client_request_id BLOB NOT NULL,
+    used_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, nonce)
+);
+
+CREATE TABLE journal_requests (
+    request_id BLOB NOT NULL,
+    kind TEXT NOT NULL,
+    journal_id INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (request_id, kind)
+);
+";
+
 /// `funds_vault` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -251,5 +284,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 6,
         sql: HPKE_KEYS,
+    },
+    Migration {
+        version: 7,
+        sql: RECONCILE_AND_UNIQUENESS,
     },
 ];

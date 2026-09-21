@@ -477,6 +477,66 @@ fn credit_venue_deposit(
     .map_err(|error| auth::map_db(error, None))
 }
 
+/// 宛先が未解決だった入金を、後から判明した利用者へ振り替える（controllerのみ）。
+///
+/// `credit` がsuspenseへ計上したイベントだけを対象にする（既に本人へ計上済みの
+/// イベントを再計上しない）。同一イベントの二重請求は仕訳の要求IDで拒否する。
+#[ic_cdk::update]
+fn claim_unmatched_deposit(
+    event_id: api_types::Blob,
+    user_id: api_types::Blob,
+) -> Result<(), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can claim unmatched deposits".to_string(),
+        });
+    }
+    let event_id: [u8; 32] = event_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "event_id must be 32 bytes".to_string(),
+        })?;
+    let user_id: [u8; 32] = user_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "user_id must be 32 bytes".to_string(),
+        })?;
+    let now = clock::now_ms();
+    let network = config::network_name(config::NETWORK);
+    db::tx::update(|connection| {
+        let event = db::repo::events::find_external_event(connection, network, &event_id)?
+            .ok_or(db::error::Error::NotFound)?;
+        let kind = db::repo::ledger::journal_kind_by_external_event(connection, &event_id)?
+            .ok_or(db::error::Error::Invariant("event was not credited"))?;
+        if kind != "deposit_unmatched" {
+            return Err(db::error::Error::Invariant(
+                "event is not an unmatched deposit",
+            ));
+        }
+        db::repo::ledger::claim_unmatched_deposit(
+            connection,
+            &user_id,
+            event.amount,
+            now,
+            &event_id,
+        )?;
+        db::repo::events::insert_audit(
+            connection,
+            "controller",
+            "claim_unmatched_deposit",
+            None,
+            Some(&hex::encode(user_id)),
+            now,
+        )
+    })
+    .map_err(|error| auth::map_db(error, None))
+}
+
 /// 入金先（準備口座）を用意する。`get_funding_instructions` の前提を作る。
 #[ic_cdk::update]
 async fn provision_reserve_account(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
@@ -519,11 +579,14 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
         let Some(usdc) = entry.get("usdc").and_then(|value| value.as_str()) else {
             continue;
         };
+        // 負値・ゼロ・非十進は入金ではない（送金・出金など）ため読み飛ばす。
+        let Some(amount) = deposits::deposit_amount_micros(usdc) else {
+            continue;
+        };
         let hash = hash.strip_prefix("0x").unwrap_or(hash);
         let Ok(tx_hash) = hex::decode(hash) else {
             continue;
         };
-        let amount = deposits::decimal_micros(usdc)?;
         let at = entry
             .get("time")
             .and_then(|value| value.as_u64())
