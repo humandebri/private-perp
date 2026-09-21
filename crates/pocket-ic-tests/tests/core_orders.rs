@@ -12,8 +12,9 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, configure_policy,
-    deploy, deploy_default, pic, principal, query_args, update, update_args,
+    FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, approve_agent_at_vault,
+    call_with_mocked_outcall, configure_policy, deploy, deploy_default, pic, principal, query_args,
+    update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -452,7 +453,10 @@ fn core_derives_agent_keys_for_the_account() {
             1u64,
             api_types::Blob::from(requested.agent_address.as_ref().to_vec()),
         ),
-        Ok((200, br#"{"status":"ok","response":{"type":"default"}}"#.to_vec())),
+        Ok((
+            200,
+            br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+        )),
     )
     .expect("call");
     assert_eq!(
@@ -558,6 +562,10 @@ fn core_signs_orders_with_the_agent_key() {
     )
     .expect("call");
     let agent_address = agent.expect("agent").agent_address;
+    // 未承認の世代では署名しないため、vaultで承認しておく。
+    let approved = approve_agent_at_vault(&pic, vault, caller, &session, 1, agent_address.as_ref())
+        .expect("approved");
+    assert_eq!(approved.state, api_types::fund::AgentState::Active);
 
     let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,

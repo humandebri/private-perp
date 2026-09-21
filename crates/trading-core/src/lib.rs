@@ -929,6 +929,18 @@ async fn test_sign_order_action(
             .ok_or(ErrorCode::NotAllowed {
                 code: api_types::error::NotAllowedCode::OperationNotAvailable,
             })?;
+    // 未承認の世代では署名しない。承認はvaultがmaster署名で行い永続化するため、
+    // vaultの状態を確認してから鍵を使う（取引所に拒否される署名を送らない）。
+    let approved = agent_approval(&order.account_id, generation.generation).await?;
+    match approved {
+        Some(approved)
+            if approved.agent_address.as_ref() == generation.agent_address.as_slice() => {}
+        _ => {
+            return Err(ErrorCode::NotAllowed {
+                code: api_types::error::NotAllowedCode::OperationNotAvailable,
+            });
+        }
+    }
     let path = agent_derivation_path(&order.account_id, generation.generation);
     let public_key: [u8; 33] = ecdsa_public_key(&EcdsaPublicKeyArgs {
         canister_id: None,

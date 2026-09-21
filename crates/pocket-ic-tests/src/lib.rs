@@ -150,6 +150,36 @@ pub fn configure_policy(
     policy
 }
 
+/// vaultでAgent世代を承認する（取引所へのoutcallはmockで受理させる）。
+///
+/// `trading_core` はvaultが承認した世代でしか署名しないため、注文を送信する試験は
+/// 事前にこれを呼ぶ。
+pub fn approve_agent_at_vault(
+    pic: &PocketIc,
+    vault: Principal,
+    caller: Principal,
+    session: &api_types::auth::SessionHandle,
+    generation: u64,
+    agent_address: &[u8],
+) -> Result<api_types::fund::AgentGeneration, api_types::error::ErrorCode> {
+    call_with_mocked_outcall(
+        pic,
+        vault,
+        caller,
+        "approve_agent_generation",
+        (
+            session.clone(),
+            generation,
+            api_types::Blob::from(agent_address.to_vec()),
+        ),
+        Ok((
+            200,
+            br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+        )),
+    )
+    .expect("call")
+}
+
 /// update呼び出しを行い、応答をデコードする。
 pub fn update<A, R>(
     pic: &PocketIc,
