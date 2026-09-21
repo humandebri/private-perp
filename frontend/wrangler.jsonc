@@ -6,5 +6,14 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "binding": "ASSETS", "run_worker_first": true },
   "observability": { "enabled": false },
-  "vars": { "APP_STAGE": "demo", "BLOCKED_COUNTRIES": "US" },
+  "vars": {
+    "APP_STAGE": "demo",
+    "BLOCKED_COUNTRIES": "US",
+    "ALLOW_UNKNOWN_COUNTRY": "1",
+  },
+  "env": {
+    "production": {
+      "vars": { "APP_STAGE": "live", "BLOCKED_COUNTRIES": "US,KP,IR" },
+    },
+  },
 }

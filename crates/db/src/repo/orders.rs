@@ -714,3 +714,34 @@ pub fn mark_cancel_unknown(
     let changed = crate::cas::changes(connection)?;
     crate::cas::ensure_changed(changed, "signing", "not claimed")
 }
+
+/// 取消に必要な注文情報（口座・銘柄添字・取引所oid）。
+pub fn cancel_target(
+    connection: &Connection,
+    order_id: &[u8; 32],
+) -> Result<Option<([u8; 32], u32, u64)>, Error> {
+    let row = connection
+        .query_optional(
+            "SELECT account_id, asset_index, hl_oid FROM orders WHERE order_id = ?1",
+            params![order_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<Option<i64>>(2)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    row.map(|(account_id, asset_index, oid)| {
+        Ok((
+            account_id
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte account id"))?,
+            u32::try_from(asset_index).map_err(|_| Error::Invariant("bad index"))?,
+            u64::try_from(oid.ok_or(Error::Invariant("cancel without venue oid"))?)
+                .map_err(|_| Error::Invariant("bad oid"))?,
+        ))
+    })
+    .transpose()
+}

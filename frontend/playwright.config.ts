@@ -11,9 +11,10 @@ export default defineConfig({
       : {},
   },
   webServer: {
-    command: 'pnpm preview',
+    // `preview` alone would serve whatever `dist` happens to be on disk.
+    command: 'pnpm build && pnpm preview',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
+    timeout: 120_000,
   },
 })

@@ -1108,6 +1108,15 @@ async fn test_sweep_now() -> Result<u32, ErrorCode> {
         }
         processed += 1;
     }
+
+    // 取消の送信（取消要求済みで未送信の注文）。
+    let cancels = db::tx::query(|connection| db::repo::orders::cancel_candidates(connection, 4))
+        .map_err(map_db)?;
+    for order_id in cancels {
+        if dispatch_cancel(&order_id, ic_cdk::api::time() / 1_000_000).await? {
+            processed += 1;
+        }
+    }
     Ok(processed)
 }
 
@@ -1209,6 +1218,98 @@ async fn test_apply_order_status(
     let now = ic_cdk::api::time() / 1_000_000;
     db::tx::update(|connection| db::repo::orders::apply_order_status(connection, oid, state, now))
         .map_err(map_db)
+}
+
+/// 取消actionをAgent鍵で署名して送信する（受理で`cancelled`へ）。
+#[cfg(feature = "test-venue")]
+async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCode> {
+    let claimed = db::tx::update(|connection| db::repo::orders::claim_cancel(connection, order_id))
+        .map_err(map_db)?;
+    if !claimed {
+        return Ok(false);
+    }
+    let (account_id, asset_index, oid) =
+        db::tx::query(|connection| db::repo::orders::cancel_target(connection, order_id))
+            .map_err(map_db)?
+            .ok_or_else(|| bad(BadRequestCode::MalformedPayload, "unknown order"))?;
+
+    let action = hl_types::action::CancelAction {
+        cancels: vec![(asset_index, oid)],
+    };
+    let msgpack = action.to_value().encode();
+    let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
+        action_msgpack: &msgpack,
+        nonce: now,
+        vault_address: None,
+        expires_after: None,
+    });
+    let digest = hl_sign::hash::signing_digest(action_hash, false);
+
+    let generation = db::tx::query(|connection| db::repo::agents::latest(connection, &account_id))
+        .map_err(map_db)?
+        .ok_or(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::OperationNotAvailable,
+        })?;
+    let path = agent_derivation_path(&account_id, generation.generation);
+    let public_key: [u8; 33] = ecdsa_public_key(&EcdsaPublicKeyArgs {
+        canister_id: None,
+        derivation_path: path.clone(),
+        key_id: ecdsa_key_id(),
+    })
+    .await
+    .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
+    .public_key
+    .try_into()
+    .map_err(|_| internal("unexpected public key length".to_string()))?;
+    let signature = sign_with_ecdsa(&SignWithEcdsaArgs {
+        message_hash: digest.to_vec(),
+        derivation_path: path,
+        key_id: ecdsa_key_id(),
+    })
+    .await
+    .map_err(|error| internal(format!("sign_with_ecdsa failed: {error}")))?
+    .signature;
+    let bytes: [u8; 64] = signature
+        .try_into()
+        .map_err(|_| internal("unexpected signature length".to_string()))?;
+    let mut r = [0u8; 32];
+    let mut s = [0u8; 32];
+    r.copy_from_slice(&bytes[0..32]);
+    s.copy_from_slice(&bytes[32..64]);
+    let v = hl_sign::recover_v(&digest, r, s, &public_key)
+        .map_err(|error| internal(format!("cannot recover v: {error}")))?;
+    let signature = hl_sign::Signature { r, s, v };
+
+    let body = serde_json::json!({
+        "action": {
+            "type": "cancel",
+            "cancels": [{ "a": asset_index, "o": oid }],
+        },
+        "nonce": now,
+        "signature": {
+            "r": format!("0x{}", hex::encode(signature.r)),
+            "s": format!("0x{}", hex::encode(signature.s)),
+            "v": signature.v,
+        },
+    });
+    let body = serde_json::to_vec(&body).map_err(|error| internal(error.to_string()))?;
+
+    match post_order(&body).await {
+        Ok((ExchangeOutcome::Accepted, _)) => {
+            db::tx::update(|connection| {
+                db::repo::orders::mark_cancel_sent(connection, order_id, &body, now)
+            })
+            .map_err(map_db)?;
+        }
+        Ok((ExchangeOutcome::Rejected, _)) | Err(_) => {
+            // 拒否・不明のいずれも「送ったか不明」として保持する（再送しない）。
+            db::tx::update(|connection| {
+                db::repo::orders::mark_cancel_unknown(connection, order_id, now)
+            })
+            .map_err(map_db)?;
+        }
+    }
+    Ok(true)
 }
 
 fn init_db() {

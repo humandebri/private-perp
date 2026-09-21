@@ -129,10 +129,25 @@ fn typed_data_json(challenge: &private_perp::Challenge) -> Result<Vec<u8>, Error
 }
 
 /// challengeを発行する。発行レートの上限を超えた場合は拒否する。
+///
+/// challengeは**呼び出し元のprincipal**へ束縛する。クライアントが申告したprincipalを
+/// そのまま保存すると、他人が取得した署名を別principalでredeemできてしまう
+/// （`threat-test-matrix.md` T-102）。
 pub async fn issue_challenge(
     request: ChallengeRequest,
     canister: Principal,
 ) -> Result<ChallengeResponse, ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "anonymous caller cannot issue a challenge".to_string(),
+        });
+    }
+    if request.principal != caller {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "challenge principal must be the caller".to_string(),
+        });
+    }
     if request.origin.is_empty() {
         return Err(bad(BadRequestCode::MissingField, "origin"));
     }
@@ -162,7 +177,7 @@ pub async fn issue_challenge(
         challenge_id,
         nonce,
         eoa_address,
-        principal: request.principal.as_slice().to_vec(),
+        principal: caller.as_slice().to_vec(),
         purpose: purpose_name(request.purpose).to_string(),
         network: config::network_name(request.network).to_string(),
         origin: request.origin,
@@ -171,6 +186,8 @@ pub async fn issue_challenge(
     };
 
     db::tx::update(|connection| {
+        // 期限切れ・使用済みの行を掃除してから発行する（行の無制限な増加を防ぐ）。
+        db::repo::auth::delete_expired_challenges(connection, now)?;
         let since = now.saturating_sub(config::CHALLENGE_RATE_WINDOW_MS);
         let recent = db::repo::auth::count_recent_challenges(connection, &eoa_address, since)?;
         if recent >= config::CHALLENGE_RATE_LIMIT {
@@ -189,13 +206,33 @@ pub async fn issue_challenge(
 }
 
 /// challengeを消費してセッションを発行する。
+///
+/// challengeが束縛されたprincipalと呼び出し元が一致することを要求する（T-102）。
+/// 一致を確認しないと、他人が取得した署名を自分のprincipalでredeemしてセッションを
+/// 得られてしまう。
 pub async fn open_session(
     request: OpenSessionRequest,
     caller: Principal,
 ) -> Result<SessionHandle, ErrorCode> {
+    if caller == Principal::anonymous() {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "anonymous caller cannot open a session".to_string(),
+        });
+    }
     let challenge_id = to_fixed::<32>(&request.challenge_id, "challenge_id must be 32 bytes")?;
     let signature_bytes = to_fixed::<65>(&request.eoa_signature, "eoa_signature must be 65 bytes")?;
     let now = clock::now_ms();
+
+    // 束縛されたprincipalを**消費の前**に確認する（他人がchallengeを消費して正規の
+    // ログインを妨害できないようにする。T-102）。
+    let owner = db::tx::query(|connection| db::repo::auth::challenge_row(connection, &challenge_id))
+        .map_err(|error| map_db(error, None))?
+        .ok_or_else(|| bad(BadRequestCode::ChallengeExpired, "unknown challenge"))?;
+    if owner.principal != caller.as_slice() {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "challenge was issued for another principal".to_string(),
+        });
+    }
 
     let row = db::tx::update(|connection| {
         db::repo::auth::consume_challenge(connection, &challenge_id, now)

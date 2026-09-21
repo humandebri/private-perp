@@ -227,6 +227,34 @@ pub fn insert_challenge(
         .map_err(sql)
 }
 
+/// challengeを読む（消費しない）。principal照合を消費の前に行うために使う。
+pub fn challenge_row(
+    connection: &Connection,
+    challenge_id: &[u8; 32],
+) -> Result<Option<ChallengeRow>, Error> {
+    let raw = connection
+        .query_optional(
+            "SELECT challenge_id, nonce, eoa_address, principal, purpose, network, origin, expires_at, consumed_at
+               FROM challenges WHERE challenge_id = ?1",
+            params![challenge_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<Vec<u8>>(1)?,
+                    row.get::<Vec<u8>>(2)?,
+                    row.get::<Vec<u8>>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<String>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<Option<i64>>(8)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    raw.map(convert_challenge).transpose()
+}
+
 /// challengeを一度だけ消費する。期限切れ・再使用は拒否する。
 pub fn consume_challenge(
     connection: &mut UpdateConnection<'_>,
@@ -434,4 +462,45 @@ pub fn identity_by_user(
         )
         .map_err(sql)?;
     raw.map(convert_identity).transpose()
+}
+
+/// 出金intentのnonceを使用済みにする（単回使用）。
+///
+/// 署名済みintentのnonceが再利用されると、同じ署名を別の受付IDで再送して
+/// 二重に資金移動を起こせる。`used_intent_nonces` の主キーで拒否する（重複は
+/// `Conflict`）。
+pub fn use_intent_nonce(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    nonce: u64,
+    client_request_id: &[u8],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "INSERT INTO used_intent_nonces (user_id, nonce, client_request_id, used_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                user_id.as_slice(),
+                i64::try_from(nonce).map_err(|_| Error::Overflow)?,
+                client_request_id,
+                now as i64
+            ],
+        )
+        .map_err(sql)
+}
+
+/// 期限切れ・使用済みのchallengeを削除する（行の無制限な増加を防ぐ）。
+pub fn delete_expired_challenges(
+    connection: &mut UpdateConnection<'_>,
+    now: u64,
+) -> Result<u64, Error> {
+    connection
+        .execute(
+            "DELETE FROM challenges WHERE expires_at < ?1 OR consumed_at IS NOT NULL",
+            params![now as i64],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    u64::try_from(changed).map_err(|_| Error::Invariant("negative change count"))
 }

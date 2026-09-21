@@ -281,8 +281,8 @@ where
         // （sweepが送信前に失敗した場合など、原因をテスト側で観測できるようにする）。
         if let Some(status) = pic.ingress_status(message_id) {
             let bytes = status.map_err(|error| format!("reject {method}: {error:?}"))?;
-            let value: R = candid::decode_one(&bytes)
-                .map_err(|error| format!("decode {method}: {error}"))?;
+            let value: R =
+                candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))?;
             return Ok((value, None));
         }
         return Err(format!("{method}: no pending outcall to mock"));

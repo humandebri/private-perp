@@ -7,8 +7,15 @@ import {
   useReactTable,
 } from '@tanstack/react-table'
 import type { DemoOrder, OrderInput, Scenario } from '../domain/demo'
-import { labels, parseUsdc } from '../domain/demo'
 import {
+  labels,
+  parseUsdc,
+  STALE_AFTER_MS,
+  STALE_NOTICE,
+  STALE_SAMPLE_INTERVAL_MS,
+} from '../domain/demo'
+import {
+  cancelAllDemo,
   cancelDemo,
   logoutDemo,
   refreshDemo,
@@ -21,7 +28,11 @@ import {
 } from '../client/demo-session'
 import { Chart } from './chart'
 
+/** USDC amounts keep the full 1e-6 unit so a 0.000001 move never renders as 0. */
 const money = (n: number) =>
+  n.toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 })
+/** Prices are quoted with 2 decimals, like the demo ticket. */
+const quote = (n: number) =>
   n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const helper = createColumnHelper<DemoOrder>()
 const columns = [
@@ -36,7 +47,7 @@ const columns = [
   }),
   helper.accessor('kind', { header: '種別' }),
   helper.accessor('quantity', { header: '数量' }),
-  helper.accessor('price', { header: '価格', cell: (info) => money(Number(info.getValue())) }),
+  helper.accessor('price', { header: '価格', cell: (info) => quote(Number(info.getValue())) }),
   helper.accessor('filled', { header: '約定数量' }),
   helper.accessor('status', {
     header: '状態',
@@ -86,7 +97,7 @@ function Workspace({ screen }: { screen: 'trade' | 'funds' | 'history' }) {
       setTick((v) => v + 1)
       setNow(Date.now())
       if (!simulateStale) refreshDemo()
-    }, 2000)
+    }, STALE_SAMPLE_INTERVAL_MS)
     return () => clearInterval(timer)
   }, [simulateStale])
   // Reads only generated public demo prices; never fetches account data.
@@ -95,10 +106,10 @@ function Workspace({ screen }: { screen: 'trade' | 'funds' | 'history' }) {
     queryFn: () => ({ btc: 64582.4 + Math.sin(tick) * 8, eth: 3428.15 + Math.sin(tick) }),
     gcTime: 0,
   })
-  const stale = state.active && (simulateStale || now - state.observedAt > 10_000)
+  const stale = state.active && (simulateStale || now - state.observedAt > STALE_AFTER_MS)
   return (
     <>
-      <section className="workspace-bar">
+      <section className="workspace-bar" data-testid="account-panel">
         <span className="eyebrow">WORKSPACE / {screen.toUpperCase()}</span>
         <div className="session-controls">
           {state.active ? (
@@ -165,7 +176,7 @@ function Workspace({ screen }: { screen: 'trade' | 'funds' | 'history' }) {
         <span className={stale ? 'warning' : 'muted'}>
           {state.active
             ? stale
-              ? '60秒以上前 · 新規注文停止'
+              ? STALE_NOTICE
               : `更新 ${new Date(state.observedAt).toLocaleTimeString('ja-JP')}`
             : '未接続'}
         </span>
@@ -194,7 +205,7 @@ function Trade({ btc, eth, stale }: { btc: number; eth: number; stale: boolean }
           </select>
           <small>PERPETUAL</small>
         </div>
-        <div className="price-big positive">{money(price)}</div>
+        <div className="price-big positive">{quote(price)}</div>
         <MarketStat label="24h変動（合成）" value="+2.41%" positive />
         <MarketStat label="24h出来高（合成）" value="$842.6M" />
         <MarketStat label="Funding（合成）" value="0.0100%" />
@@ -226,7 +237,7 @@ function Trade({ btc, eth, stale }: { btc: number; eth: number; stale: boolean }
             />
           ))}
           <div className="mid-price positive">
-            {money(price)} <span>↑</span>
+            {quote(price)} <span>↑</span>
           </div>
           {Array.from({ length: 7 }, (_, i) => (
             <BookRow
@@ -292,7 +303,7 @@ function BookRow({ price, index, sell = false }: { price: number; index: number;
   return (
     <div className={`book-row ${sell ? 'ask' : 'bid'}`}>
       <div className="depth" style={{ width: `${22 + index * 10}%` }} />
-      <span className={sell ? 'negative' : 'positive'}>{money(price)}</span>
+      <span className={sell ? 'negative' : 'positive'}>{quote(price)}</span>
       <span>{(0.042 + index * 0.183).toFixed(3)}</span>
     </div>
   )
@@ -469,7 +480,7 @@ function Orders() {
             <span>保護用SL/TPも取り消す操作です。建玉は決済しません。</span>
             <button
               onClick={() => {
-                state.orders.forEach((order) => cancelDemo(order.id))
+                cancelAllDemo()
                 setConfirm(false)
               }}
             >
@@ -532,7 +543,12 @@ function Funds() {
     }
   }
   function execute() {
-    if (!confirmation) return
+    // Nothing to sign off when the confirmed amount rounds to a zero display.
+    if (!confirmation || !Number.isSafeInteger(confirmation.amount) || confirmation.amount <= 0) {
+      setConfirmation(null)
+      setMessage('金額を確認してください。')
+      return
+    }
     try {
       transferDemo(confirmation.id, confirmation.kind, confirmation.amount)
       setConfirmation(null)
@@ -549,7 +565,7 @@ function Funds() {
         <h1>資金を、見渡す。</h1>
         <p>保管・取引・移動中の資金を分けて確認します。</p>
       </div>
-      <div className="balance-grid">
+      <div className="balance-grid" data-testid="account-balances">
         <Balance name="保管残高" value={state.reserve / 1e6} detail="取引口座へ未配分" />
         <Balance
           name="取引口座の合成残高"

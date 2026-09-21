@@ -149,6 +149,11 @@ fn map_accept(error: DbError, request_id: &[u8]) -> ErrorCode {
         DbError::Conflict => ErrorCode::IdempotencyConflict {
             request_id: request_id.to_vec().into(),
         },
+        // 出金intentのnonce再利用は「本文相違」ではなく期限・単回使用の違反として返す。
+        DbError::Invariant(message) if message.contains("nonce") => ErrorCode::BadRequest {
+            code: BadRequestCode::NonceReused,
+            detail: message.to_string(),
+        },
         other => map_db(other, Some(request_id)),
     }
 }
@@ -403,6 +408,20 @@ pub async fn request_withdrawal(
         )?;
         match accepted {
             AcceptOutcome::Accepted => {
+                // 署名済みintentのnonceは単回使用にする（同じ署名を別の受付IDで
+                // 再送して二重に資金移動させない）。
+                if let Err(error) = db::repo::auth::use_intent_nonce(
+                    connection,
+                    &session.user_id,
+                    request.nonce,
+                    request_id,
+                    now,
+                ) {
+                    return Err(match error {
+                        DbError::Conflict => DbError::Invariant("intent nonce is already used"),
+                        other => other,
+                    });
+                }
                 db::repo::funds::reserve_funds(
                     connection,
                     &session.user_id,
