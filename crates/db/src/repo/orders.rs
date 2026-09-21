@@ -745,3 +745,20 @@ pub fn cancel_target(
     })
     .transpose()
 }
+
+/// 利用者の未終端注文すべてに取消要求を付ける（送信はsweepが行う）。
+pub fn mark_all_cancel_requested(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    now: u64,
+) -> Result<u64, Error> {
+    connection
+        .execute(
+            "UPDATE orders SET cancel_requested = 1, updated_at = ?2
+              WHERE user_id = ?1 AND state IN ('open', 'partially_filled') AND cancel_requested = 0",
+            params![user_id.as_slice(), now as i64],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    u64::try_from(changed).map_err(|_| Error::Invariant("negative change count"))
+}

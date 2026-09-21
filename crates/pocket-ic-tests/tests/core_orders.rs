@@ -654,7 +654,7 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
         caller,
         "test_sweep_now",
         (),
-        Ok((200, venue_body)),
+        Ok((200, venue_body.clone())),
     )
     .expect("call");
     assert_eq!(swept.expect("sweep"), 1);
@@ -1385,14 +1385,14 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     )
     .expect("call");
     let submitted = submitted.expect("accepted order");
-    let venue_body = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":999}}]}}}"#.to_vec();
+    let venue_body: Vec<u8> = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":999}}]}}}"#.to_vec();
     let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
         &pic,
         core,
         caller,
         "test_sweep_now",
         (),
-        Ok((200, venue_body)),
+        Ok((200, venue_body.clone())),
     )
     .expect("call");
     assert_eq!(swept.expect("sweep"), 1);
@@ -1432,5 +1432,67 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     assert_eq!(
         listed.expect("orders").items[0].state,
         api_types::order::OrderState::Cancelled
+    );
+
+    // 2件目を出してから一括取消（Cancel All）を要求する。
+    let second: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"cancel-2", "ETH", "0.02", "2400"),
+        ),
+    )
+    .expect("call");
+    second.expect("accepted order");
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        core,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, venue_body.clone())),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("sweep"), 1);
+
+    let marked: Result<u64, ErrorCode> =
+        update(&pic, core, caller, "cancel_all", session.clone()).expect("call");
+    assert_eq!(
+        marked.expect("cancel all"),
+        1,
+        "未終端の注文に取消要求が付く"
+    );
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        core,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((
+            200,
+            br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+        )),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("cancel sweep"), 1);
+
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "list_orders",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    let listed = listed.expect("orders");
+    assert!(
+        listed
+            .items
+            .iter()
+            .all(|order| order.state == api_types::order::OrderState::Cancelled),
+        "一括取消で全て取消済みになる"
     );
 }

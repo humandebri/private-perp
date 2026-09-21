@@ -496,6 +496,17 @@ fn is_terminal(state: api_types::order::OrderState) -> bool {
     )
 }
 
+/// 未終端の注文すべてに取消要求を付ける（送信はsweepが行う）。
+#[ic_cdk::update]
+async fn cancel_all(session: SessionHandle) -> Result<u64, ErrorCode> {
+    let user_id = authorize(&session).await?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| {
+        db::repo::orders::mark_all_cancel_requested(connection, &user_id, now)
+    })
+    .map_err(map_db)
+}
+
 /// 約定一覧（新しい順）。
 ///
 /// 認可にvaultへの問い合わせが必要なためupdateで提供する。
