@@ -16,10 +16,12 @@ mod config;
 mod crypto;
 mod deposits;
 mod fund;
-mod hpke;
 mod outbox;
 mod random;
 mod venue;
+
+/// HPKE封筒は共有クレートへ移設した（`trading_core`も同じ封筒を使う）。
+use hpke_envelope as hpke;
 
 use api_types::auth::{ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle};
 use api_types::error::ErrorCode;

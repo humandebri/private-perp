@@ -62,21 +62,70 @@ pub fn list(connection: &Connection, account_id: &[u8; 32]) -> Result<Vec<Positi
                     margin_mode, stop_loss, take_profit
                FROM positions WHERE account_id = ?1 ORDER BY market",
             params![account_id.as_slice()],
-            |row| {
-                Ok(PositionView {
-                    market: row.get::<String>(0)?,
-                    size: row.get::<String>(1)?,
-                    entry_price: row.get::<String>(2)?,
-                    liquidation_price: row.get::<Option<String>>(3)?,
-                    unrealized_pnl: row.get::<i64>(4)?,
-                    leverage: u32::try_from(row.get::<i64>(5)?).unwrap_or(0),
-                    margin_mode: row.get::<String>(6)?,
-                    stop_loss: row.get::<Option<String>>(7)?,
-                    take_profit: row.get::<Option<String>>(8)?,
-                })
-            },
+            position_from_row,
         )
         .map_err(sql)
+}
+
+/// 口座の銘柄の建玉（無ければ`None`）。決済・SL/TPの整合判定に使う。
+pub fn find(
+    connection: &Connection,
+    account_id: &[u8; 32],
+    market: &str,
+) -> Result<Option<PositionView>, Error> {
+    connection
+        .query_optional(
+            "SELECT market, size, entry_price, liquidation_price, unrealized_pnl, leverage,
+                    margin_mode, stop_loss, take_profit
+               FROM positions WHERE account_id = ?1 AND market = ?2",
+            params![account_id.as_slice(), market],
+            position_from_row,
+        )
+        .map_err(sql)
+}
+
+/// 取引所が返した建玉の全量で口座の建玉を置き換える（消えた建玉を残さない）。
+///
+/// `/info`の`clearinghouseState`は建玉の全量であり、決済済みの建玉を含まない。
+/// 差分更新にすると、決済した建玉が建玉0として残り続ける。
+///
+/// 今回は現れなかった行を消すため、観測時刻を前回より必ず大きくしてから書き込み、
+/// それより古い行を削除する（同一ミリ秒の再取り込みでも取り違えない）。
+pub fn replace_all(
+    connection: &mut UpdateConnection<'_>,
+    account_id: &[u8; 32],
+    positions: &[PositionView],
+    observed_at: u64,
+) -> Result<u32, Error> {
+    let previous = latest_observed(connection, account_id)?.unwrap_or(0);
+    let stamp = observed_at.max(previous.saturating_add(1));
+    for position in positions {
+        upsert(connection, account_id, position, stamp)?;
+    }
+    connection
+        .execute(
+            "DELETE FROM positions WHERE account_id = ?1 AND observed_at < ?2",
+            params![account_id.as_slice(), stamp as i64],
+        )
+        .map_err(sql)?;
+    let removed = crate::cas::changes(connection)?;
+    u32::try_from(removed).map_err(|_| Error::Invariant("negative change count"))
+}
+
+fn position_from_row(
+    row: &ic_sqlite_vfs::db::Row<'_>,
+) -> Result<PositionView, ic_sqlite_vfs::DbError> {
+    Ok(PositionView {
+        market: row.get::<String>(0)?,
+        size: row.get::<String>(1)?,
+        entry_price: row.get::<String>(2)?,
+        liquidation_price: row.get::<Option<String>>(3)?,
+        unrealized_pnl: row.get::<i64>(4)?,
+        leverage: u32::try_from(row.get::<i64>(5)?).unwrap_or(0),
+        margin_mode: row.get::<String>(6)?,
+        stop_loss: row.get::<Option<String>>(7)?,
+        take_profit: row.get::<Option<String>>(8)?,
+    })
 }
 
 /// 建玉の最新観測時刻（データ鮮度の判定に使う）。

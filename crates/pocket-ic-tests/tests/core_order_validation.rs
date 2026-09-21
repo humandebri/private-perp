@@ -13,8 +13,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, TRADING_CORE_WASM, configure_policy, deploy, fund_trading_account, pic,
-    principal, update, update_args,
+    FUNDS_VAULT_WASM, TRADING_CORE_WASM, configure_policy, deploy, envelope, fund_trading_account,
+    pic, principal, rotate_hpke_key, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -125,6 +125,7 @@ fn invalid_orders_are_rejected_without_side_effects() {
     // allowlist外の銘柄（UNIVERSEにはあるがallowlistに無いSOL）を検証するため、
     // BTCとETHだけを許可する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -241,7 +242,7 @@ fn invalid_orders_are_rejected_without_side_effects() {
 
     // いずれも予約を残さない。
     let snapshot: Result<api_types::order::AccountSnapshot, ErrorCode> =
-        update(&pic, core, caller, "get_account_snapshot", session.clone()).expect("call");
+        envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
     let snapshot = snapshot.expect("snapshot");
     assert_eq!(snapshot.margin_used, 0, "拒否された注文は予約を残さない");
     assert!(snapshot.pending_orders.is_empty());

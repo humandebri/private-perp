@@ -14,7 +14,7 @@ use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
     FUNDS_VAULT_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, configure_policy, deploy,
-    fund_trading_account, pic, principal, update, update_args,
+    envelope, fund_trading_account, pic, principal, rotate_hpke_key, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -116,6 +116,7 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -174,7 +175,7 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
 
     // 受付時に 2500 × 0.05 = 125 USDC が予約される。
     let snapshot: Result<AccountSnapshot, ErrorCode> =
-        update(&pic, core, caller, "get_account_snapshot", session.clone()).expect("call");
+        envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
     assert_eq!(
         snapshot.expect("snapshot").margin_used,
         125_000_000,
@@ -195,7 +196,7 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
     assert_eq!(swept.expect("sweep"), 1);
 
     let snapshot: Result<AccountSnapshot, ErrorCode> =
-        update(&pic, core, caller, "get_account_snapshot", session.clone()).expect("call");
+        envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
     assert_eq!(
         snapshot.expect("snapshot").margin_used,
         0,

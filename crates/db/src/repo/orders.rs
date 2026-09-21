@@ -4,11 +4,22 @@
 
 use crate::error::Error;
 use crate::repo::sql;
-use crate::states::{order_state_from_str, order_state_str};
+use crate::states::{
+    order_state_from_str, order_state_str, trigger_kind_from_str, trigger_kind_str,
+};
 use api_types::order::{OrderState, OrderSummary};
 use ic_sqlite_vfs::db::UpdateConnection;
 use ic_sqlite_vfs::db::connection::Connection;
 use ic_sqlite_vfs::params;
+
+/// 受付けるトリガ（SL/TP）注文の内容。建玉単位で、`reduce_only`が必須。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTrigger {
+    /// `"stop_loss"` または `"take_profit"`。
+    pub kind: String,
+    pub price: String,
+    pub is_market: bool,
+}
 
 /// 新規注文の内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +36,8 @@ pub struct NewOrder {
     pub price: Option<String>,
     pub quantity: String,
     pub reduce_only: bool,
+    /// SL/TPトリガ。`None`は通常注文。
+    pub trigger: Option<NewTrigger>,
 }
 
 /// 受付を記録して注文を`pending`で登録する（同じ受付IDの再送は検出済みとする）。
@@ -37,13 +50,28 @@ pub fn insert_pending_order(
         Some(price) => ic_sqlite_vfs::db::Value::Text(price),
         None => ic_sqlite_vfs::db::Value::Null,
     };
+    let trigger_kind = match order.trigger.as_ref() {
+        Some(trigger) => ic_sqlite_vfs::db::Value::Text(trigger.kind.as_str()),
+        None => ic_sqlite_vfs::db::Value::Null,
+    };
+    let trigger_price = match order.trigger.as_ref() {
+        Some(trigger) => ic_sqlite_vfs::db::Value::Text(trigger.price.as_str()),
+        None => ic_sqlite_vfs::db::Value::Null,
+    };
+    let trigger_is_market = match order.trigger.as_ref() {
+        Some(trigger) => {
+            ic_sqlite_vfs::db::Value::Integer(if trigger.is_market { 1_i64 } else { 0_i64 })
+        }
+        None => ic_sqlite_vfs::db::Value::Null,
+    };
     connection
         .execute(
             "INSERT INTO orders
                (order_id, user_id, account_id, client_request_id, cloid, market, asset_index,
-                side, kind, price, quantity, reduce_only, state, filled_quantity, cancel_requested,
-                created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, '0', 0, ?14, ?14)",
+                side, kind, price, quantity, reduce_only, trigger_kind, trigger_price,
+                trigger_is_market, state, filled_quantity, cancel_requested, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     '0', 0, ?17, ?17)",
             params![
                 order.order_id.as_slice(),
                 order.user_id.as_slice(),
@@ -57,6 +85,9 @@ pub fn insert_pending_order(
                 price_value,
                 order.quantity.as_str(),
                 if order.reduce_only { 1_i64 } else { 0_i64 },
+                trigger_kind,
+                trigger_price,
+                trigger_is_market,
                 order_state_str(OrderState::Pending),
                 now as i64
             ],
@@ -226,7 +257,7 @@ pub fn list_orders(
         .query_all(
             "SELECT rowid, order_id, cloid, market, asset_index, side, kind, price, quantity,
                     filled_quantity, reduce_only, state, cancel_requested, hl_oid, created_at, updated_at,
-                    dispatch_state
+                    dispatch_state, trigger_kind, trigger_price, trigger_is_market
                FROM orders
               WHERE user_id = ?1 AND (?2 IS NULL OR rowid < ?2)
               ORDER BY rowid DESC
@@ -258,6 +289,9 @@ pub fn list_orders(
                     row.get::<i64>(14)?,
                     row.get::<i64>(15)?,
                     row.get::<String>(16)?,
+                    row.get::<Option<String>>(17)?,
+                    row.get::<Option<String>>(18)?,
+                    row.get::<Option<i64>>(19)?,
                 ))
             },
         )
@@ -291,10 +325,34 @@ pub fn list_orders(
                         .transpose()?,
                     created_at: u64::try_from(row.14).map_err(|_| Error::Invariant("bad time"))?,
                     updated_at: u64::try_from(row.15).map_err(|_| Error::Invariant("bad time"))?,
+                    trigger: trigger_from_columns(row.17, row.18, row.19)?,
                 },
             ))
         })
         .collect()
+}
+
+/// トリガ列（種別・価格・成行）からAPIの型を組み立てる。
+///
+/// スキーマのCHECKにより3列は揃っているため、欠けは不変条件違反として扱う。
+fn trigger_from_columns(
+    kind: Option<String>,
+    price: Option<String>,
+    is_market: Option<i64>,
+) -> Result<Option<api_types::order::Trigger>, Error> {
+    match (kind, price, is_market) {
+        (None, None, None) => Ok(None),
+        (Some(kind), Some(trigger_price), Some(is_market)) => {
+            let kind =
+                trigger_kind_from_str(&kind).ok_or(Error::Invariant("unknown trigger kind"))?;
+            Ok(Some(api_types::order::Trigger {
+                kind,
+                trigger_price,
+                is_market: is_market != 0,
+            }))
+        }
+        _ => Err(Error::Invariant("incomplete trigger columns")),
+    }
 }
 
 /// 注文の所有者と状態（取消の認可判定に使う）。
@@ -340,6 +398,17 @@ pub struct SignableOrder {
     pub reduce_only: bool,
     pub cloid: [u8; 16],
     pub created_at: u64,
+    /// SL/TPトリガ（`None`は通常注文）。
+    pub trigger: Option<OrderTrigger>,
+}
+
+/// 署名に必要なトリガ情報。`positionTpsl`（建玉単位・reduce-only）として構築する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderTrigger {
+    /// `"stop_loss"` または `"take_profit"`。
+    pub kind: String,
+    pub price: String,
+    pub is_market: bool,
 }
 
 pub fn queued_orders(connection: &Connection, limit: u32) -> Result<Vec<[u8; 32]>, Error> {
@@ -639,7 +708,7 @@ pub fn signable(
     let raw = connection
         .query_optional(
             "SELECT account_id, asset_index, side, price, quantity, kind, client_request_id,
-                    reduce_only, cloid, created_at
+                    reduce_only, cloid, created_at, trigger_kind, trigger_price, trigger_is_market
                FROM orders WHERE order_id = ?1",
             params![order_id.as_slice()],
             |row| {
@@ -654,6 +723,9 @@ pub fn signable(
                     row.get::<i64>(7)?,
                     row.get::<Vec<u8>>(8)?,
                     row.get::<i64>(9)?,
+                    row.get::<Option<String>>(10)?,
+                    row.get::<Option<String>>(11)?,
+                    row.get::<Option<i64>>(12)?,
                 ))
             },
         )
@@ -676,6 +748,14 @@ pub fn signable(
                 .try_into()
                 .map_err(|_| Error::Invariant("expected a 16-byte cloid"))?,
             created_at: u64::try_from(row.9).map_err(|_| Error::Invariant("bad time"))?,
+            trigger: match trigger_from_columns(row.10, row.11, row.12)? {
+                Some(trigger) => Some(OrderTrigger {
+                    kind: trigger_kind_str(trigger.kind).to_string(),
+                    price: trigger.trigger_price,
+                    is_market: trigger.is_market,
+                }),
+                None => None,
+            },
         })
     })
     .transpose()

@@ -5,6 +5,7 @@ members = [
     "crates/hl-sign",
     "crates/api-types",
     "crates/db",
+    "crates/hpke-envelope",
     "crates/policy",
     "crates/funds-vault",
     "crates/control-guard",

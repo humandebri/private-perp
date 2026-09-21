@@ -13,8 +13,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, TRADING_CORE_WASM, deploy, deploy_default, pic, principal, update,
-    update_args,
+    FUNDS_VAULT_WASM, TRADING_CORE_WASM, deploy, deploy_default, envelope, pic, principal,
+    rotate_hpke_key, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -115,6 +115,7 @@ fn positions_are_ingested_and_exposed_in_the_snapshot() {
     )
     .expect("call");
     context.expect("set_market_context");
+    rotate_hpke_key(&pic, core, controller);
 
     let caller = principal(211);
     let session = open_session(&pic, vault, caller, &secret(232));
@@ -163,7 +164,7 @@ fn positions_are_ingested_and_exposed_in_the_snapshot() {
     assert_eq!(ingested.expect("ingested"), 1);
 
     let snapshot: Result<AccountSnapshot, ErrorCode> =
-        update(&pic, core, caller, "get_account_snapshot", session.clone()).expect("call");
+        envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
     let snapshot = snapshot.expect("snapshot");
     assert_eq!(snapshot.positions.len(), 1);
     let position = &snapshot.positions[0];
@@ -186,7 +187,7 @@ fn positions_are_ingested_and_exposed_in_the_snapshot() {
     .expect("call");
     assert_eq!(ingested.expect("ingested"), 1);
     let snapshot: Result<AccountSnapshot, ErrorCode> =
-        update(&pic, core, caller, "get_account_snapshot", session.clone()).expect("call");
+        envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
     let snapshot = snapshot.expect("snapshot");
     assert_eq!(snapshot.positions.len(), 1, "銘柄ごとに1件");
     assert_eq!(snapshot.positions[0].size, "0.02");

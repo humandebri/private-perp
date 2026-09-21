@@ -29,6 +29,15 @@ const STALE_DATA_MS: u64 = 10_000;
 /// 1口座あたりの未終端注文（pending・open・partially_filled・unknown）の上限。
 const MAX_PENDING_ORDERS: u64 = 50;
 
+/// 決済（反対売買のIOC指値）で価格を導出するときのスリッページ許容幅（bps）。
+const DEFAULT_SLIPPAGE_BPS: u32 = 50;
+
+/// HPKE封筒の用途分離ラベル（vaultと同じ封筒実装を使う）。
+const ENVELOPE_INFO: &[u8] = b"private-perp/envelope/v1";
+
+/// 封筒の受付期限の上限（`now`から先の許容幅）。時計のずれと使い回しを抑える。
+const MAX_ENVELOPE_TTL_MS: u64 = 300_000;
+
 fn internal(message: String) -> ErrorCode {
     ErrorCode::Internal { code: message }
 }
@@ -153,8 +162,196 @@ fn get_vault_principal() -> Option<Principal> {
         .map(|bytes| Principal::from_slice(&bytes))
 }
 
-/// セッションを検証し、本人のuser_idを返す（認可境界の試験用）。
+/// HPKEの鍵世代を更新する（controllerのみ）。
 ///
+/// 秘密鍵はcanister内のDBに留め、公開鍵のみを配布する（`Plan.md` 16.5、
+/// `docs/phase-0/api-contract.md` 6節）。更新すると以前の世代は退役し、
+/// 旧鍵で作られた封筒は復号できない（クライアントは公開鍵を取得し直す）。
+#[ic_cdk::update]
+async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can rotate the HPKE key".to_string(),
+        });
+    }
+    let ikm = raw_rand32().await?;
+    let (secret, public) = hpke_envelope::derive_keypair(&ikm);
+    let secret: [u8; 32] = secret
+        .try_into()
+        .map_err(|_| internal("unexpected secret length".to_string()))?;
+    let public: [u8; 32] = public
+        .try_into()
+        .map_err(|_| internal("unexpected public length".to_string()))?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| db::repo::hpke::insert_key(connection, &secret, &public, now))
+        .map_err(map_db)?;
+    Ok(public.to_vec().into())
+}
+
+/// 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
+#[ic_cdk::query]
+fn get_hpke_public_key() -> Result<api_types::Blob, ErrorCode> {
+    db::tx::query(db::repo::hpke::active_public)
+        .map_err(map_db)?
+        .map(|public| public.into())
+        .ok_or(ErrorCode::PolicyUnavailable)
+}
+
+/// 封筒を開いて平文を取り出し、`request_id`を消費する（`api-contract.md` 6節）。
+///
+/// 束縛する値：鍵ID（現行世代）・`network`・`canister`・`method`・`caller`・
+/// `request_id`・期限。`aad`は再計算した値と比較し、復号にも同じ値を使うため
+/// 改竄は復号失敗になる。`request_id`は復号に成功した要求だけ消費する。
+async fn open_envelope<T: serde::de::DeserializeOwned + candid::CandidType>(
+    envelope: &api_types::envelope::HpkeRequest,
+    method: &str,
+) -> Result<(T, [u8; 32], Principal), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    let now = ic_cdk::api::time() / 1_000_000;
+    let malformed = |detail: &str| bad(BadRequestCode::MalformedPayload, detail);
+
+    let public = db::tx::query(db::repo::hpke::active_public)
+        .map_err(map_db)?
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    if envelope.key_id.as_ref() != public.as_slice() {
+        return Err(malformed("unknown hpke key id"));
+    }
+    if envelope.canister != ic_cdk::api::canister_self() {
+        return Err(malformed("envelope canister mismatch"));
+    }
+    if envelope.method != method {
+        return Err(malformed("envelope method mismatch"));
+    }
+    let network = network_name()?;
+    if !network_matches(envelope.network, &network) {
+        return Err(malformed("envelope network mismatch"));
+    }
+    if envelope.expires_at < now {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::ExpiredIntent,
+            detail: "the envelope has expired".to_string(),
+        });
+    }
+    if envelope.expires_at > now.saturating_add(MAX_ENVELOPE_TTL_MS) {
+        return Err(malformed("the envelope expiry is too far ahead"));
+    }
+    let request_id: [u8; 32] = envelope
+        .request_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| malformed("request_id must be 32 bytes"))?;
+    let aad = envelope_aad(method, caller, &request_id, envelope.expires_at, &network)?;
+    if envelope.aad.as_ref() != aad.as_slice() {
+        return Err(malformed("envelope aad mismatch"));
+    }
+    let secret = db::tx::query(db::repo::hpke::active_secret)
+        .map_err(map_db)?
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    let plaintext = hpke_envelope::open(&secret, ENVELOPE_INFO, &aad, envelope.ciphertext.as_ref())
+        .map_err(|_| malformed("cannot open the envelope"))?;
+    // 復号できた要求だけを単回使用として記録する（改竄された要求でIDを消費しない）。
+    let consumed = db::tx::update(|connection| {
+        db::repo::hpke_requests::consume(
+            connection,
+            &request_id,
+            method,
+            caller.as_slice(),
+            now,
+            envelope.expires_at,
+        )
+    })
+    .map_err(map_db)?;
+    if !consumed {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::NonceReused,
+            detail: "request_id was already used".to_string(),
+        });
+    }
+    let payload =
+        candid::decode_one(&plaintext).map_err(|_| malformed("cannot decode the payload"))?;
+    Ok((payload, request_id, caller))
+}
+
+/// 応答を封筒へ入れる（`client_public_key`宛。`aad`は要求と同じ束縛）。
+async fn seal_envelope<T: candid::CandidType>(
+    envelope: &api_types::envelope::HpkeRequest,
+    method: &str,
+    request_id: &[u8; 32],
+    caller: Principal,
+    response: &T,
+) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
+    let network = network_name()?;
+    let plaintext = candid::encode_one(response).map_err(|error| internal(error.to_string()))?;
+    let seed = raw_rand32().await?;
+    let aad = envelope_aad(method, caller, request_id, envelope.expires_at, &network)?;
+    let ciphertext = hpke_envelope::seal(
+        envelope.client_public_key.as_ref(),
+        ENVELOPE_INFO,
+        &aad,
+        &plaintext,
+        &seed,
+    )
+    .map_err(|_| bad(BadRequestCode::MalformedPayload, "cannot seal the response"))?;
+    Ok(api_types::envelope::HpkeResponse {
+        request_id: request_id.to_vec().into(),
+        key_id: envelope.key_id.clone(),
+        observed_at: ic_cdk::api::time() / 1_000_000,
+        ciphertext: ciphertext.into(),
+    })
+}
+
+/// 要求・応答の`aad`（設定されたnetworkと自分のprincipalを束縛する）。
+fn envelope_aad(
+    method: &str,
+    caller: Principal,
+    request_id: &[u8; 32],
+    expires_at: u64,
+    network: &str,
+) -> Result<Vec<u8>, ErrorCode> {
+    let canister = ic_cdk::api::canister_self();
+    let canister = canister.as_slice();
+    Ok(hpke_envelope::envelope_aad(
+        network,
+        canister,
+        method,
+        caller.as_slice(),
+        request_id,
+        expires_at,
+    ))
+}
+
+/// 設定されたnetwork名（封筒の束縛に使う。未設定はfail-closed）。
+fn network_name() -> Result<String, ErrorCode> {
+    db::tx::query(db::repo::core_config::market_context)
+        .map_err(map_db)?
+        .map(|(network, _)| network)
+        .ok_or(ErrorCode::PolicyUnavailable)
+}
+
+/// 封筒の`Network`と設定値の対応。
+fn network_matches(network: api_types::Network, name: &str) -> bool {
+    matches!(
+        (network, name),
+        (api_types::Network::Local, "local")
+            | (api_types::Network::Testnet, "testnet")
+            | (api_types::Network::Mainnet, "mainnet")
+    )
+}
+
+/// `raw_rand`から32バイトを取る。
+async fn raw_rand32() -> Result<[u8; 32], ErrorCode> {
+    let bytes = ic_cdk_management_canister::raw_rand()
+        .await
+        .map_err(|error| internal(format!("raw_rand failed: {error}")))?;
+    bytes
+        .get(..32)
+        .ok_or_else(|| internal("raw_rand too short".to_string()))?
+        .try_into()
+        .map_err(|_| internal("raw_rand length".to_string()))
+}
+
+/// セッションを検証し、本人のuser_idを返す（認可境界の試験用）。///
 /// vaultに問い合わせ、返却されたprincipalが「このメッセージのcaller」と一致する場合だけ
 /// user_idを返す。順序を逆にしない（callerを信用しない）。
 #[ic_cdk::update]
@@ -225,6 +422,19 @@ async fn submit_order(
     args: api_types::order::SubmitOrderArgs,
 ) -> Result<api_types::order::SubmitOrderResult, ErrorCode> {
     let user_id = authorize(&session).await?;
+    submit_inner(&session, user_id, args).await
+}
+
+/// 認可済みの受付（`submit_order`・決済の共通経路）。
+///
+/// 検証・冪等性・リスク予約・`pending`注文の登録を行う。`reduce_only`は
+/// 新規リスクを増やさないため、リスク予約と鮮度ゲートの対象外とする
+/// （建玉があるときに保護・決済を打てなくなる方が危険である）。
+async fn submit_inner(
+    session: &SessionHandle,
+    user_id: [u8; 32],
+    args: api_types::order::SubmitOrderArgs,
+) -> Result<api_types::order::SubmitOrderResult, ErrorCode> {
     let now = ic_cdk::api::time() / 1_000_000;
 
     // 銘柄は初期allowlistのみ。asset indexはmetaから解決する（固定値を埋め込まない）。
@@ -283,15 +493,27 @@ async fn submit_order(
     // 数量・価格の精度を銘柄の `szDecimals` で検査する（HLはperpsで有効数字5桁まで、
     // 価格は 6-szDecimals 桁まで）。metaに無い場合は設定不備としてfail-closedで拒否する。
     let (asset_index, sz_decimals) = resolve_asset(&market)?;
-    quantity
-        .validate_precision(sz_decimals, 5)
-        .map_err(|error| bad(BadRequestCode::PrecisionExceeded, &error.to_string()))?;
+    // 数量は `szDecimals` まで。reduce-only（決済・保護）は建玉の数量をそのまま送れる
+    // 必要があるため桁数のみを検査する（有効数字の制限で決済不能にしない）。
+    let quantity_limit = if args.reduce_only { None } else { Some(5) };
+    match quantity_limit {
+        Some(max_significant) => quantity
+            .validate_precision(sz_decimals, max_significant)
+            .map_err(|error| bad(BadRequestCode::PrecisionExceeded, &error.to_string()))?,
+        None => {
+            if quantity.scale() > sz_decimals {
+                return Err(bad(
+                    BadRequestCode::PrecisionExceeded,
+                    "quantity exceeds the market scale",
+                ));
+            }
+        }
+    }
     if let Some(price) = &price {
         price
             .validate_precision(6u32.saturating_sub(sz_decimals), 5)
             .map_err(|error| bad(BadRequestCode::PrecisionExceeded, &error.to_string()))?;
     }
-
     // 本文fingerprint（受付の冪等性）。**本文全体**を含める。side・reduce_only・
     // leverage・kind を除くと、同一IDで反対売買やreduce_onlyを変えた再送が
     // 「同一本文」と誤判定され、黙って捨てられる。
@@ -306,13 +528,26 @@ async fn submit_order(
         api_types::order::OrderKind::LimitGtc => 2,
     });
     body.extend_from_slice(&args.leverage.unwrap_or(3).to_be_bytes());
+    // トリガの有無と内容も本文に含める（SL/TPだけを差し替えた再送を別本文とする）。
+    if let Some(trigger) = &args.trigger {
+        body.push(u8::from(matches!(
+            trigger.kind,
+            api_types::order::TriggerKind::StopLoss
+        )));
+        body.extend_from_slice(trigger.trigger_price.as_bytes());
+        body.push(u8::from(trigger.is_market));
+    }
     let fingerprint = body_fingerprint(&body);
 
-    let account_id = trading_account(&session).await?;
+    let account_id = trading_account(session).await?;
     // 取引所データが古い場合は新規リスクを増やさない（観測が無い口座は対象外）。
-    if let Some(observed) =
-        db::tx::query(|connection| db::repo::positions::latest_observed(connection, &account_id))
-            .map_err(map_db)?
+    // reduce-onlyはリスクを減らす方向にしか作用しないため、鮮度に関わらず受け付ける
+    // （建玉があるときに保護・決済を打てなくなる方が危険である）。
+    if !args.reduce_only
+        && let Some(observed) = db::tx::query(|connection| {
+            db::repo::positions::latest_observed(connection, &account_id)
+        })
+        .map_err(map_db)?
         && now.saturating_sub(observed) > STALE_DATA_MS
     {
         return Err(ErrorCode::NotAllowed {
@@ -320,9 +555,20 @@ async fn submit_order(
         });
     }
 
-    let notional = notional_micros(args.limit_price.as_deref().unwrap_or("0"), &args.quantity)?;
-    // リスク上限の判断に使う取引口座のequity（vaultが導出する残高）。
-    let equity = vault_trading_equity(&session).await?;
+    // SL/TPは建玉単位（positionTpsl）のreduce-only注文としてのみ受け付ける。
+    if let Some(trigger) = &args.trigger {
+        validate_trigger(&account_id, &market, &args, trigger, sz_decimals)?;
+    }
+
+    // 想定元本とequityは新規リスクの上限判断にのみ使う（reduce-onlyは予約しない）。
+    let (notional, equity) = if args.reduce_only {
+        (0, 0)
+    } else {
+        (
+            notional_micros(args.limit_price.as_deref().unwrap_or("0"), &args.quantity)?,
+            vault_trading_equity(session).await?,
+        )
+    };
 
     let cloid = ic_cdk_management_canister::raw_rand()
         .await
@@ -355,15 +601,19 @@ async fn submit_order(
         if db::repo::orders::pending_order_count(connection, &account_id)? >= MAX_PENDING_ORDERS {
             return Err(DbError::Invariant("too many pending orders"));
         }
-        // 予約済みリスクに今回の想定元本を足してもequityを超えないこと。
-        db::repo::orders::ensure_risk_within_equity(connection, &account_id, notional, equity)?;
-        db::repo::orders::reserve_risk(
-            connection,
-            &account_id,
-            args.client_request_id.as_ref(),
-            notional,
-            now,
-        )?;
+        // reduce-onlyはエクスポージャを増やさないため、リスク予約を取らない
+        // （予約すると建玉を閉じるための資金が無い状態で決済できなくなる）。
+        if !args.reduce_only {
+            // 予約済みリスクに今回の想定元本を足してもequityを超えないこと。
+            db::repo::orders::ensure_risk_within_equity(connection, &account_id, notional, equity)?;
+            db::repo::orders::reserve_risk(
+                connection,
+                &account_id,
+                args.client_request_id.as_ref(),
+                notional,
+                now,
+            )?;
+        }
         db::repo::orders::insert_pending_order(
             connection,
             &db::repo::orders::NewOrder {
@@ -383,6 +633,14 @@ async fn submit_order(
                 price: args.limit_price.clone(),
                 quantity: quantity.as_str().to_string(),
                 reduce_only: args.reduce_only,
+                trigger: args
+                    .trigger
+                    .as_ref()
+                    .map(|trigger| db::repo::orders::NewTrigger {
+                        kind: db::states::trigger_kind_str(trigger.kind).to_string(),
+                        price: trigger.trigger_price.clone(),
+                        is_market: trigger.is_market,
+                    }),
             },
             now,
         )?;
@@ -417,6 +675,243 @@ async fn submit_order(
         cloid: accepted_cloid.to_vec().into(),
         accepted_at: now,
     })
+}
+
+/// 建玉を閉じる（全量または比率指定）。反対売買のreduce-only IOC指値として受付ける。
+///
+/// `limit_price`はスリッページ上限（公開市況から画面が決める）。省略時は観測した
+/// 建玉からmark価格を近似して`DEFAULT_SLIPPAGE_BPS`の幅を付ける。
+/// `ratio_bps`は建玉に対する比率（10000 = 全量）。
+#[ic_cdk::update]
+async fn close_position(
+    session: SessionHandle,
+    client_request_id: api_types::Blob,
+    market: String,
+    ratio_bps: u32,
+    limit_price: Option<String>,
+) -> Result<api_types::order::SubmitOrderResult, ErrorCode> {
+    let user_id = authorize(&session).await?;
+    let account_id = trading_account(&session).await?;
+    let market = market.to_uppercase();
+    let position = open_position(&account_id, &market)?;
+    let args = close_order_args(
+        &session,
+        &account_id,
+        client_request_id.as_ref().to_vec(),
+        &position,
+        ratio_bps,
+        limit_price,
+    )?;
+    submit_inner(&session, user_id, args).await
+}
+
+/// 建玉をすべて閉じる（建玉ごとに`close_position`と同じ反対売買を送る）。
+///
+/// 1件の失敗で全体を止めない（建玉ごとの結果を返す）。受付IDは
+/// `client_request_id`と銘柄から導出するため、同じIDの再送は同じ注文として扱われる
+/// （建玉が変わっている場合は`IdempotencyConflict`になる）。
+#[ic_cdk::update]
+async fn close_all(
+    session: SessionHandle,
+    client_request_id: api_types::Blob,
+) -> Result<api_types::order::CloseAllOutcome, ErrorCode> {
+    let user_id = authorize(&session).await?;
+    let account_id = trading_account(&session).await?;
+    let positions = db::tx::query(|connection| db::repo::positions::list(connection, &account_id))
+        .map_err(map_db)?;
+
+    let mut outcome = api_types::order::CloseAllOutcome {
+        submitted: Vec::new(),
+        failed: Vec::new(),
+    };
+    for position in positions {
+        if !is_open_size(&position.size) {
+            continue;
+        }
+        // 銘柄ごとに決定的な受付IDを作り、再送を冪等にする。
+        let mut seed = client_request_id.as_ref().to_vec();
+        seed.extend_from_slice(b"close_all");
+        seed.extend_from_slice(position.market.as_bytes());
+        let request_id = body_fingerprint(&seed).to_vec();
+        let result =
+            match close_order_args(&session, &account_id, request_id, &position, 10_000, None) {
+                Ok(args) => submit_inner(&session, user_id, args).await,
+                Err(error) => Err(error),
+            };
+        match result {
+            Ok(result) => outcome.submitted.push(result),
+            Err(error) => outcome.failed.push(api_types::order::CloseFailure {
+                market: position.market,
+                error,
+            }),
+        }
+    }
+    Ok(outcome)
+}
+
+/// 建玉の数量が0でない（建玉が開いている）。
+fn is_open_size(size: &str) -> bool {
+    size.chars()
+        .any(|character| character.is_ascii_digit() && character != '0')
+}
+
+/// 口座の開いている建玉（無ければ拒否）。
+fn open_position(
+    account_id: &[u8; 32],
+    market: &str,
+) -> Result<api_types::order::PositionView, ErrorCode> {
+    let position =
+        db::tx::query(|connection| db::repo::positions::find(connection, account_id, market))
+            .map_err(map_db)?
+            .ok_or(ErrorCode::NotAllowed {
+                code: api_types::error::NotAllowedCode::OperationNotAvailable,
+            })?;
+    if !is_open_size(&position.size) {
+        return Err(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::OperationNotAvailable,
+        });
+    }
+    Ok(position)
+}
+
+/// 決済注文（反対売買のreduce-only IOC指値）を組み立てる。
+///
+/// 数量は建玉数量×比率を銘柄の`szDecimals`で切り捨てる（建玉を超えない）。
+/// 価格は呼び出し元の指定（公開市況から決めるスリッページ上限）を優先し、
+/// 省略時は観測した建玉からmark価格を近似する。
+fn close_order_args(
+    session: &SessionHandle,
+    account_id: &[u8; 32],
+    client_request_id: Vec<u8>,
+    position: &api_types::order::PositionView,
+    ratio_bps: u32,
+    limit_price: Option<String>,
+) -> Result<api_types::order::SubmitOrderArgs, ErrorCode> {
+    if ratio_bps == 0 || ratio_bps > 10_000 {
+        return Err(bad(
+            BadRequestCode::QuantityOutOfRange,
+            "ratio must be within 1..=10000 bps",
+        ));
+    }
+    let market = position.market.to_uppercase();
+    let (_, sz_decimals) = resolve_asset(&market)?;
+    let is_long = !position.size.starts_with('-');
+    let size_micros = signed_micros(&position.size)?;
+    let magnitude = size_micros.unsigned_abs();
+    // `szDecimals`より細かい桁は送れないため、切り捨てる（建玉を超えない方向）。
+    let step = if sz_decimals >= 6 {
+        1u128
+    } else {
+        10u128.pow(6 - sz_decimals)
+    };
+    let quantity_micros = magnitude * u128::from(ratio_bps) / 10_000 / step * step;
+    if quantity_micros == 0 {
+        return Err(bad(
+            BadRequestCode::QuantityOutOfRange,
+            "the position is too small to close at this ratio",
+        ));
+    }
+    let quantity = micros_to_decimal(quantity_micros);
+
+    let price = match limit_price {
+        Some(price) => price,
+        None => slippage_bounded_price(position, is_long, sz_decimals)?,
+    };
+    Ok(api_types::order::SubmitOrderArgs {
+        session: session.clone(),
+        client_request_id: client_request_id.into(),
+        account_id: account_id.to_vec().into(),
+        market,
+        side: if is_long {
+            api_types::order::Side::Sell
+        } else {
+            api_types::order::Side::Buy
+        },
+        kind: api_types::order::OrderKind::MarketIoc,
+        quantity,
+        limit_price: Some(price),
+        slippage_tolerance_bps: Some(DEFAULT_SLIPPAGE_BPS),
+        reduce_only: true,
+        leverage: None,
+        trigger: None,
+        expires_after: None,
+    })
+}
+
+/// 観測した建玉からスリッページ上限つきのIOC指値を作る。
+///
+/// mark価格は`entry_price + unrealized_pnl / size`で近似する（coreはmark配信を
+/// 持たない）。reduce-onlyでは価格はスリッページ上限としてのみ作用し、建玉を
+/// 反転できないため、近似でも安全側に働く。価格の桁は`szDecimals`に合わせて切り捨てる。
+fn slippage_bounded_price(
+    position: &api_types::order::PositionView,
+    is_long: bool,
+    sz_decimals: u32,
+) -> Result<String, ErrorCode> {
+    let entry = decimal_micros(&position.entry_price)?;
+    let size = signed_micros(&position.size)?;
+    if size == 0 {
+        return Err(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::OperationNotAvailable,
+        });
+    }
+    let adjustment = i128::from(position.unrealized_pnl)
+        .checked_mul(1_000_000)
+        .ok_or_else(|| internal("mark price overflow".to_string()))?
+        / size;
+    let mark = entry
+        .checked_add(adjustment)
+        .ok_or_else(|| internal("mark price overflow".to_string()))?;
+    let bounded = if is_long {
+        mark * i128::from(10_000 - DEFAULT_SLIPPAGE_BPS) / 10_000
+    } else {
+        mark * i128::from(10_000 + DEFAULT_SLIPPAGE_BPS) / 10_000
+    };
+    if bounded <= 0 {
+        return Err(bad(
+            BadRequestCode::PriceOutOfRange,
+            "cannot derive a positive limit price",
+        ));
+    }
+    let step = if sz_decimals >= 6 {
+        1u128
+    } else {
+        10u128.pow(sz_decimals)
+    };
+    // 売りの上限は切り捨て（弱気側）、買いの上限は切り上げ（スリッページ幅を狭めない）。
+    let micros = bounded.unsigned_abs();
+    let floored = micros / step * step;
+    let rounded = if is_long || floored == micros {
+        floored
+    } else {
+        floored + step
+    };
+    Ok(micros_to_decimal(rounded))
+}
+
+/// マイクロ単位の整数を正規化した十進文字列へ戻す（末尾ゼロを残さない）。
+fn micros_to_decimal(micros: u128) -> String {
+    let whole = micros / 1_000_000;
+    let fraction = micros % 1_000_000;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let mut text = format!("{fraction:06}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    format!("{whole}.{text}")
+}
+
+/// 符号付きの十進文字列をマイクロ（1e-6）単位へ変換する（丸めない）。
+///
+/// `decimal_micros`は整数部の符号だけを見るため`-0.02`の符号を落とす。
+/// 建玉の符号（ロング・ショート）を扱う経路ではこちらを使う。
+fn signed_micros(text: &str) -> Result<i128, ErrorCode> {
+    match text.strip_prefix('-') {
+        Some(magnitude) => Ok(-decimal_micros(magnitude)?),
+        None => decimal_micros(text),
+    }
 }
 
 /// Agent世代を要求する（**coreが鍵を導出・保管**し、vaultはmaster署名でアドレスを承認する）。
@@ -556,12 +1051,25 @@ fn ecdsa_key_id() -> EcdsaKeyId {
     }
 }
 
-/// 注文の取消を要求する（署名・送信はパイプラインが行う）。
+/// 注文の取消を要求する（**封筒必須**。署名・送信はパイプラインが行う）。
 ///
-/// 受付と同様に冪等で、既に取消要求済み・終端状態なら何もしない。
+/// 認証は封筒の`aad`と本文のセッションで行う（`api-contract.md` 6節）。
 #[ic_cdk::update]
-async fn cancel_order(session: SessionHandle, order_id: api_types::Blob) -> Result<(), ErrorCode> {
-    let user_id = authorize(&session).await?;
+async fn cancel_order(
+    envelope: api_types::envelope::HpkeRequest,
+) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
+    let (query, request_id, caller) =
+        open_envelope::<api_types::envelope::CancelOrderQuery>(&envelope, "cancel_order").await?;
+    cancel_order_inner(&query.session, query.order_id).await?;
+    seal_envelope(&envelope, "cancel_order", &request_id, caller, &()).await
+}
+
+/// 取消の本体（受付と同様に冪等で、既に取消要求済み・終端状態なら何もしない）。
+async fn cancel_order_inner(
+    session: &SessionHandle,
+    order_id: api_types::Blob,
+) -> Result<(), ErrorCode> {
+    let user_id = authorize(session).await?;
     let now = ic_cdk::api::time() / 1_000_000;
     let order_id: [u8; 32] = order_id.as_ref().try_into().map_err(|_| {
         bad(
@@ -608,16 +1116,23 @@ async fn cancel_all(session: SessionHandle) -> Result<u64, ErrorCode> {
     .map_err(map_db)
 }
 
-/// 約定一覧（新しい順）。
-///
-/// 認可にvaultへの問い合わせが必要なためupdateで提供する。
+/// 約定一覧（新しい順。**封筒必須**。認可にvaultへの問い合わせが必要なためupdate）。
 #[ic_cdk::update]
 async fn list_fills(
-    session: SessionHandle,
+    envelope: api_types::envelope::HpkeRequest,
+) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
+    let (query, request_id, caller) =
+        open_envelope::<api_types::envelope::ListQuery>(&envelope, "list_fills").await?;
+    let page = fills_page(&query.session, query.cursor, query.limit).await?;
+    seal_envelope(&envelope, "list_fills", &request_id, caller, &page).await
+}
+
+async fn fills_page(
+    session: &SessionHandle,
     cursor: Option<api_types::Blob>,
     limit: u32,
 ) -> Result<api_types::Paged<api_types::order::FillView>, ErrorCode> {
-    let user_id = authorize(&session).await?;
+    let user_id = authorize(session).await?;
     let limit = limit.clamp(1, 100);
     let now = ic_cdk::api::time() / 1_000_000;
     let before = match cursor.as_ref() {
@@ -648,15 +1163,30 @@ async fn list_fills(
     })
 }
 
-/// 口座snapshot（残高はvault、注文はcore）。
-///
-/// 認可にvaultへの問い合わせが必要なためupdateで提供する。
+/// 口座snapshot（残高はvault、注文はcore。**封筒必須**）。
 #[ic_cdk::update]
 async fn get_account_snapshot(
-    session: SessionHandle,
+    envelope: api_types::envelope::HpkeRequest,
+) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
+    let (query, request_id, caller) =
+        open_envelope::<api_types::envelope::SnapshotQuery>(&envelope, "get_account_snapshot")
+            .await?;
+    let snapshot = account_snapshot(&query.session).await?;
+    seal_envelope(
+        &envelope,
+        "get_account_snapshot",
+        &request_id,
+        caller,
+        &snapshot,
+    )
+    .await
+}
+
+async fn account_snapshot(
+    session: &SessionHandle,
 ) -> Result<api_types::order::AccountSnapshot, ErrorCode> {
-    let user_id = authorize(&session).await?;
-    let account_id = trading_account(&session).await?;
+    let user_id = authorize(session).await?;
+    let account_id = trading_account(session).await?;
     let now = ic_cdk::api::time() / 1_000_000;
 
     let vault = vault_principal()?;
@@ -707,6 +1237,7 @@ async fn get_account_snapshot(
                     venue_state: None,
                     hl_oid: order.hl_oid,
                     cancel_requested: order.cancel_requested,
+                    trigger: order.trigger.clone(),
                     updated_at: order.updated_at,
                 });
             }
@@ -744,7 +1275,7 @@ async fn get_account_snapshot(
     })
 }
 
-/// 注文一覧（新しい順）。
+/// 注文一覧（新しい順。**封筒必須**）。
 ///
 /// **updateである理由**：認可に `funds_vault` へのinter-canister呼び出しが必要だが、
 /// queryでは他Canisterを呼べない。最終設計では、(a) 個人向け読み取りをupdateのまま
@@ -752,11 +1283,20 @@ async fn get_account_snapshot(
 /// （`docs/phase-1/README.md` の残課題）。
 #[ic_cdk::update]
 async fn list_orders(
-    session: SessionHandle,
+    envelope: api_types::envelope::HpkeRequest,
+) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
+    let (query, request_id, caller) =
+        open_envelope::<api_types::envelope::ListQuery>(&envelope, "list_orders").await?;
+    let page = orders_page(&query.session, query.cursor, query.limit).await?;
+    seal_envelope(&envelope, "list_orders", &request_id, caller, &page).await
+}
+
+async fn orders_page(
+    session: &SessionHandle,
     cursor: Option<api_types::Blob>,
     limit: u32,
 ) -> Result<api_types::Paged<api_types::order::OrderSummary>, ErrorCode> {
-    let user_id = authorize(&session).await?;
+    let user_id = authorize(session).await?;
     let limit = limit.clamp(1, 100);
     let now = ic_cdk::api::time() / 1_000_000;
 
@@ -949,6 +1489,105 @@ fn resolve_asset(market: &str) -> Result<(u32, u32), ErrorCode> {
     })
 }
 
+/// SL/TPトリガの受付検証（`docs/phase-0/api-contract.md` 3.1）。
+///
+/// 建玉単位（`positionTpsl`）の保護注文としてのみ受け付ける。
+/// - `reduce_only`必須（トリガで建玉を増やさない）。
+/// - トリガ価格は正で、価格と同じ精度条件に収まること。
+/// - 建玉が存在し、`side`がその建玉の反対売買であること（建玉の向きとの整合）。
+///
+/// 市場価格に対する上下（longのSLは下・TPは上）は検証しない。coreはmark価格を
+/// 持たず、entry価格で代用すると含み益のある建玉の逆指値を誤って拒否する。
+/// 上下の妥当性は取引所が最終的に判定する。
+fn validate_trigger(
+    account_id: &[u8; 32],
+    market: &str,
+    args: &api_types::order::SubmitOrderArgs,
+    trigger: &api_types::order::Trigger,
+    sz_decimals: u32,
+) -> Result<(), ErrorCode> {
+    if !args.reduce_only {
+        return Err(bad(
+            BadRequestCode::MissingField,
+            "trigger orders must be reduce-only",
+        ));
+    }
+    let trigger_price =
+        hl_types::decimal::Decimal::parse(&trigger.trigger_price).map_err(bad_decimal)?;
+    if trigger_price.as_str().starts_with('-') || trigger_price.as_str() == "0" {
+        return Err(bad(
+            BadRequestCode::PriceOutOfRange,
+            "trigger price must be positive",
+        ));
+    }
+    trigger_price
+        .validate_precision(6u32.saturating_sub(sz_decimals), 5)
+        .map_err(|error| bad(BadRequestCode::PrecisionExceeded, &error.to_string()))?;
+
+    let position = open_position(account_id, market)?;
+    let is_long = !position.size.starts_with('-');
+    let is_buy = matches!(args.side, api_types::order::Side::Buy);
+    if is_buy == is_long {
+        return Err(bad(
+            BadRequestCode::MalformedPayload,
+            "trigger side must reduce the position",
+        ));
+    }
+    Ok(())
+}
+
+/// 署名対象の`order` actionを組み立てる（通常注文・トリガ注文の共通経路）。
+///
+/// 実装は`test-venue`ビルドでのみ使う（本番の署名パイプラインは未実装）。
+/// トリガは建玉単位（`positionTpsl`）として送る（`docs/phase-0/api-contract.md` 3.1）。
+#[cfg(feature = "test-venue")]
+fn order_action(
+    order: &db::repo::orders::SignableOrder,
+    price: &str,
+) -> Result<hl_types::action::OrderAction, ErrorCode> {
+    let cloid = format!("0x{}", hex::encode(order.cloid));
+    let (order_type, grouping) = match &order.trigger {
+        Some(trigger) => {
+            let tpsl = match trigger.kind.as_str() {
+                "stop_loss" => hl_types::action::Tpsl::StopLoss,
+                "take_profit" => hl_types::action::Tpsl::TakeProfit,
+                other => return Err(internal(format!("unknown trigger kind: {other}"))),
+            };
+            (
+                hl_types::action::OrderType::Trigger(hl_types::action::TriggerOrder {
+                    is_market: trigger.is_market,
+                    trigger_price: hl_types::decimal::Decimal::parse(&trigger.price)
+                        .map_err(bad_decimal)?,
+                    tpsl,
+                }),
+                hl_types::action::Grouping::PositionTpsl,
+            )
+        }
+        None => (
+            hl_types::action::OrderType::Limit {
+                tif: if order.kind == "market_ioc" {
+                    hl_types::action::TimeInForce::Ioc
+                } else {
+                    hl_types::action::TimeInForce::Gtc
+                },
+            },
+            hl_types::action::Grouping::Na,
+        ),
+    };
+    Ok(hl_types::action::OrderAction {
+        orders: vec![hl_types::action::OrderRequest {
+            asset_index: order.asset_index,
+            is_buy: order.is_buy,
+            price: hl_types::decimal::Decimal::parse(price).map_err(bad_decimal)?,
+            size: hl_types::decimal::Decimal::parse(&order.quantity).map_err(bad_decimal)?,
+            reduce_only: order.reduce_only,
+            order_type,
+            cloid: Some(cloid),
+        }],
+        grouping,
+    })
+}
+
 /// テスト専用：注文actionへAgent鍵で署名する（`test-venue` featureでのみ存在）。
 ///
 /// 戻り値は `(署名対象ダイジェスト, 65バイト署名)`。署名経路の検証に使う。
@@ -967,29 +1606,13 @@ async fn test_sign_order_action(
         .map_err(map_db)?
         .ok_or_else(|| bad(BadRequestCode::MalformedPayload, "unknown order"))?;
 
-    let tif = if order.kind == "market_ioc" {
-        hl_types::action::TimeInForce::Ioc
-    } else {
-        hl_types::action::TimeInForce::Gtc
-    };
     let price = order.price.clone().ok_or_else(|| {
         bad(
             BadRequestCode::MissingField,
             "price is required for signing",
         )
     })?;
-    let action = hl_types::action::OrderAction {
-        orders: vec![hl_types::action::OrderRequest {
-            asset_index: order.asset_index,
-            is_buy: order.is_buy,
-            price: hl_types::decimal::Decimal::parse(&price).map_err(bad_decimal)?,
-            size: hl_types::decimal::Decimal::parse(&order.quantity).map_err(bad_decimal)?,
-            reduce_only: order.reduce_only,
-            order_type: hl_types::action::OrderType::Limit { tif },
-            cloid: Some(format!("0x{}", hex::encode(order.cloid))),
-        }],
-        grouping: hl_types::action::Grouping::Na,
-    };
+    let action = order_action(&order, &price)?;
     let msgpack = action.to_value().encode();
     let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
         action_msgpack: &msgpack,
@@ -1065,10 +1688,19 @@ enum ExchangeOutcome {
 /// 注文のaction JSON（HLの`/exchange`はJSON actionを取る）。
 #[cfg(feature = "test-venue")]
 fn order_action_json(order: &db::repo::orders::SignableOrder, price: &str) -> serde_json::Value {
-    let tif = if order.kind == "market_ioc" {
-        "Ioc"
-    } else {
-        "Gtc"
+    let order_type = match &order.trigger {
+        Some(trigger) => serde_json::json!({
+            "trigger": {
+                "isMarket": trigger.is_market,
+                "triggerPx": trigger.price,
+                "tpsl": if trigger.kind == "stop_loss" { "sl" } else { "tp" },
+            }
+        }),
+        None => serde_json::json!({
+            "limit": {
+                "tif": if order.kind == "market_ioc" { "Ioc" } else { "Gtc" },
+            }
+        }),
     };
     serde_json::json!({
         "type": "order",
@@ -1078,9 +1710,9 @@ fn order_action_json(order: &db::repo::orders::SignableOrder, price: &str) -> se
             "p": price,
             "s": order.quantity,
             "r": order.reduce_only,
-            "t": { "limit": { "tif": tif } },
+            "t": order_type,
         }],
-        "grouping": "na",
+        "grouping": if order.trigger.is_some() { "positionTpsl" } else { "na" },
     })
 }
 
@@ -1095,23 +1727,7 @@ async fn sign_and_build(
             "price is required for signing",
         )
     })?;
-    let tif = if order.kind == "market_ioc" {
-        hl_types::action::TimeInForce::Ioc
-    } else {
-        hl_types::action::TimeInForce::Gtc
-    };
-    let action = hl_types::action::OrderAction {
-        orders: vec![hl_types::action::OrderRequest {
-            asset_index: order.asset_index,
-            is_buy: order.is_buy,
-            price: hl_types::decimal::Decimal::parse(&price).map_err(bad_decimal)?,
-            size: hl_types::decimal::Decimal::parse(&order.quantity).map_err(bad_decimal)?,
-            reduce_only: order.reduce_only,
-            order_type: hl_types::action::OrderType::Limit { tif },
-            cloid: Some(format!("0x{}", hex::encode(order.cloid))),
-        }],
-        grouping: hl_types::action::Grouping::Na,
-    };
+    let action = order_action(order, &price)?;
     let msgpack = action.to_value().encode();
     let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
         action_msgpack: &msgpack,
@@ -1502,6 +2118,7 @@ async fn test_ingest_positions(
         .cloned()
         .unwrap_or_default();
     let mut count = 0;
+    let mut observed = Vec::new();
     for entry in entries {
         let Some(position) = entry.get("position") else {
             continue;
@@ -1547,12 +2164,14 @@ async fn test_ingest_positions(
             stop_loss: None,
             take_profit: None,
         };
-        db::tx::update(|connection| {
-            db::repo::positions::upsert(connection, &account_id, &view, now)
-        })
-        .map_err(map_db)?;
+        observed.push(view);
         count += 1;
     }
+    // 観測は建玉の全量であるため、消えた建玉（決済済み）を残さない。
+    db::tx::update(|connection| {
+        db::repo::positions::replace_all(connection, &account_id, &observed, now)
+    })
+    .map_err(map_db)?;
     Ok(count)
 }
 

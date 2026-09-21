@@ -1,9 +1,12 @@
-//! RFC 9180 HPKE（X25519 / HKDF-SHA256 / ChaCha20-Poly1305）の鍵導出。
+//! RFC 9180 HPKE（X25519 / HKDF-SHA256 / ChaCha20-Poly1305）の封筒。
 //!
 //! 監査実績のある実装（`hpke` crate）を使い、暗号プリミティブを自作しない
 //! （`Plan.md` 16.5）。鍵はcanisterではOS乱数が使えないため `raw_rand` から
 //! 入力鍵材料（IKM）として渡す。暗号化秘密鍵は公開queryへ出さない。
-#![allow(dead_code)]
+//!
+//! `funds_vault` と `trading_core` が同じ封筒を使うための共有クレートである
+//! （`docs/phase-0/api-contract.md` 6節）。
+#![forbid(unsafe_code)]
 
 use core::convert::Infallible;
 use hpke::rand_core::{TryCryptoRng, TryRng};

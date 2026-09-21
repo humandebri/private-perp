@@ -718,7 +718,7 @@ dependencies = [
  "hex",
  "hl-sign",
  "hl-types",
- "hpke",
+ "hpke-envelope",
  "ic-cdk",
  "ic-cdk-management-canister",
  "ic-sqlite-vfs",
@@ -933,6 +933,14 @@ dependencies = [
  "subtle",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "hpke-envelope"
+version = "0.1.0"
+dependencies = [
+ "hl-sign",
+ "hpke",
 ]
 
 [[package]]
@@ -1684,7 +1692,9 @@ dependencies = [
  "candid",
  "hex",
  "hl-sign",
+ "hl-types",
  "hpke",
+ "hpke-envelope",
  "pocket-ic",
  "rand_core",
  "serde",
@@ -2805,8 +2815,10 @@ dependencies = [
  "hex",
  "hl-sign",
  "hl-types",
+ "hpke-envelope",
  "ic-cdk",
  "ic-cdk-management-canister",
+ "serde",
  "serde_json",
 ]
 

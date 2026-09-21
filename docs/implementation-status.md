@@ -28,7 +28,7 @@
 
 - 当時の残件だった `db` のスキーマ・Migration・複式台帳・予約・nonce・epoch CAS、`funds_vault` の認証・outbox・HPKE・API、`trading_core` の注文パイプラインとモックHL照合、`control_guard` の7日猶予は、いずれも**実装・ローカル検証済み**。
 - ローカルECDSAスパイクは完了（`sign_with_ecdsa` のkey idは `test_key_1`）。PocketICの障害注入とT-xxx試験は一部実行済み（`docs/phase-0/threat-test-matrix.md`）。
-- **残る残件**：`control_guard` の一致実行のサイズ制約（実サイズwasmは単一ingressで送れない）、T-605（HPKE鍵更新中の受付・照合）、testnet往復と実測（別途の環境・承認が必要）、恒久エラー時の運用手順、heartbeatの失敗握り潰し。
+- **残る残件**：`control_guard` の一致実行のサイズ制約（実サイズwasmは単一ingressで送れない）、testnet往復と実測（別途の環境・承認が必要）、恒久エラー時の運用手順、heartbeatの失敗握り潰し。T-605（封筒の個人API適用）は2026-09-21に実装・ローカル検証済み（`docs/phase-2/README.md`）。
 
 ## Phase 0（契約・画面仕様・Rust雛形）
 
@@ -100,7 +100,7 @@ Canisterコードは `version` とDB初期化だけの雛形ではない（資�
 
 1. ~~Rust/PocketICでの資金・署名・認証の実装と検証~~ → ローカル範囲は完了。testnet検証が残る。
 2. Candid、network・Canister ID、本人認証・失効の実契約。
-3. 認証済みHPKE公開鍵の取得・鍵更新・要求と応答の暗号化仕様（鍵レジストリと封筒は実装済み。個人データAPIへの適用が残る）。
+3. ~~認証済みHPKE公開鍵の取得・鍵更新・要求と応答の暗号化仕様~~ → 鍵レジストリ・封筒・個人API4件（`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`）への適用まで実装・検証済み。`submit_order`等の書き込み系への適用はPhase 3で判断する。
 4. ~~注文・資金移動の照合fixtureと、unknownの回復契約~~ → outboxの照合と`unknown`解消を実装・検証済み。`orderStatus`照合の自動化が残る。
 5. HL公開市況の接続、口座状態・建玉・PnL・SL/TP・決済の接続。
 
@@ -115,7 +115,8 @@ Cloudflare公開、SNSローンチ、controller変更、ウォレット接続、
 ## Phase 1（S2・S3）のCanister実装状況（2026-09-21・ローカル検証）
 
 Canister側は「`version`とDB初期化だけの雛形」ではなくなった。資金層（S2）と統制（S3）のローカルで
-検証できる範囲が動作し、PocketICで**21ファイル・60試験すべて成功**している。ただし**Phase 1の
+検証できる範囲が動作し、PocketICで**26ファイル・75試験すべて成功**している（2026-09-21のPhase 2
+2C/2D/2EとT-605の追加後。Phase 1時点は21ファイル・60試験）。ただし**Phase 1の
 Go/No-Goは未合格**であり、testnet往復は未実施。
 
 ### 検証済み（証跡: `docs/phase-1/evidence/P1-001`〜`P1-010`）
@@ -131,16 +132,16 @@ Go/No-Goは未合格**であり、testnet往復は未実施。
 | HPKE（鍵世代の更新・公開鍵配布・封筒の往復・`aad`束縛） | 実装・検証済み | P1-007 |
 | `control_guard`（SNS限定・7日猶予・内容一致・迂回APIなし・同時実行の単一性） | 実装・検証済み（実サイズwasmの実行は下記制約で保留） | P1-009 |
 | `policy_registry`（fail-closed・停止方向のみ） | 実装・検証済み | P1-010 |
-| `trading_core`（認可境界・注文受付・Agent鍵署名・送信・取消送信・約定取り込み・`orderStatus`照合・snapshot・リスク予約） | 実装・検証済み | P1-008 |
+| `trading_core`（認可境界・注文受付・Agent鍵署名・送信・取消送信・約定取り込み・`orderStatus`照合・snapshot・リスク予約・SL/TP・全決済・個人API封筒） | 実装・検証済み | P1-008 |
 
 ローカルの閾値ECDSAはPocketICの**テスト用閾値鍵サブネット**で有効（key id `test_key_1`）。
 PocketIC上の署名往復は約17.9ms（本番subnetの性能値ではない）。
 
 ### 未解消・未検証（次段階）
 
-1. `trading_core`：受付（認可・冪等性・allowlist・meta添字）→ Agent鍵での署名 → `dispatching`永続化 → 非replicated送信 → 受理（`open`＋`oid`）／拒否／不明の分類、`get_account_snapshot`、約定の取り込み（`tid`で冪等）、`orderStatus`照合の反映、リスク予約、緊急停止中の受付拒否、入力検証、取消の送信まで検証済み。**残るのはSL/TP・全部決済と、`/info`搬送路に依存する照合の自動化。**
+1. `trading_core`：受付（認可・冪等性・allowlist・meta添字）→ Agent鍵での署名 → `dispatching`永続化 → 非replicated送信 → 受理（`open`＋`oid`）／拒否／不明の分類、`get_account_snapshot`、約定の取り込み（`tid`で冪等）、`orderStatus`照合の反映、リスク予約、緊急停止中の受付拒否、入力検証、取消の送信まで検証済み。SL/TP（`positionTpsl`・reduce-only）と全決済・部分決済（`close_position`・`close_all`）、個人APIの封筒必須化・鍵更新まで検証済み。**残るのは`/info`搬送路に依存する照合の自動化（SL/TPの実HL受理を含む）。**
 2. 2C：入金の受信側（搬送路を含む）、払出しの送信（`payout_settled`／拒否で解放＋逆仕訳／不明で保持）、`unknown`の照合解消、回収（recovery）の送信経路（取引口座のequityに対する予約と、受理・拒否・不明の分岐。`vault_recovery.rs`の3試験で確認）まで検証済み。**残るのは60秒timeoutの再現とtestnetでの実HL受理。**
-3. 個人データAPIへの封筒適用と応答暗号化、鍵更新中の扱い（**T-605**・未解消）。
+3. ~~個人データAPIへの封筒適用と応答暗号化、鍵更新中の扱い（T-605）~~ → 2026-09-21に解消（4メソッドの封筒必須化・`request_id`再送拒否・`aad`束縛・鍵更新で旧封筒を拒否。試験 `core_hpke.rs`）。残余：封印するのは`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`のみで、`submit_order`・`cancel_all`・`close_position`・`close_all`・`request_agent_generation`・`get_agent_status`は平文（セッション認可のみ）。
 4. `control_guard`の一致する実行：実行経路と同時実行の単一性は極小wasmで検証済み。ただし実サイズのwasmは `execute_upgrade` の引数として2 MiB上限を超えるため（実測2,193,336バイト）、チャンク導入かコードレジストリが必要（**未解消**）。
 5. 残りの失敗試験（T-401〜T-410等）と、Phase 1完了後の読み取り専用レビュー。
 6. 運用面の残件：**恒久エラー（ダイジェスト不一致等）発生時の運用手順**が未定義。heartbeatは失敗を `let _ =` で捨てており、署名・outcall・DBの失敗が無言で消える（**未解消**）。

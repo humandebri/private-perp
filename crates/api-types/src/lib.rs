@@ -7,6 +7,7 @@
 //! ロジックは置かず、型と定数だけを置く。
 
 pub mod auth;
+pub mod envelope;
 pub mod error;
 pub mod fund;
 pub mod guard;

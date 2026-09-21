@@ -12,8 +12,8 @@ use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
     FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, approve_agent_at_vault,
-    call_with_mocked_outcall, configure_policy, deploy, fund_trading_account, pic, principal,
-    query_args, update, update_args,
+    call_with_mocked_outcall, configure_policy, deploy, envelope, fund_trading_account, pic,
+    principal, query_args, rotate_hpke_key, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -121,6 +121,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -247,14 +248,9 @@ fn orders_are_accepted_idempotently_after_authorization() {
     );
 
     // 一覧は新しい順に返り、別principalのセッションでは取得できない。
-    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     let listed = listed.expect("list");
     assert_eq!(
         listed.items.len(),
@@ -267,12 +263,13 @@ fn orders_are_accepted_idempotently_after_authorization() {
     assert_eq!(listed.items[0].asset_index, 1, "metaの添字から解決");
     assert!(listed.next_cursor.is_none(), "上限未満ならカーソルなし");
 
-    let denied_list: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+    let denied_list: Result<api_types::Paged<OrderSummary>, ErrorCode> = envelope::list_orders(
         &pic,
         core,
         principal(113),
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
+        &session.clone(),
+        None::<Blob>,
+        10u32,
     )
     .expect("call");
     assert!(
@@ -281,55 +278,45 @@ fn orders_are_accepted_idempotently_after_authorization() {
     );
 
     // 取消要求は冪等で、他者の注文や不明なIDは拒否する。
-    let cancel: Result<(), ErrorCode> = update_args(
+    let cancel: Result<(), ErrorCode> = envelope::cancel_order(
         &pic,
         core,
         caller,
-        "cancel_order",
-        (session.clone(), accepted.order_id.clone()),
+        &session.clone(),
+        accepted.order_id.clone(),
     )
     .expect("call");
     cancel.expect("cancel");
 
-    let after_cancel: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let after_cancel: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     assert!(
         after_cancel.expect("list").items[0].cancel_requested,
         "取消要求が記録される"
     );
 
-    let again: Result<(), ErrorCode> = update_args(
+    let again: Result<(), ErrorCode> = envelope::cancel_order(
         &pic,
         core,
         caller,
-        "cancel_order",
-        (session.clone(), accepted.order_id.clone()),
+        &session.clone(),
+        accepted.order_id.clone(),
     )
     .expect("call");
     again.expect("cancel is idempotent");
 
-    let unknown: Result<(), ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "cancel_order",
-        (session.clone(), blob(&[9u8; 32])),
-    )
-    .expect("call");
+    let unknown: Result<(), ErrorCode> =
+        envelope::cancel_order(&pic, core, caller, &session.clone(), blob(&[9u8; 32]))
+            .expect("call");
     assert!(unknown.is_err(), "不明な注文は拒否する");
 
-    let other_cancel: Result<(), ErrorCode> = update_args(
+    let other_cancel: Result<(), ErrorCode> = envelope::cancel_order(
         &pic,
         core,
         principal(114),
-        "cancel_order",
-        (session.clone(), accepted.order_id.clone()),
+        &session.clone(),
+        accepted.order_id.clone(),
     )
     .expect("call");
     assert!(
@@ -377,6 +364,7 @@ fn core_derives_agent_keys_for_the_account() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
 
     let caller = principal(117);
     let session = open_session(&pic, vault, caller, &secret(183));
@@ -491,6 +479,7 @@ fn core_signs_orders_with_the_agent_key() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -600,6 +589,7 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -671,14 +661,9 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
     .expect("call");
     assert_eq!(swept.expect("sweep"), 1);
 
-    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     let listed = listed.expect("list");
     assert_eq!(listed.items[0].state, api_types::order::OrderState::Open);
     assert_eq!(listed.items[0].hl_oid, Some(12345));
@@ -771,6 +756,7 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -844,14 +830,9 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
     )
     .expect("call");
     assert_eq!(swept.expect("sweep"), 1);
-    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     assert_eq!(
         listed.expect("list").items[0].state,
         api_types::order::OrderState::Rejected
@@ -869,14 +850,9 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
     )
     .expect("call");
     assert_eq!(swept.expect("sweep"), 1);
-    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     let listed = listed.expect("list");
     assert_eq!(listed.items[0].state, api_types::order::OrderState::Unknown);
 
@@ -908,6 +884,7 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -959,7 +936,7 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
     submitted.expect("accepted order");
 
     let snapshot: Result<api_types::order::AccountSnapshot, ErrorCode> =
-        update(&pic, core, caller, "get_account_snapshot", session.clone()).expect("call");
+        envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
     let snapshot = snapshot.expect("snapshot");
     assert_eq!(snapshot.account_id.len(), 32);
     assert_eq!(
@@ -1001,6 +978,17 @@ fn fills_are_listed_only_for_the_authorized_caller() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    // 封筒はnetworkをaadへ束縛するため、market context（network・dex）も必要とする。
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .expect("call");
+    context.expect("set_market_context");
+    rotate_hpke_key(&pic, core, controller);
 
     let caller = principal(128);
     let session = open_session(&pic, vault, caller, &secret(188));
@@ -1016,26 +1004,23 @@ fn fills_are_listed_only_for_the_authorized_caller() {
         91,
     );
 
-    let fills: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_fills",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let fills: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> =
+        envelope::list_fills(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     let fills = fills.expect("fills");
     assert!(fills.items.is_empty(), "約定の取り込みは次段階（現状は空）");
 
     // 別principalは取得できない。
-    let denied: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> = update_args(
-        &pic,
-        core,
-        principal(129),
-        "list_fills",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let denied: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> =
+        envelope::list_fills(
+            &pic,
+            core,
+            principal(129),
+            &session.clone(),
+            None::<Blob>,
+            10u32,
+        )
+        .expect("call");
     assert!(
         matches!(denied, Err(ErrorCode::Unauthenticated { .. })),
         "{denied:?}"
@@ -1064,6 +1049,7 @@ fn fills_are_ingested_idempotently() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -1155,28 +1141,18 @@ fn fills_are_ingested_idempotently() {
     .expect("call");
     assert_eq!(again.expect("ingest"), 0, "同じtidは二重計上しない");
 
-    let listed: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_fills",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let listed: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> =
+        envelope::list_fills(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     let listed = listed.expect("fills");
     assert_eq!(listed.items.len(), 1);
     assert_eq!(listed.items[0].market, "ETH");
     assert_eq!(listed.items[0].quantity, "0.05");
     assert_eq!(listed.items[0].fee, 12);
 
-    let orders: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let orders: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     let orders = orders.expect("orders");
     assert_eq!(orders.items[0].state, api_types::order::OrderState::Filled);
     assert_eq!(orders.items[0].filled_quantity, "0.05");
@@ -1204,6 +1180,7 @@ fn order_status_updates_are_reflected() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -1287,14 +1264,9 @@ fn order_status_updates_are_reflected() {
     .expect("call");
     assert!(applied.expect("applied"), "既知のoidへ反映される");
 
-    let orders: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let orders: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     assert_eq!(
         orders.expect("orders").items[0].state,
         api_types::order::OrderState::Cancelled
@@ -1371,6 +1343,7 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     set.expect("set_vault_principal");
     // 停止状態とallowlistはpolicyへ照会する（未設定はfail-closed）ため、用意する。
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -1442,12 +1415,12 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     assert_eq!(swept.expect("sweep"), 1);
 
     // 取消を要求し、sweepで取引所へ送る。
-    let cancelled: Result<(), ErrorCode> = update_args(
+    let cancelled: Result<(), ErrorCode> = envelope::cancel_order(
         &pic,
         core,
         caller,
-        "cancel_order",
-        (session.clone(), submitted.order_id.clone()),
+        &session.clone(),
+        submitted.order_id.clone(),
     )
     .expect("call");
     cancelled.expect("cancel requested");
@@ -1465,14 +1438,9 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     .expect("call");
     assert_eq!(swept.expect("cancel sweep"), 1, "取消が送信される");
 
-    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     assert_eq!(
         listed.expect("orders").items[0].state,
         api_types::order::OrderState::Cancelled
@@ -1523,14 +1491,9 @@ fn a_cancellation_is_dispatched_to_the_venue() {
     .expect("call");
     assert_eq!(swept.expect("cancel sweep"), 1);
 
-    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "list_orders",
-        (session.clone(), None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
+            .expect("call");
     let listed = listed.expect("orders");
     assert!(
         listed
@@ -1565,6 +1528,7 @@ fn order_status_is_scoped_to_the_account() {
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
     configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
     let meta: Result<(), ErrorCode> = update_args(
         &pic,
         core,
@@ -1703,12 +1667,13 @@ fn order_status_is_scoped_to_the_account() {
     applied.expect("applied");
 
     // Aの注文はopenのまま、Bの注文だけがfilledになる。
-    let listed_a: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
+    let listed_a: Result<api_types::Paged<OrderSummary>, ErrorCode> = envelope::list_orders(
         &pic,
         core,
         caller_a,
-        "list_orders",
-        (session_a.clone(), None::<Blob>, 10u32),
+        &session_a.clone(),
+        None::<Blob>,
+        10u32,
     )
     .expect("call");
     let listed_a = listed_a.expect("orders");
@@ -1721,14 +1686,8 @@ fn order_status_is_scoped_to_the_account() {
         listed_a.items.iter().map(|o| o.state).collect::<Vec<_>>()
     );
 
-    let listed_b: Result<api_types::Paged<OrderSummary>, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller_b,
-        "list_orders",
-        (session_b, None::<Blob>, 10u32),
-    )
-    .expect("call");
+    let listed_b: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller_b, &session_b, None::<Blob>, 10u32).expect("call");
     let listed_b = listed_b.expect("orders");
     assert!(
         listed_b

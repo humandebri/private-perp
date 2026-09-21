@@ -213,9 +213,16 @@ type CancelAllArgs = record {
   market : opt variant { btc_perp; eth_perp };
   include_protective_orders : bool;   // true は確認画面を必須とする
 };
+
+type CloseAllOutcome = record {
+  submitted : vec SubmitOrderResult;
+  failed : vec record { market : text; error : ErrorCode };
+};
 ```
 
-- `close`（部分・全決済）は`submit_order`のreduce-only注文として送る。専用メソッドを設けない。
+- `trigger`は建玉単位の`positionTpsl`（`reduce_only`必須）としてのみ受け付ける。建玉が存在し、`side`がその建玉の反対売買であることを受付時に検査する。市場価格に対する上下（longのSLは下・TPは上）は、coreがmark価格を持たないため受付では検査せず、取引所の判定に委ねる。
+- `close`（部分・全決済）は反対売買のreduce-only注文として送る。`close_position`は比率（bps）指定で1件、`close_all`は建玉ごとに繰り返す（1件の失敗で全体を止めず、銘柄ごとの結果を返す）。決済の数量は建玉数量×比率を`szDecimals`で切り捨てる。価格は画面が公開市況から決めるスリッページ上限を渡す（省略時は観測した建玉からmark価格を近似する）。
+- `reduce_only`は新規リスクを増やさないため、リスク予約と取引所データの鮮度ゲートの対象外とする。緊急停止は操作種別を問わず新規受付を止める（停止中は決済も受け付けない）。
 - Cancel Allと建玉決済を同じ操作にしない。Cancel Allが保護用SL/TPも消す場合は、UIで明示した`include_protective_orders = true`を要求する。
 - MarketはHLのスリッページ上限付きIOC指値として構築する。板に残る注文として扱わない。
 - `expires_after`はactionの受付期限であり、板に残る注文の取消期限ではない（`state-machines.md` 4節）。
@@ -247,6 +254,7 @@ type OrderView = record {
   price : opt text; quantity : text; filled_quantity : text;
   state : OrderState; venue_state : opt text;
   hl_oid : opt nat64; cancel_requested : bool;
+  trigger : opt record { kind : variant { stop_loss; take_profit }; trigger_price : text; is_market : bool };
   updated_at : Timestamp;
 };
 
@@ -261,6 +269,7 @@ type OrderSummary = record {
   is_buy : bool; kind : text; price : opt text; quantity : text;
   filled_quantity : text; reduce_only : bool; state : OrderState;
   dispatch_state : ActionState; cancel_requested : bool; hl_oid : opt nat64;
+  trigger : opt record { kind : variant { stop_loss; take_profit }; trigger_price : text; is_market : bool };
   created_at : Timestamp; updated_at : Timestamp;
 };
 ```
@@ -268,15 +277,22 @@ type OrderSummary = record {
 | # | メソッド | 種別 | 冪等性キー |
 |---|---|---|---|
 | 12 | `submit_order` | update | `client_request_id` |
-| 13 | `cancel_order` | update | `client_request_id` |
+| 13 | `cancel_order` | update（封筒必須） | `client_request_id` |
 | 14 | `cancel_all` | update | `client_request_id` |
-| 15 | `get_account_snapshot` | query | なし |
-| 16 | `list_orders` | query | なし（カーソル） |
-| 17 | `list_fills` | query | なし（カーソル） |
+| 15 | `get_account_snapshot` | update（封筒必須） | なし |
+| 16 | `list_orders` | update（封筒必須） | なし（カーソル） |
+| 17 | `list_fills` | update（封筒必須） | なし（カーソル） |
+| 17a | `close_position` | update | `client_request_id` |
+| 17b | `close_all` | update | `client_request_id` |
+| 17c | `get_hpke_public_key` | query | なし |
+| 17d | `rotate_hpke_key` | update（controllerのみ） | なし |
 
-- `list_orders`は`Paged<OrderSummary>`（`dispatch_state`を含む）、`list_fills`は
+- `close_position`は`(session, client_request_id, market, ratio_bps, limit_price)`を取る。`limit_price`はスリッページ上限で、省略時は観測した建玉から導出する。
+- `close_all`は`(session, client_request_id)`を取り、建玉ごとに`client_request_id`から導出した受付IDで反対売買を送る。
+- `list_orders`は`Paged<OrderSummary>`（`dispatch_state`・`trigger`を含む）、`list_fills`は
   `Paged<FillView>`を返す。`FillView`は約定時刻・価格・数量・手数料・cloid・`hl_oid`を持つ。
 - 受付はHLの受理でも約定でもない。`submit_order`の応答は`queued`のみを返し、HL状態は`get_account_snapshot`または`list_orders`の照合結果で更新する（`Implementation.md` 6.3）。
+- 封筒必須のメソッドの要求・応答は6節の`HpkeRequest`・`HpkeResponse`で包む。平文はCandidで符号化した上記の引数（`session`とメソッド固有の引数）と応答値である。
 
 ## 4. control_guard
 
@@ -362,10 +378,13 @@ type HpkeResponse = record {
 };
 ```
 
-- 方式はRFC 9180 HPKE（X25519 / HKDF-SHA256 / ChaCha20-Poly1305）。監査実績のある実装を使い、プリミティブを自作しない。
+- 方式はRFC 9180 HPKE（X25519 / HKDF-SHA256 / ChaCha20-Poly1305）。監査実績のある実装を使い、プリミティブを自作しない。実装は共有クレート `crates/hpke-envelope`（`funds_vault` と `trading_core` が使う）。
+- `key_id`は現行世代の公開鍵そのもの（32バイト）とする。鍵は`rotate_hpke_key`（controllerのみ）で世代を進め、退役した世代の封筒は復号しない（クライアントは公開鍵を取得し直す）。
 - 公開鍵・key ID・期限はICの認証済み応答として取得し、クライアントが検証する。
-- 認証対象に`network`・`canister`・`method`・`caller`・`request_id`・期限を含め、別環境・別用途への再利用を拒否する。
-- HPKEは本人認証・再送防止の代わりではない。セッションと`request_id`の検証を別に行う。
+- 認証対象に`network`・`canister`・`method`・`caller`・`request_id`・期限を含め、別環境・別用途への再利用を拒否する。サーバは`aad`を再計算して一致を確認し、同じ値を復号にも使う（改竄は復号失敗になる）。
+- HPKEは本人認証・再送防止の代わりではない。セッションと`request_id`の検証を別に行う。`request_id`は復号に成功した要求について単回使用として記録し、再送を拒否する（`BadRequest.NonceReused`）。記録は期限切れで掃除するが、照合に使う観測データ（建玉・約定など）は期限だけでは破棄しない。
+- 要求の期限は`now`から300秒以内に限る。期限切れは`BadRequest.ExpiredIntent`で拒否する。
+- 適用範囲は`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`である。`submit_order`・`cancel_all`・`close_position`・`close_all`・`request_agent_generation`・`get_agent_status`への適用は未実施（Phase 3で判断する）。
 - セッション鍵・本人キャッシュをブラウザで永続化しない（`localStorage`・`IndexedDB`・Cookieを使わない）。
 - ブラウザのHL直結は公開市況チャネルのみとする。ユーザー系WS/REST、Agent承認、取引口座照合をブラウザからHLへ送らない。
 

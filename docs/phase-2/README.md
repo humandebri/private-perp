@@ -25,22 +25,29 @@
 ## Phase 2で扱わないもの
 Phase 3以降（複数ユーザー分離・負荷・backup復元・cycles通知・eligibility/監査/保持削除）、実資金・mainnet（E-2で**拒否**を試験）、Phase 1の細部（UIの磨き込み等）。ただし `reconcile_all` の固定窓（入金先が3件以上で古い口座が対象外）は実バグのためM3までに修正する。
 
-## 残りの実装（次セッションで着手）
+## 残りの実装（2026-09-21に1〜3を実装・ローカル検証済み）
 
-### 1. SL/TP（トリガー注文）
-- 型は `hl-types` に既存：`OrderType::Trigger(TriggerOrder { is_market, .., tpsl })`、`Tpsl::{NormalTpsl, PositionTpsl}`、`OrderRequest.reduce_only`。coreの`SubmitOrderArgs.trigger`は受け取れるが**未配線**。
-- 手順：(a) `orders`表へ `trigger_price TEXT`・`trigger_is_market INTEGER`・`trigger_tpsl TEXT` を追加（coreスキーマは未リリースなのでv6定義を編集可）。(b) `submit_order` の受付で `args.trigger` を検証（価格>0、SL/TPの向きと建玉の整合、reduce_only必須）。(c) `sign_and_build` の action 構築と JSON本文で `t: {"trigger": {...}}` を出す分岐。(d) 試験：SL付き注文の署名actionに `trigger` が入り、`orderStatus` 反映で状態が変わること。
-- 参照：`crates/db/src/schema/core.rs`、`crates/trading-core/src/lib.rs`（`submit_order`・`sign_and_build`）、`crates/hl-types/src/action.rs`。
+### 1. SL/TP（トリガー注文）— **完了**
+- `orders`表に`trigger_is_market`を追加し、`trigger_kind`・`trigger_price`と3列揃いのCHECKを付けた（`trigger_kind`が`tpsl`の役割を兼ねる）。`NewOrder`・`SignableOrder`・`OrderSummary`・`OrderView`まで配線した。
+- 受付検証（`submit_inner`）：`reduce_only`必須、トリガ価格の正値と精度（価格と同じ条件）、建玉の存在と`side`が建玉の反対売買であること。市場価格に対する上下は、coreがmark価格を持たないため受付では検査しない（取引所が最終判定）。
+- 署名action：`OrderType::Trigger`＋`Grouping::PositionTpsl`を`order_action`（msgpack用）と`order_action_json`（送信用JSON）の共通経路で出す。受付fingerprintにもトリガを含める。
+- 試験：`crates/pocket-ic-tests/tests/core_triggers.rs`（受付検証・署名actionの一致・送信本文・`orderStatus`反映）。
 
-### 2. 全決済・部分決済（reduce-only）
-- 手順：(a) `submit_order` の受付〜action作成〜署名を**内部ヘルパ `submit_inner(user_id, args)` に抽出**（現在は`submit_order`内に直書き）。(b) `close_position(session, market, ratio_bps)` を追加：`positions`の `size` を読み、符号で売買を決め、`reduce_only=true` の IOC 指値を `submit_inner` で送る。(c) `close_all(session)` は建玉ごとに繰り返す。(d) 試験：建玉取り込み→全決済で反対売買のreduce-only注文が出て、`orderStatus`/約定取り込みで建玉が0になること。
-- 参照：`crates/db/src/repo/positions.rs`、`crates/trading-core/src/lib.rs`。
+### 2. 全決済・部分決済（reduce-only）— **完了**
+- `submit_order`の受付〜登録を`submit_inner(user_id, args)`へ抽出した。
+- `close_position(session, client_request_id, market, ratio_bps, limit_price)`と`close_all(session, client_request_id)`を追加（`limit_price`はスリッページ上限。省略時は観測した建玉からmark価格を近似）。数量は建玉数量×比率を`szDecimals`で切り捨てる。
+- `reduce_only`はリスク予約と鮮度ゲートの対象外にした（建玉があるときに決済・保護を打てなくなる方が危険）。緊急停止は従来どおり決済も止める。
+- 建玉の取り込みを全量置換にした（決済済みの建玉が残らない）。`close_all`の受付IDは`client_request_id`と銘柄から導出する。
+- 試験：`crates/pocket-ic-tests/tests/core_close.rs`（反対売買・部分比率・全決済・送信と約定で建玉0）。
 
-### 3. HPKE封筒の個人API適用（T-605）
-- 現状：封筒（`seal`/`open`/`envelope_aad`）と鍵レジストリは **funds_vault のみ**（`crates/funds-vault/src/hpke.rs`）。coreには無い。
-- 手順：(a) **共有クレート `crates/hpke-envelope` を新設**し、`funds-vault`の封筒実装（`SeededRng`・`seal`・`open`・`envelope_aad`）を移設して`funds-vault`から再輸出（他canisterでも使えるようにする）。(b) coreへ `key_registry`（世代・秘密鍵・公開鍵、`raw_rand`由来）と `get_hpke_public_key` を追加。(c) 契約§6の `HpkeRequest`/`HpkeResponse` に沿って、個人API（`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`）を**封筒必須**にし、`request_id`再送拒否と`aad`（network/canister/method/caller/request_id/期限）を検証。(d) 試験：正しい封筒のみ通る・再利用拒否・`aad`改竄拒否・鍵更新中の挙動。
-- 参照：`docs/phase-0/api-contract.md` §6、`crates/funds-vault/src/hpke.rs`、`crates/trading-core/src/lib.rs`。
+### 3. HPKE封筒の個人API適用（T-605）— **完了**
+- 封筒実装を共有クレート `crates/hpke-envelope` へ移設し、`funds-vault`は再輸出、`trading-core`は同クレートを使う。
+- coreへ`hpke_keys`（v7）・`hpke_requests`（v8）を追加し、`rotate_hpke_key`（controllerのみ）と`get_hpke_public_key`を実装。
+- `get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`を**封筒必須**にした。`key_id`（現行公開鍵）・`network`・`canister`・`method`・`caller`・`request_id`・期限を束縛し、`aad`は再計算して一致を確認（改竄は復号失敗）。`request_id`は復号成功時に単回使用として記録し再送を拒否する。応答は`client_public_key`宛に封をする。
+- 未適用：`submit_order`・`cancel_all`・`close_position`・`close_all`・`request_agent_generation`・`get_agent_status`（契約§6の適用範囲を4メソッドとしたため）。
+- 試験：`crates/pocket-ic-tests/tests/core_hpke.rs`（正規の往復・期限・改竄・caller/canister/network/method束縛・request_id再利用拒否・鍵更新）。
 
 ### 実行上の注意（並行作業対策）
 - PocketICは必ずスクリプト経由：`POCKET_IC_TEST_DIR=$PWD/target/test-venue-mine bash scripts/pocket-ic-test.sh --test <name>`。
 - 素の `cargo test` は本番用wasm（feature無し）を読むため偽の失敗になる。
+- 封筒を使う試験は、controllerが `rotate_hpke_key` を呼んで鍵を生成しておく（未生成の個人APIはfail-closedで拒否する）。

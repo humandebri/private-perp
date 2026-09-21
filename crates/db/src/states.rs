@@ -4,7 +4,7 @@
 //! 1箇所にまとめ、`docs/phase-0/state-machines.md` の正準名からずれないようにする。
 
 use api_types::fund::{ActionState, FundRequestState};
-use api_types::order::OrderState;
+use api_types::order::{OrderState, TriggerKind};
 
 /// 資金要求の状態 → DB文字列。
 pub fn fund_request_state_str(state: FundRequestState) -> &'static str {
@@ -85,6 +85,23 @@ pub fn order_state_from_str(value: &str) -> Option<OrderState> {
     })
 }
 
+/// トリガ種別 → DB文字列。
+pub fn trigger_kind_str(kind: TriggerKind) -> &'static str {
+    match kind {
+        TriggerKind::StopLoss => "stop_loss",
+        TriggerKind::TakeProfit => "take_profit",
+    }
+}
+
+/// DB文字列 → トリガ種別。
+pub fn trigger_kind_from_str(value: &str) -> Option<TriggerKind> {
+    Some(match value {
+        "stop_loss" => TriggerKind::StopLoss,
+        "take_profit" => TriggerKind::TakeProfit,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +153,14 @@ mod tests {
             let text = order_state_str(state);
             assert_eq!(order_state_from_str(text), Some(state));
         }
+    }
+
+    #[test]
+    fn trigger_kinds_round_trip() {
+        for kind in [TriggerKind::StopLoss, TriggerKind::TakeProfit] {
+            let text = trigger_kind_str(kind);
+            assert_eq!(trigger_kind_from_str(text), Some(kind));
+        }
+        assert_eq!(trigger_kind_from_str("bogus"), None);
     }
 }

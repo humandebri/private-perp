@@ -100,13 +100,19 @@ CREATE TABLE orders (
     reduce_only INTEGER NOT NULL CHECK (reduce_only IN (0, 1)),
     trigger_kind TEXT CHECK (trigger_kind IN ('stop_loss', 'take_profit')),
     trigger_price TEXT,
+    trigger_is_market INTEGER CHECK (trigger_is_market IN (0, 1)),
     venue_state TEXT,
     state TEXT NOT NULL CHECK (state IN ('pending', 'open', 'partially_filled', 'filled', 'cancelled', 'rejected', 'unknown')),
     filled_quantity TEXT NOT NULL DEFAULT '0',
     hl_oid INTEGER,
     cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    -- トリガ（SL/TP）の列は3つ揃っているか、すべてNULLかのいずれかとする。
+    CHECK (
+        (trigger_kind IS NULL AND trigger_price IS NULL AND trigger_is_market IS NULL)
+        OR (trigger_kind IS NOT NULL AND trigger_price IS NOT NULL AND trigger_is_market IS NOT NULL)
+    )
 );
 
 CREATE INDEX orders_by_account ON orders (account_id, state, updated_at);
@@ -210,6 +216,30 @@ CREATE TABLE positions (
 );
 ";
 
+/// HPKEの鍵世代（`Plan.md` 16.5、`api-contract.md` 6節）。秘密鍵はcanister外へ出さない。
+const HPKE_KEYS: &str = "
+CREATE TABLE hpke_keys (
+    generation INTEGER PRIMARY KEY CHECK (generation > 0),
+    secret BLOB NOT NULL CHECK (length(secret) = 32),
+    public BLOB NOT NULL CHECK (length(public) = 32),
+    created_at INTEGER NOT NULL,
+    retired_at INTEGER
+);
+";
+
+/// 封筒の`request_id`の単回使用（再送拒否）。期限切れは随時掃除する。
+const HPKE_REQUESTS: &str = "
+CREATE TABLE hpke_requests (
+    request_id BLOB PRIMARY KEY NOT NULL CHECK (length(request_id) = 32),
+    method TEXT NOT NULL,
+    caller BLOB NOT NULL,
+    received_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX hpke_requests_by_expiry ON hpke_requests (expires_at);
+";
+
 /// `trading_core` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -235,5 +265,13 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 6,
         sql: POSITIONS,
+    },
+    Migration {
+        version: 7,
+        sql: HPKE_KEYS,
+    },
+    Migration {
+        version: 8,
+        sql: HPKE_REQUESTS,
     },
 ];

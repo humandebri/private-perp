@@ -60,6 +60,20 @@ pub struct SubmitOrderResult {
     pub accepted_at: Timestamp,
 }
 
+/// `close_all` の結果（建玉ごとの受付結果と、受付できなかった銘柄）。
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CloseAllOutcome {
+    pub submitted: Vec<SubmitOrderResult>,
+    pub failed: Vec<CloseFailure>,
+}
+
+/// 決済できなかった銘柄とその理由。
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CloseFailure {
+    pub market: String,
+    pub error: crate::error::ErrorCode,
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CancelOrderArgs {
     pub session: SessionHandle,
@@ -103,6 +117,8 @@ pub struct OrderView {
     pub venue_state: Option<String>,
     pub hl_oid: Option<u64>,
     pub cancel_requested: bool,
+    /// SL/TPトリガ（`None`は通常注文）。
+    pub trigger: Option<Trigger>,
     pub updated_at: Timestamp,
 }
 
@@ -188,6 +204,8 @@ pub struct OrderSummary {
     pub dispatch_state: ActionState,
     pub cancel_requested: bool,
     pub hl_oid: Option<u64>,
+    /// SL/TPトリガ（`None`は通常注文）。
+    pub trigger: Option<Trigger>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }

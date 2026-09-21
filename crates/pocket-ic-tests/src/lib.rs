@@ -6,6 +6,7 @@
 //!
 //! 本クレートはテスト専用であり、Canisterへは含めない。
 
+pub mod envelope;
 pub mod fixed_rng;
 
 use candid::{CandidType, Principal};
@@ -148,6 +149,16 @@ pub fn configure_policy(
         update(pic, core, controller, "set_policy_principal", policy).expect("call");
     result.expect("set_policy_principal");
     policy
+}
+
+/// 封筒を使う試験の前提：controllerがHPKE鍵を生成する（`api-contract.md` 6節）。
+///
+/// 鍵が無いと個人API（`get_account_snapshot`・`list_orders`・`list_fills`・
+/// `cancel_order`）はfail-closedで拒否する。
+pub fn rotate_hpke_key(pic: &PocketIc, canister: Principal, controller: Principal) -> Vec<u8> {
+    let key: Result<Vec<u8>, api_types::error::ErrorCode> =
+        update(pic, canister, controller, "rotate_hpke_key", ()).expect("call");
+    key.expect("rotate_hpke_key")
 }
 
 /// 取引口座を用意して着金させ、取引可能なequityを作る。

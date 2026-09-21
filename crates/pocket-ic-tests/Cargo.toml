@@ -10,6 +10,8 @@ description = "PocketICによるCanister統合・障害注入試験（テスト�
 api-types = { path = "../api-types" }
 hex.workspace = true
 hl-sign = { path = "../hl-sign" }
+hl-types = { path = "../hl-types" }
+hpke-envelope = { path = "../hpke-envelope" }
 candid.workspace = true
 pocket-ic.workspace = true
 serde.workspace = true
