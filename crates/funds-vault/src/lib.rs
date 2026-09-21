@@ -30,9 +30,7 @@ use candid::Principal;
 const MEMORY_ID: u8 = db::memory_id::FUNDS_VAULT_MAIN;
 
 thread_local! {
-    /// 直近のsweep時刻（heartbeatの間隔ゲート）。
-    static LAST_SWEEP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// 直近の入金照合時刻。
+    /// 直近の入金照合時刻（timerの起動間隔より長い周期で回すためのゲート）。
     static LAST_DEPOSIT_RECONCILE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -416,36 +414,36 @@ fn test_credit_deposit(
     fund::test_credit_deposit(&verified, amount, &event_id)
 }
 
-/// 未処理の資金actionを処理する（heartbeatから間隔を空けて呼ぶ）。
-#[ic_cdk::heartbeat]
-async fn heartbeat() {
-    let now = clock::now_ms();
-    let due = LAST_SWEEP.with(|cell| {
-        let previous = cell.get();
-        if now.saturating_sub(previous) < outbox::SWEEP_INTERVAL_MS {
-            false
-        } else {
-            cell.set(now);
-            true
-        }
-    });
-    if !due {
-        return;
-    }
-    let _ = outbox::sweep(now).await;
+/// 定期sweepの起動を予約する（本番のみ・5秒間隔）。
+///
+/// **heartbeatではなくグローバルtimer**を使う（heartbeatはメッセージが無くても
+/// 毎ラウンド呼ばれ、アイドル時もコストが乗る）。timerはアップグレードで失われる
+/// ため`init`と`post_upgrade`の両方で予約する。正しさは永続状態（actionの
+/// `queued`／`dispatching`と仕訳）が担保し、timerの継続には依存しない
+/// （`Implementation.md` 6.3、`state-machines.md` 5節）。
+#[cfg(not(feature = "test-venue"))]
+fn schedule_sweep() {
+    ic_cdk_timers::set_timer_interval(
+        core::time::Duration::from_millis(outbox::SWEEP_INTERVAL_MS),
+        || async {
+            let now = clock::now_ms();
+            // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
+            let _ = outbox::sweep(now).await;
 
-    // 入金の定期照合（60秒間隔・1回あたり2件まで。outcallの回数を抑える）。
-    let due_deposits = LAST_DEPOSIT_RECONCILE.with(|cell| {
-        if now.saturating_sub(cell.get()) < 60_000 {
-            false
-        } else {
-            cell.set(now);
-            true
-        }
-    });
-    if due_deposits {
-        let _ = deposits::reconcile_all(2).await;
-    }
+            // 入金の定期照合（60秒間隔・1回あたり2件まで。outcallの回数を抑える）。
+            let due_deposits = LAST_DEPOSIT_RECONCILE.with(|cell| {
+                if now.saturating_sub(cell.get()) < 60_000 {
+                    false
+                } else {
+                    cell.set(now);
+                    true
+                }
+            });
+            if due_deposits {
+                let _ = deposits::reconcile_all(2).await;
+            }
+        },
+    );
 }
 
 /// テスト専用のsweep（`test-venue` featureでのみ存在）。
@@ -725,11 +723,18 @@ fn init_db() {
 #[ic_cdk::init]
 fn init() {
     init_db();
+    // 試験ビルドでは自動sweepを組まない（PocketICの時刻前進で、試験が待つoutcallと
+    // 取り違えるため）。同じsweepを`test_sweep_now`で決定的に駆動する。
+    #[cfg(not(feature = "test-venue"))]
+    schedule_sweep();
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     init_db();
+    // グローバルtimerはアップグレードで失われるため予約し直す。
+    #[cfg(not(feature = "test-venue"))]
+    schedule_sweep();
 }
 
 ic_cdk::export_candid!();

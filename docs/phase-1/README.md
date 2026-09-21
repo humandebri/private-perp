@@ -93,7 +93,7 @@ outboxの証跡: `crates/pocket-ic-tests/tests/vault_outbox.rs`（**9件成功**
 - 個人データAPIへの封筒適用と鍵更新中の扱い（**T-605**・未解消）。
 - `control_guard` の一致する実行：実行経路と同時実行の単一性は極小wasmで検証済みだが、実サイズのwasmは `execute_upgrade` の引数上限（2 MiB）を超えるため、チャンク導入かコードレジストリが必要（実測2,193,336バイト・**未解消**）。
 - 残りの失敗試験（T-401〜T-410等）とPhase 1完了後の読み取り専用レビュー。
-- 恒久エラー（ダイジェスト不一致等）発生時の運用手順の定義、heartbeatの失敗握り潰しの解消（**未解消**）。
+- 恒久エラー（ダイジェスト不一致等）発生時の運用手順の定義、定期sweep（timer）の失敗握り潰しの解消（**未解消**）。
 - testnet：実HLの受理挙動、署名p50/p95、受付→HL受理、Confidential Subnetの成立性（**未検証**）。
 - CI（ubuntu）でのPocketIC実行はworkflow追加済み・**未実行**。
 
@@ -147,5 +147,5 @@ S1のコミット差分に対する読み取り専用レビューの指摘（P3�
 
 本ラウンドで解消した項目：回収（recovery）の送信経路、`unknown`解消の対象範囲（`dispatching`を含む）、入金照合の負値による全停止と巡回漏れ、T-102、challengeのprincipal束縛。
 
-未解消として残る項目：`control_guard`の一致実行のサイズ制約（実サイズwasmは2 MiB上限を超える）、T-605、testnet未検証、恒久エラー時の運用手順、heartbeatの失敗握り潰し。
+未解消として残る項目：`control_guard`の一致実行のサイズ制約（実サイズwasmは2 MiB上限を超える）、T-605、testnet未検証、恒久エラー時の運用手順、定期sweep（timer）の失敗握り潰し。
 

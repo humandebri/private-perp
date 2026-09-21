@@ -721,6 +721,7 @@ dependencies = [
  "hpke-envelope",
  "ic-cdk",
  "ic-cdk-management-canister",
+ "ic-cdk-timers",
  "ic-sqlite-vfs",
  "serde",
  "serde_json",

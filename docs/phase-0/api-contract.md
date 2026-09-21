@@ -176,6 +176,8 @@ type AgentRevocationRequest = record {
 - 失効世代の再利用を禁止する。停止・解除はCanisterが実行し、ユーザー自身のHL直接解除を保証しない。
 - builder feeを有効にする場合は別途`approveBuilderFee`を要求し、Agent承認と兼ねない（Phase 3-6）。
 
+- 資金actionの送信と入金の定期照合は、本番はグローバルtimer（`ic-cdk-timers`の`set_timer_interval`・5秒間隔。`init`／`post_upgrade`で再arm）で起動する。heartbeatは使わない（メッセージが無くても毎ラウンド呼ばれ、アイドル時もコストが乗るため）。永続状態（action・仕訳）が正本であり、timerの継続を正しさの前提にしない（失敗は次の起動で再試行し、`trading_core`は手動`sweep`でも再開できる）。
+
 ## 3. trading_core
 
 ### 3.1 注文
