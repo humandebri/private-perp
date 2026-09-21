@@ -513,8 +513,10 @@ pub fn ingest_fill(
     } = *fill;
     let order = connection
         .query_optional(
-            "SELECT order_id, quantity FROM orders WHERE hl_oid = ?1 LIMIT 1",
-            params![hl_oid as i64],
+            // 注文の所有者と一致する場合だけ取り込む（取引所のoidは口座ごとに採番される
+            // ため、oidだけで引くと他人の注文へ約定を計上し得る）。
+            "SELECT order_id, quantity FROM orders WHERE hl_oid = ?1 AND user_id = ?2 LIMIT 1",
+            params![hl_oid as i64, user_id.as_slice()],
             |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<String>(1)?)),
         )
         .map_err(sql)?;
@@ -559,17 +561,22 @@ pub fn ingest_fill(
     Ok(true)
 }
 
-/// `orderStatus`照合の結果を反映する（`hl_oid`で注文を引く）。
+/// `orderStatus`照合の結果を反映する（本人の口座の注文だけを `hl_oid` で引く）。
+///
+/// 取引所のoidは口座ごとに採番されるため、oidだけで更新すると他人の注文の状態を
+/// 書き換え得る。
 pub fn apply_order_status(
     connection: &mut UpdateConnection<'_>,
+    account_id: &[u8; 32],
     hl_oid: u64,
     state: &str,
     now: u64,
 ) -> Result<bool, Error> {
     connection
         .execute(
-            "UPDATE orders SET state = ?2, updated_at = ?3 WHERE hl_oid = ?1",
-            params![hl_oid as i64, state, now as i64],
+            "UPDATE orders SET state = ?3, updated_at = ?4
+              WHERE hl_oid = ?1 AND account_id = ?2",
+            params![hl_oid as i64, account_id.as_slice(), state, now as i64],
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;

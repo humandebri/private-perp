@@ -1286,6 +1286,8 @@ async fn test_apply_order_status(
     status_json: String,
 ) -> Result<bool, ErrorCode> {
     authorize(&session).await?;
+    // 本人の取引口座の注文だけを更新対象にする（oidは口座ごとに採番される）。
+    let account_id = trading_account(&session).await?;
     let value: serde_json::Value =
         serde_json::from_str(&status_json).map_err(|error| internal(error.to_string()))?;
     let status = value
@@ -1307,8 +1309,10 @@ async fn test_apply_order_status(
         _ => "unknown",
     };
     let now = ic_cdk::api::time() / 1_000_000;
-    db::tx::update(|connection| db::repo::orders::apply_order_status(connection, oid, state, now))
-        .map_err(map_db)
+    db::tx::update(|connection| {
+        db::repo::orders::apply_order_status(connection, &account_id, oid, state, now)
+    })
+    .map_err(map_db)
 }
 
 /// 取消actionをAgent鍵で署名して送信する（受理で`cancelled`へ）。
