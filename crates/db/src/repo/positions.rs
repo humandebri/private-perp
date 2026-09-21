@@ -84,13 +84,19 @@ pub fn latest_observed(
     connection: &Connection,
     account_id: &[u8; 32],
 ) -> Result<Option<u64>, Error> {
-    let value = connection
-        .query_optional_scalar::<i64>(
-            "SELECT MAX(observed_at) FROM positions WHERE account_id = ?1",
+    // NULLを取り得る集約は`Option<i64>`で読む（固定型だとNULLで型エラーになる）。
+    let row = connection
+        .query_optional(
+            "SELECT MAX(observed_at) FROM positions WHERE account_id = ?1 AND observed_at > 0",
             params![account_id.as_slice()],
+            |row| row.get::<Option<i64>>(0),
         )
         .map_err(sql)?;
-    value
-        .map(|value| u64::try_from(value).map_err(|_| Error::Invariant("negative time")))
-        .transpose()
+    match row.flatten() {
+        Some(value) if value > 0 => {
+            Some(u64::try_from(value).map_err(|_| Error::Invariant("negative time")))
+        }
+        _ => None,
+    }
+    .transpose()
 }

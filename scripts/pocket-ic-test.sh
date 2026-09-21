@@ -28,7 +28,18 @@ echo "pocket-ic-test: POCKET_IC_BIN=$POCKET_IC_BIN"
 # test-venue 付きのwasmを本番成果物と同じパス（target/wasm32-unknown-unknown/release）へ
 # 書かない。icp build / icp deploy が参照するwasmを試験用ビルドで汚さないため、
 # 試験用は target/test-venue 配下へ出す（crates/pocket-ic-tests が参照する）。
-test_venue_target="$repo_root/target/test-venue"
+# 同時実行（別セッションのビルド）と成果物を取り合わないよう直列化する。
+lock_dir="$repo_root/target/pocket-ic-test.lock.d"
+for _ in $(seq 1 120); do
+  if mkdir "$lock_dir" 2>/dev/null; then
+    trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
+    break
+  fi
+  sleep 5
+done
+
+# 別セッションと成果物を取り合わないよう、用途別のディレクトリを指定できる。
+test_venue_target="${POCKET_IC_TEST_DIR:-$repo_root/target/test-venue}"
 export POCKET_IC_WASM_DIR="$test_venue_target/wasm32-unknown-unknown/release"
 
 echo "pocket-ic-test: 本番feature無しのwasmをビルドします（デプロイ成果物の検査用）"

@@ -23,6 +23,9 @@ use ic_cdk_management_canister::{
 
 const MEMORY_ID: u8 = db::memory_id::TRADING_CORE_MAIN;
 
+/// 取引所データを「古い」とみなす閾値（ミリ秒）。
+const STALE_DATA_MS: u64 = 10_000;
+
 /// 1口座あたりの未終端注文（pending・open・partially_filled・unknown）の上限。
 const MAX_PENDING_ORDERS: u64 = 50;
 
@@ -306,6 +309,17 @@ async fn submit_order(
     let fingerprint = body_fingerprint(&body);
 
     let account_id = trading_account(&session).await?;
+    // 取引所データが古い場合は新規リスクを増やさない（観測が無い口座は対象外）。
+    if let Some(observed) =
+        db::tx::query(|connection| db::repo::positions::latest_observed(connection, &account_id))
+            .map_err(map_db)?
+        && now.saturating_sub(observed) > STALE_DATA_MS
+    {
+        return Err(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::OperationNotAvailable,
+        });
+    }
+
     let notional = notional_micros(args.limit_price.as_deref().unwrap_or("0"), &args.quantity)?;
     // リスク上限の判断に使う取引口座のequity（vaultが導出する残高）。
     let equity = vault_trading_equity(&session).await?;

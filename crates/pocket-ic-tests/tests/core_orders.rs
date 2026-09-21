@@ -682,6 +682,71 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
     let listed = listed.expect("list");
     assert_eq!(listed.items[0].state, api_types::order::OrderState::Open);
     assert_eq!(listed.items[0].hl_oid, Some(12345));
+    // 取引所データの鮮度：観測が新しければ新規リスクを受け付ける。
+    let state = r#"{"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","leverage":{"value":3}}}]}"#;
+    let ingested: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_positions",
+        (session.clone(), state.to_string()),
+    )
+    .expect("call");
+    ingested.expect("ingested");
+    let fresh: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"stale-fresh", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    fresh.expect("fresh data allows new risk");
+
+    // 11秒経過すると新規リスクを拒否する。
+    pic.advance_time(std::time::Duration::from_secs(11));
+    pic.tick();
+    let stale: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"stale-old", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    assert!(
+        matches!(stale, Err(ErrorCode::NotAllowed { .. })),
+        "古い観測では新規注文を拒否: {stale:?}"
+    );
+
+    // 再取り込みで新しくなれば再び受け付ける。
+    let refreshed: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_positions",
+        (session.clone(), state.to_string()),
+    )
+    .expect("call");
+    refreshed.expect("refreshed");
+    let again: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&session, b"stale-again", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("call");
+    again.expect("fresh data allows new risk again");
 }
 
 /// 取引所の拒否と応答喪失を正しく分類し、不明な注文は再送しない。
