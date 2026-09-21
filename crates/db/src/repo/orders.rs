@@ -467,13 +467,23 @@ pub fn mark_unknown(
 pub fn list_fills(
     connection: &Connection,
     user_id: &[u8; 32],
+    before_rowid: Option<i64>,
     limit: u32,
 ) -> Result<Vec<(i64, api_types::order::FillView)>, Error> {
     let rows = connection
         .query_all(
             "SELECT rowid, order_id, market, price, quantity, fee, filled_at
-               FROM fills WHERE user_id = ?1 ORDER BY rowid DESC LIMIT ?2",
-            params![user_id.as_slice(), limit as i64],
+               FROM fills
+              WHERE user_id = ?1 AND (?2 IS NULL OR rowid < ?2)
+              ORDER BY rowid DESC LIMIT ?3",
+            params![
+                user_id.as_slice(),
+                match before_rowid {
+                    Some(value) => ic_sqlite_vfs::db::Value::Integer(value),
+                    None => ic_sqlite_vfs::db::Value::Null,
+                },
+                limit as i64
+            ],
             |row| {
                 Ok((
                     row.get::<i64>(0)?,
