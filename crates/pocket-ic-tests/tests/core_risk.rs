@@ -141,7 +141,7 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[161u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[161u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -153,7 +153,7 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"risk-alloc"),
-            amount: 300_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },

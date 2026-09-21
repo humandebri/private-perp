@@ -150,7 +150,7 @@ fn invalid_orders_are_rejected_without_side_effects() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[171u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[171u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -162,7 +162,7 @@ fn invalid_orders_are_rejected_without_side_effects() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"validate-alloc"),
-            amount: 500_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },

@@ -173,7 +173,7 @@ fn a_stopped_policy_blocks_new_orders() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[151u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[151u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -185,7 +185,7 @@ fn a_stopped_policy_blocks_new_orders() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"stop-alloc"),
-            amount: 300_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },

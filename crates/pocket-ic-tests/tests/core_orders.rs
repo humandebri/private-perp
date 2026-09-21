@@ -140,7 +140,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[31u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[31u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -152,7 +152,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"alloc-for-orders"),
-            amount: 500_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
@@ -389,7 +389,7 @@ fn core_derives_agent_keys_for_the_account() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[41u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[41u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -401,7 +401,7 @@ fn core_derives_agent_keys_for_the_account() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"agent-alloc"),
-            amount: 100_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
@@ -533,7 +533,7 @@ fn core_signs_orders_with_the_agent_key() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[51u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[51u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -545,7 +545,7 @@ fn core_signs_orders_with_the_agent_key() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"sign-alloc"),
-            amount: 200_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
@@ -650,7 +650,7 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[61u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[61u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -662,7 +662,7 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"dispatch-alloc"),
-            amount: 300_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
@@ -764,7 +764,7 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[71u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[71u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -776,7 +776,7 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"outcome-alloc"),
-            amount: 400_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
@@ -909,7 +909,7 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[81u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[81u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -921,7 +921,7 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"snapshot-alloc"),
-            amount: 300_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
@@ -947,7 +947,7 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
     let snapshot = snapshot.expect("snapshot");
     assert_eq!(snapshot.account_id.len(), 32);
     assert_eq!(
-        snapshot.withdrawable, 700_000,
+        snapshot.withdrawable, 5_000_000_000,
         "vaultの出金可能額（入金1,000,000 − 予約300,000）"
     );
     assert_eq!(snapshot.equity, 0, "着金の確定前は取引口座に残高が無い");
@@ -985,7 +985,7 @@ fn fills_are_listed_only_for_the_authorized_caller() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 500_000u64, blob(&[91u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[91u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -997,7 +997,7 @@ fn fills_are_listed_only_for_the_authorized_caller() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"fills-alloc"),
-            amount: 100_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
@@ -1078,7 +1078,7 @@ fn fills_are_ingested_idempotently() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[111u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[111u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -1090,7 +1090,7 @@ fn fills_are_ingested_idempotently() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"fills-ingest-alloc"),
-            amount: 300_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
@@ -1226,7 +1226,7 @@ fn order_status_updates_are_reflected() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[121u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[121u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -1238,7 +1238,7 @@ fn order_status_updates_are_reflected() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"status-alloc"),
-            amount: 300_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
@@ -1401,7 +1401,7 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         vault,
         caller,
         "test_credit_deposit",
-        (session.clone(), 1_000_000u64, blob(&[211u8; 32])),
+        (session.clone(), 10_000_000_000u64, blob(&[211u8; 32])),
     )
     .expect("call");
     credit.expect("credit");
@@ -1413,7 +1413,7 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         AllocationRequest {
             session: session.clone(),
             client_request_id: blob(b"cancel-alloc"),
-            amount: 300_000,
+            amount: 5_000_000_000,
             target: AccountKind::Trading,
             intent_signature: None,
         },
