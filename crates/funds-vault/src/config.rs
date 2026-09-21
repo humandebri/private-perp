@@ -1,7 +1,7 @@
-//! 実行時設定。`docs/phase-0/environments.md` の分離に対応する。
+//! 実行時設定（TTL・上限）。`docs/phase-0/environments.md` の分離に対応する。
 //!
-//! 値は今のところビルド定数である。デプロイ時の上書き（canister環境変数）は
-//! アイデンティティ・鍵・endpointを扱う段階で導入する。ここへ秘密を置かない。
+//! network・HL endpoint・tECDSA key IDは**起動時の設定**として
+//! `crate::environment` が解決する（ビルド定数にしない。同4節）。ここへ秘密を置かない。
 
 use api_types::Network;
 
@@ -26,36 +26,18 @@ pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024;
 #[allow(dead_code)]
 pub const MAX_PAGE_SIZE: u32 = 100;
 
-/// 閾値ECDSAのkey id。PocketICでの実測で確定する（候補: `test_key_1`／`dfx_test_key`）。
-/// 本番は `key_1`（`pzp6e`）を使う。値は `docs/phase-0/environments.md` に記録する。
-pub const ECDSA_KEY_ID: &str = "test_key_1";
-
-/// Hyperliquidの`/exchange` endpoint（network別）。
-#[allow(dead_code)]
-pub const HL_EXCHANGE_URL: &str = "https://api.hyperliquid-testnet.xyz/exchange";
-
-/// EIP-712の`hyperliquidChain`値（ローカル・testnetは`Testnet`）。
-#[allow(dead_code)]
-pub const HL_CHAIN_NAME: &str = "Testnet";
-
-/// EIP-712の`signatureChainId`（16進、testnetは0x66eee）。
-#[allow(dead_code)]
-pub const HL_SIGNATURE_CHAIN_ID: &str = "0x66eee";
-
-/// Hyperliquidのuser-signed EIP-712に使うchain id（testnet/localは421614）。
-/// 払出しのwire payload構築（署名段階）で使う。
-#[allow(dead_code)]
-pub const HL_USER_SIGNED_CHAIN_ID: u64 = 421_614;
-
-/// 現在のnetwork。ローカル・testnet・mainnetを混同しないための識別子。
-#[allow(dead_code)]
-pub const NETWORK: Network = Network::Local;
-
 /// networkの識別子（EIP-712のメッセージへ入れる）。
+///
+/// 環境モデルの実装は `hl_types::environment` に置く（この関数は既存の呼び出し元の
+/// 便宜のための委譲）。
 pub const fn network_name(network: Network) -> &'static str {
+    hl_types::environment::network_name(convert_network(network))
+}
+
+const fn convert_network(network: Network) -> hl_types::Network {
     match network {
-        Network::Local => "local",
-        Network::Testnet => "testnet",
-        Network::Mainnet => "mainnet",
+        Network::Local => hl_types::Network::Local,
+        Network::Testnet => hl_types::Network::Testnet,
+        Network::Mainnet => hl_types::Network::Mainnet,
     }
 }

@@ -60,6 +60,82 @@ pub fn market_context(connection: &Connection) -> Result<Option<(String, String)
     }))
 }
 
+/// 環境設定（network・endpoint・key ID）の生の値。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EnvironmentRow {
+    pub network: Option<String>,
+    pub exchange_url: Option<String>,
+    pub info_url: Option<String>,
+    pub ecdsa_key_id: Option<String>,
+}
+
+/// 環境設定を読む（networkは`core_config`、endpointとkey IDは`core_environment`）。
+pub fn environment(connection: &Connection) -> Result<EnvironmentRow, Error> {
+    // NULLを取り得る列は`Option<String>`で読む（固定型だとNULLで型エラーになる）。
+    let network = connection
+        .query_optional(
+            "SELECT network FROM core_config WHERE singleton = 1",
+            params![],
+            |row| row.get::<Option<String>>(0),
+        )
+        .map_err(sql)?
+        .flatten();
+    let row = connection
+        .query_optional(
+            "SELECT exchange_url, info_url, ecdsa_key_id
+               FROM core_environment WHERE singleton = 1",
+            params![],
+            |row| {
+                Ok(EnvironmentRow {
+                    network: None,
+                    exchange_url: row.get::<Option<String>>(0)?,
+                    info_url: row.get::<Option<String>>(1)?,
+                    ecdsa_key_id: row.get::<Option<String>>(2)?,
+                })
+            },
+        )
+        .map_err(sql)?;
+    Ok(EnvironmentRow {
+        network,
+        ..row.unwrap_or_default()
+    })
+}
+
+/// HLのendpointを設定する（controllerのみ。検証は呼び出し側で行う）。
+pub fn set_venue_endpoints(
+    connection: &mut UpdateConnection<'_>,
+    exchange_url: &str,
+    info_url: &str,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "INSERT INTO core_environment (singleton, exchange_url, info_url, updated_at)
+             VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(singleton) DO UPDATE SET
+               exchange_url = excluded.exchange_url, info_url = excluded.info_url,
+               updated_at = excluded.updated_at",
+            params![exchange_url, info_url, now as i64],
+        )
+        .map_err(sql)
+}
+
+/// tECDSAのkey IDを設定する（controllerのみ。検証は呼び出し側で行う）。
+pub fn set_ecdsa_key_id(
+    connection: &mut UpdateConnection<'_>,
+    key_id: &str,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "INSERT INTO core_environment (singleton, ecdsa_key_id, updated_at) VALUES (1, ?1, ?2)
+             ON CONFLICT(singleton) DO UPDATE SET
+               ecdsa_key_id = excluded.ecdsa_key_id, updated_at = excluded.updated_at",
+            params![key_id, now as i64],
+        )
+        .map_err(sql)
+}
+
 /// 政策Canisterのprincipalを設定する（controllerのみが呼ぶ）。
 pub fn set_policy_principal(
     connection: &mut UpdateConnection<'_>,

@@ -7,6 +7,7 @@
 
 pub mod action;
 pub mod decimal;
+pub mod environment;
 pub mod msgpack;
 
 /// IC network。`docs/phase-0/environments.md` の環境分離の単位。

@@ -14,11 +14,6 @@ use ic_cdk_management_canister::{
     HttpHeader, HttpMethod, HttpRequest, HttpRequestResult, transform_context_from_query,
 };
 
-/// Hyperliquidの`/exchange`（testnet）。
-const EXCHANGE_URL: &str = "https://api.hyperliquid-testnet.xyz/exchange";
-/// Hyperliquidの`/info`（testnet）。
-const INFO_URL: &str = "https://api.hyperliquid-testnet.xyz/info";
-
 /// `/exchange`の応答本文の上限（生の本文+ヘッダを見込む）。
 const MAX_EXCHANGE_RESPONSE_BYTES: u64 = 8 * 1024;
 /// `userFills`の応答上限。
@@ -39,7 +34,8 @@ pub enum ExchangeOutcome {
 
 /// `/exchange`へ署名済みactionを送る（非replicated）。受理時は取引所のoidを返す。
 pub async fn post_exchange(body: &[u8]) -> Result<(ExchangeOutcome, Option<u64>), ErrorCode> {
-    let response = HttpRequest::new(EXCHANGE_URL)
+    let exchange_url = crate::environment::resolved()?.exchange_url;
+    let response = HttpRequest::new(&exchange_url)
         .with_method(HttpMethod::POST)
         .with_headers(vec![HttpHeader {
             name: "Content-Type".to_string(),
@@ -113,7 +109,8 @@ async fn fetch_info(
     query: serde_json::Value,
     max_response_bytes: u64,
 ) -> Result<String, ErrorCode> {
-    let response = HttpRequest::new(INFO_URL)
+    let info_url = crate::environment::resolved()?.info_url;
+    let response = HttpRequest::new(&info_url)
         .with_method(HttpMethod::POST)
         .with_headers(vec![HttpHeader {
             name: "Content-Type".to_string(),

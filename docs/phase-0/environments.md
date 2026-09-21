@@ -16,7 +16,7 @@
 |---|---|---|---|
 | IC network | `icp network start` のローカル（PocketICベース） | IC testnet（`ic` とは別の検証用） | IC mainnet |
 | Canister ID | `icp deploy` が動的割当。`.icp/data` に保持し**コミットしない** | **未確定**（Phase 1で払い出し後に記録） | **未確定**（本番前に記録） |
-| tECDSA key ID | local のテスト鍵 | `fuqsr` 上のテスト鍵。key ID名は**未確認**（`test_key_1` を第一候補） | `key_1`（subnet `pzp6e`、34ノード） |
+| tECDSA key ID | local のテスト鍵（既定 `test_key_1`） | `fuqsr` 上のテスト鍵。key ID名は**未確認**（`test_key_1` を第一候補。`set_ecdsa_key_id` で上書き） | `key_1`（subnet `pzp6e`、34ノード）。Phase 2では拒否 |
 | 署名subnet | local replica | `fuqsr` | `pzp6e`（fiduciary signing subnet） |
 | HL REST | mock HL（ローカル） | `https://api.hyperliquid-testnet.xyz` | `https://api.hyperliquid.xyz` |
 | HL WS（ブラウザ直結） | mock または未接続 | `wss://api.hyperliquid-testnet.xyz/ws` | `wss://api.hyperliquid.xyz/ws` |
@@ -58,10 +58,10 @@
 
 `Plan.md` 16.5、`ADR-0006` に基づく。Phase 1で実施する。
 
-| # | 分離試験 | 合格条件 |
-|---|---|---|
-| E-1 | mock eligibility tokenを本番相当の network・鍵・build設定で提示 | 拒否される |
-| E-2 | testnet用の設定で mainnet endpoint を指定 | 起動・受付が拒否されるか、明示的に失敗する |
+| # | 分離試験 | 合格条件 | 状態 |
+|---|---|---|---|
+| E-1 | mock eligibility tokenを本番相当の network・鍵・build設定で提示 | 拒否される | **未実施**（eligibility発行はPhase 3。tokenが存在しない） |
+| E-2 | testnet用の設定で mainnet endpoint を指定 | 起動・受付が拒否されるか、明示的に失敗する | **実装・検証済み**（`hl-types`のホスト試験＋`core_environment.rs`・`vault_environment.rs`） |
 | E-3 | HPKE要求の`aad`に別network・別canister・別method・別caller・別`request_id`・期限超過を混ぜる | すべて拒否される |
 | E-4 | 別環境で発行したセッション・challengeを再利用 | 拒否される（`NetworkMismatch`／`OriginMismatch`） |
 | E-5 | mock HL用のendpoint設定が本番ビルドへ混入 | ビルド時に検出され、そのままでは起動しない |
@@ -69,6 +69,14 @@
 
 - 環境判定はビルド時の設定ではなく、起動時に検証可能な値（network、canister、key ID、endpoint）で行う。
 - mock token・mock issuer・mock HLの設定は「開発用」と明示し、本番設定のテンプレートへコピーしない。
+
+### 4.1 起動時の環境設定（実装）
+
+- 値はビルド定数ではなく、canisterの設定（`funds_vault.vault_config`／`trading_core.core_config`）に持つ。設定は controller のみが変更できる（`funds_vault` は `set_network`・`set_venue_endpoints`・`set_ecdsa_key_id`、`trading_core` は `set_market_context`（network・dex）・`set_venue_endpoints`・`set_ecdsa_key_id`）。`get_environment` は公開の診断queryで、秘密を含まない。
+- 未設定は network 既定（`local`）とし、endpoint は network から解決する。**mainnet は Phase 2 では拒否**する（`mainnet_not_enabled`）。endpoint は network と整合する host のみ受け付ける（testnet → `api.hyperliquid-testnet.xyz`、local → ループバック等。**local の設定で実venueのhostを指定すると拒否**する）。
+- tECDSA key ID は network 既定（local・testnetは `test_key_1`）とし、testnet の実名が確定したら `set_ecdsa_key_id` で上書きする。mainnet の `key_1` はPhase 2では到達しない。
+- 検証は純粋クレート `hl-types::environment` に集約し、ホスト試験で固定する（mainnet拒否・host不一致・lookalike domain・key ID形式）。
+- E-5（mock endpointの本番混入）は、mock endpoint を**コードへ埋め込まない**（設定でのみ与える）ことで構造的に満たす。ローカルの既定はループバックであり、実venueへは出ない。
 
 ## 5. 設定の出所
 
@@ -79,6 +87,7 @@
 | identity・PEM | `icp identity` | しない |
 | network・root key | `icp network status --json` | しない |
 | 環境別の固定値（endpoint等） | `icp.yaml` の environments、またはcanister environment variables | する（秘密を含めない） |
+| 起動時の環境設定（network・endpoint・key ID） | canisterの設定（controller専用のsetter。`get_environment`で確認） | しない（値はデプロイ時に設定） |
 | 本番の実額上限・料金 | 事業判断の確定後 | する（確定後） |
 
 - ローカルのroot keyは明示的に選択したローカル環境でのみ使用する（`icp-cli` の原則）。

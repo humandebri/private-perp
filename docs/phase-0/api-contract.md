@@ -69,6 +69,10 @@ type Paged<T> = record {
 | 9 | `request_agent_generation` | update | 本人セッション | `client_request_id` |
 | 10 | `get_agent_status` | query | 本人セッション | なし |
 | 11 | `request_agent_revocation` | update | 本人セッション | `client_request_id` |
+| 11a | `set_network` | update | controllerのみ | なし（設定。冪等） |
+| 11b | `set_venue_endpoints` | update | controllerのみ | なし（設定。冪等） |
+| 11c | `set_ecdsa_key_id` | update | controllerのみ | なし（設定。冪等） |
+| 11d | `get_environment` | query | 公開（診断用。秘密を含まない） | なし |
 
 ### 2.1 認証
 
@@ -289,6 +293,9 @@ type OrderSummary = record {
 | 17c | `get_hpke_public_key` | query | なし |
 | 17d | `rotate_hpke_key` | update（controllerのみ） | なし |
 | 17e | `sweep` | update（controllerのみ） | なし（維持運用。冪等） |
+| 17f | `set_venue_endpoints` | update（controllerのみ） | なし（設定。冪等） |
+| 17g | `set_ecdsa_key_id` | update（controllerのみ） | なし（設定。冪等） |
+| 17h | `get_environment` | query | 公開（診断用。秘密を含まない） | なし |
 
 - `close_position`は`(session, client_request_id, market, ratio_bps, limit_price)`を取る。`limit_price`はスリッページ上限で、省略時は観測した建玉から導出する。
 - `close_all`は`(session, client_request_id)`を取り、建玉ごとに`client_request_id`から導出した受付IDで反対売買を送る。

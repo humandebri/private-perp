@@ -10,9 +10,6 @@ use db::error::Error as DbError;
 use ic_cdk_management_canister::{HttpMethod, HttpRequest, transform_context_from_query};
 use ic_sqlite_vfs::db::UpdateConnection;
 
-/// Hyperliquidの`/info`（testnet）。本番はnetwork設定から解決する。
-const INFO_URL: &str = "https://api.hyperliquid-testnet.xyz/info";
-
 /// 変換関数：必要な要素だけを決定論的に残す（順序・付随フィールドの揺れを除く）。
 #[ic_cdk::query]
 fn transform_info(
@@ -50,12 +47,13 @@ fn transform_info(
 
 /// 入金（non-funding ledger updates）をreplicated outcallで取得する。
 pub async fn fetch_ledger_updates(user: &str) -> Result<Vec<u8>, ErrorCode> {
+    let info_url = crate::environment::resolved()?.info_url;
     let body = serde_json::json!({
         "type": "userNonFundingLedgerUpdates",
         "user": user,
     })
     .to_string();
-    let response = HttpRequest::new(INFO_URL)
+    let response = HttpRequest::new(&info_url)
         .with_method(HttpMethod::POST)
         .with_header("Content-Type", "application/json")
         .with_body(body.into_bytes())
@@ -124,6 +122,7 @@ pub fn deposit_amount_micros(text: &str) -> Option<u64> {
 /// 写像が判明した時点で controller が `claim_unmatched_deposit` で本人へ振り替える）。
 pub fn credit(
     connection: &mut UpdateConnection<'_>,
+    network: &str,
     tx_hash: &[u8],
     amount: u64,
     address: &[u8; 20],
@@ -136,7 +135,7 @@ pub fn credit(
 
     let event = db::repo::events::ExternalEvent {
         event_id,
-        network: crate::config::network_name(crate::config::NETWORK).to_string(),
+        network: network.to_string(),
         account_address: *address,
         counterparty: [0u8; 20],
         asset: asset.to_string(),
@@ -218,6 +217,8 @@ pub fn now_ms() -> u64 {
 /// 先頭N件固定では3人目以降が永久に対象外になるため、`(created_at, master_address)` の
 /// キーセットで巡回し、末尾まで到達したら次回は先頭から始める。1件の取得失敗や
 /// 解釈できないイベントで巡回全体を止めない（次のheartbeatで再試行される）。
+/// 有効な入金先を巡回して入金を取り込む（自動sweep専用。試験は`reconcile_deposits`を使う）。
+#[cfg(not(feature = "test-venue"))]
 pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
     let internal = |error: DbError| ErrorCode::Internal {
         code: format!("{error:?}"),
@@ -228,6 +229,7 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
     })
     .map_err(internal)?;
 
+    let network = crate::environment::network_name()?;
     let mut credited = 0;
     let mut last = None;
     for (address, created_at) in addresses {
@@ -274,7 +276,7 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
                 .and_then(|value| value.as_u64())
                 .unwrap_or(now);
             let inserted = db::tx::update(|connection| {
-                credit(connection, &tx_hash, amount, &address, "usdc", at)
+                credit(connection, &network, &tx_hash, amount, &address, "usdc", at)
             })
             .map_err(internal)?;
             if inserted {

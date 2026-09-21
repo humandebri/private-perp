@@ -687,7 +687,8 @@ fn an_unknown_action_can_be_resolved_as_not_executed() {
 /// 送信内容を独立に検証するため、テスト側にも同じ値を置く（不一致なら署名検証が落ちる）。
 const HL_CHAIN_NAME: &str = "Testnet";
 const HL_USER_SIGNED_CHAIN_ID: u64 = 421_614;
-const HL_EXCHANGE_URL: &str = "https://api.hyperliquid-testnet.xyz/exchange";
+/// ローカル（テスト）の既定`/exchange`。環境設定から解決される（ビルド定数ではない）。
+const HL_EXCHANGE_URL: &str = "http://localhost:8080/exchange";
 
 /// 送信された `usdSend` のbodyから署名対象ダイジェストを独立に再構成する。
 fn usd_send_digest(action: &serde_json::Value) -> [u8; 32] {

@@ -8,7 +8,6 @@
 //! outboxへ接続するまでの間は未使用の警告を抑止する。
 #![allow(dead_code)]
 
-use crate::config;
 use crate::crypto;
 use api_types::error::ErrorCode;
 use hl_sign::user_signed;
@@ -17,6 +16,28 @@ use ic_cdk_management_canister::{HttpHeader, HttpMethod, HttpRequest};
 
 /// `/exchange`の応答本文の上限（生の本文+ヘッダを見込む）。
 const MAX_EXCHANGE_RESPONSE_BYTES: u64 = 8 * 1024;
+
+/// EIP-712へ入れるchain値（起動時の環境設定から解決する）。
+struct ChainValues {
+    chain_name: String,
+    signature_chain_id: String,
+    user_signed_chain_id: u64,
+}
+
+fn chain_values() -> Result<ChainValues, ErrorCode> {
+    let network: hl_types::Network = crate::environment::resolved()?.network.into();
+    let map =
+        |error: hl_types::environment::EnvironmentError| crate::environment::map_environment(error);
+    Ok(ChainValues {
+        chain_name: hl_types::environment::chain_name(network)
+            .map_err(map)?
+            .to_string(),
+        signature_chain_id: hl_types::environment::signature_chain_id(network)
+            .map_err(map)?
+            .to_string(),
+        user_signed_chain_id: hl_types::environment::user_signed_chain_id(network).map_err(map)?,
+    })
+}
 
 /// 払出し（`usdSend`）のaction本体（msgpack用の値とJSON）。
 pub struct UsdSend {
@@ -28,14 +49,15 @@ pub struct UsdSend {
 impl UsdSend {
     /// EIP-712の署名対象ダイジェスト（master鍵で署名する）。
     pub fn digest(&self) -> Result<[u8; 32], ErrorCode> {
+        let chain = chain_values()?;
         let values = vec![
-            user_signed::TypedValue::String(config::HL_CHAIN_NAME.to_string()),
+            user_signed::TypedValue::String(chain.chain_name.clone()),
             user_signed::TypedValue::String(self.destination.clone()),
             user_signed::TypedValue::String(amount_text(self.amount_micros)),
             user_signed::TypedValue::Uint64(self.time),
         ];
         user_signed::digest(
-            config::HL_USER_SIGNED_CHAIN_ID,
+            chain.user_signed_chain_id,
             user_signed::USD_SEND_PRIMARY_TYPE,
             user_signed::USD_SEND_FIELDS,
             &values,
@@ -47,11 +69,12 @@ impl UsdSend {
 
     /// 送信するJSON本文（action・signature・nonce）。
     pub fn body(&self, signature: &hl_sign::Signature) -> Result<Vec<u8>, ErrorCode> {
+        let chain = chain_values()?;
         let body = serde_json::json!({
             "action": {
                 "type": "usdSend",
-                "signatureChainId": config::HL_SIGNATURE_CHAIN_ID,
-                "hyperliquidChain": config::HL_CHAIN_NAME,
+                "signatureChainId": chain.signature_chain_id,
+                "hyperliquidChain": chain.chain_name,
                 "destination": self.destination,
                 "amount": amount_text(self.amount_micros),
                 "time": self.time,
@@ -80,14 +103,15 @@ pub struct ApproveAgent {
 impl ApproveAgent {
     /// EIP-712の署名対象ダイジェスト（master鍵＝口座所有者で署名する）。
     pub fn digest(&self) -> Result<[u8; 32], ErrorCode> {
+        let chain = chain_values()?;
         let values = vec![
-            user_signed::TypedValue::String(config::HL_CHAIN_NAME.to_string()),
+            user_signed::TypedValue::String(chain.chain_name.clone()),
             user_signed::TypedValue::Address(self.agent),
             user_signed::TypedValue::String(self.name.clone()),
             user_signed::TypedValue::Uint64(self.time),
         ];
         user_signed::digest(
-            config::HL_USER_SIGNED_CHAIN_ID,
+            chain.user_signed_chain_id,
             user_signed::APPROVE_AGENT_PRIMARY_TYPE,
             user_signed::APPROVE_AGENT_FIELDS,
             &values,
@@ -99,11 +123,12 @@ impl ApproveAgent {
 
     /// 送信するJSON本文（action・signature・nonce）。
     pub fn body(&self, signature: &hl_sign::Signature) -> Result<Vec<u8>, ErrorCode> {
+        let chain = chain_values()?;
         let body = serde_json::json!({
             "action": {
                 "type": "approveAgent",
-                "signatureChainId": config::HL_SIGNATURE_CHAIN_ID,
-                "hyperliquidChain": config::HL_CHAIN_NAME,
+                "signatureChainId": chain.signature_chain_id,
+                "hyperliquidChain": chain.chain_name,
                 "agentAddress": format!("0x{}", hex::encode(self.agent)),
                 "agentName": self.name,
                 "nonce": self.time,
@@ -127,7 +152,8 @@ pub async fn post_approve_agent(
     signature: &hl_sign::Signature,
 ) -> Result<(ExchangeOutcome, Vec<u8>), ErrorCode> {
     let body = payload.body(signature)?;
-    let response = HttpRequest::new(config::HL_EXCHANGE_URL)
+    let exchange_url = crate::environment::resolved()?.exchange_url;
+    let response = HttpRequest::new(&exchange_url)
         .with_method(HttpMethod::POST)
         .with_headers(vec![HttpHeader {
             name: "Content-Type".to_string(),
@@ -187,7 +213,8 @@ pub async fn post_usd_send(
     signature: &hl_sign::Signature,
 ) -> Result<(ExchangeOutcome, Vec<u8>), ErrorCode> {
     let body = payload.body(signature)?;
-    let response = HttpRequest::new(config::HL_EXCHANGE_URL)
+    let exchange_url = crate::environment::resolved()?.exchange_url;
+    let response = HttpRequest::new(&exchange_url)
         .with_method(HttpMethod::POST)
         .with_headers(vec![HttpHeader {
             name: "Content-Type".to_string(),

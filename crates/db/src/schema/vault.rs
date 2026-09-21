@@ -259,6 +259,21 @@ CREATE TABLE journal_requests (
 );
 ";
 
+/// v8: 環境設定（network・HL endpoint・tECDSA key ID）。
+///
+/// 環境は「network」「鍵」「endpoint」で分離し、起動時に検証可能な値で判定する
+/// （`docs/phase-0/environments.md` 4節）。未設定はnetwork既定（local）を使う。
+const ENVIRONMENT: &str = "
+CREATE TABLE vault_config (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    network TEXT,
+    exchange_url TEXT,
+    info_url TEXT,
+    ecdsa_key_id TEXT,
+    updated_at INTEGER
+);
+";
+
 /// `funds_vault` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -288,5 +303,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 7,
         sql: RECONCILE_AND_UNIQUENESS,
+    },
+    Migration {
+        version: 8,
+        sql: ENVIRONMENT,
     },
 ];

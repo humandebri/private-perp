@@ -547,7 +547,7 @@ pub(crate) async fn sign_with_agent_key(
     let public_key: [u8; 33] = ecdsa_public_key(&EcdsaPublicKeyArgs {
         canister_id: None,
         derivation_path: path.clone(),
-        key_id: ecdsa_key_id(),
+        key_id: ecdsa_key_id()?,
     })
     .await
     .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
@@ -557,7 +557,7 @@ pub(crate) async fn sign_with_agent_key(
     let signature = sign_with_ecdsa(&SignWithEcdsaArgs {
         message_hash: digest.to_vec(),
         derivation_path: path,
-        key_id: ecdsa_key_id(),
+        key_id: ecdsa_key_id()?,
     })
     .await
     .map_err(|error| internal(format!("sign_with_ecdsa failed: {error}")))?

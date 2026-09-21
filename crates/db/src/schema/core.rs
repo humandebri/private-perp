@@ -240,6 +240,21 @@ CREATE TABLE hpke_requests (
 CREATE INDEX hpke_requests_by_expiry ON hpke_requests (expires_at);
 ";
 
+/// v10: 環境設定（HL endpointとtECDSA key ID）。
+///
+/// networkは`core_config.network`（`set_market_context`）を出所とし、この表は
+/// endpointとkey IDを持つ。環境は「network」「鍵」「endpoint」で分離し、起動時に
+/// 検証可能な値で判定する（`docs/phase-0/environments.md` 4節）。
+const ENVIRONMENT: &str = "
+CREATE TABLE core_environment (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    exchange_url TEXT,
+    info_url TEXT,
+    ecdsa_key_id TEXT,
+    updated_at INTEGER
+);
+";
+
 /// 照合の巡回カーソル（有効な口座を順に巡回する）。
 const RECONCILE_CURSOR: &str = "
 CREATE TABLE reconcile_cursor (
@@ -286,5 +301,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 9,
         sql: RECONCILE_CURSOR,
+    },
+    Migration {
+        version: 10,
+        sql: ENVIRONMENT,
     },
 ];

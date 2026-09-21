@@ -6,7 +6,6 @@
 //!
 //! 公開鍵は口座ごとに`custody_accounts`へ保存して再利用する（毎回の照会は避ける）。
 
-use crate::config;
 use api_types::error::ErrorCode;
 use ic_cdk_management_canister::{
     EcdsaCurve, EcdsaKeyId, EcdsaPublicKeyArgs, SignWithEcdsaArgs, ecdsa_public_key,
@@ -19,11 +18,12 @@ fn internal(message: &str) -> ErrorCode {
     }
 }
 
-fn key_id() -> EcdsaKeyId {
-    EcdsaKeyId {
+/// 閾値ECDSAのkey ID（起動時の環境設定から解決する）。
+fn key_id() -> Result<EcdsaKeyId, ErrorCode> {
+    Ok(EcdsaKeyId {
         curve: EcdsaCurve::Secp256k1,
-        name: config::ECDSA_KEY_ID.to_string(),
-    }
+        name: crate::environment::resolved()?.ecdsa_key_id,
+    })
 }
 
 /// derivation pathを組み立てる（`codec`は`vec blob`）。
@@ -38,7 +38,7 @@ pub async fn public_key(path: Vec<Vec<u8>>) -> Result<[u8; 33], ErrorCode> {
     let result = ecdsa_public_key(&EcdsaPublicKeyArgs {
         canister_id: None,
         derivation_path: path,
-        key_id: key_id(),
+        key_id: key_id()?,
     })
     .await
     .map_err(|error| internal(&error.to_string()))?;
@@ -66,7 +66,7 @@ pub async fn sign_with_key(
     let result = sign_with_ecdsa(&SignWithEcdsaArgs {
         message_hash: digest.to_vec(),
         derivation_path: path,
-        key_id: key_id(),
+        key_id: key_id()?,
     })
     .await
     .map_err(|error| internal(&error.to_string()))?;

@@ -27,7 +27,7 @@ pub fn funding_instructions(session: &VerifiedSession) -> Result<FundingInstruct
             account_kind: AccountKind::Reserve,
             hl_account_address: account.master_address.to_vec().into(),
             asset: api_types::AssetId::Usdc,
-            network: config::NETWORK,
+            network: crate::environment::network()?,
             minimum_amount: None,
             memo_required: false,
         }),
@@ -322,7 +322,7 @@ pub async fn request_withdrawal(
             detail: "intent has expired".to_string(),
         });
     }
-    if request.network != config::NETWORK {
+    if request.network != crate::environment::network()? {
         return Err(ErrorCode::BadRequest {
             code: BadRequestCode::NetworkMismatch,
             detail: "intent network does not match".to_string(),
@@ -517,10 +517,11 @@ pub fn test_credit_deposit(
     event_id: &[u8; 32],
 ) -> Result<(), ErrorCode> {
     let now = clock::now_ms();
+    let network = crate::environment::network_name()?;
     db::tx::update(|connection| {
         let event = db::repo::events::ExternalEvent {
             event_id: *event_id,
-            network: config::network_name(config::NETWORK).to_string(),
+            network: network.clone(),
             account_address: [0u8; 20],
             counterparty: [1u8; 20],
             asset: "usdc".to_string(),

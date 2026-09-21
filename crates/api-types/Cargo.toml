@@ -8,5 +8,6 @@ description = "Canister APIのCandid型（純粋・共有）"
 
 [dependencies]
 candid.workspace = true
+hl-types = { path = "../hl-types" }
 serde.workspace = true
 serde_bytes.workspace = true

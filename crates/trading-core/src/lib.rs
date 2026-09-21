@@ -10,6 +10,7 @@
 //! 認可は `funds_vault` の `session_status` に問い合わせ、返却されたprincipalをこの
 //! Canisterが受け取ったcallerと比較する（vaultはcoreのcallerを知らないため）。
 
+mod environment;
 mod pipeline;
 mod venue;
 
@@ -320,12 +321,9 @@ fn envelope_aad(
     ))
 }
 
-/// 設定されたnetwork名（封筒の束縛に使う。未設定はfail-closed）。
+/// 設定されたnetwork名（封筒の束縛に使う）。既定はlocal。
 fn network_name() -> Result<String, ErrorCode> {
-    db::tx::query(db::repo::core_config::market_context)
-        .map_err(map_db)?
-        .map(|(network, _)| network)
-        .ok_or(ErrorCode::PolicyUnavailable)
+    environment::network_name()
 }
 
 /// 封筒の`Network`と設定値の対応。
@@ -389,6 +387,8 @@ fn set_market_context(network: String, dex: String) -> Result<(), ErrorCode> {
             reason: "only a controller can set the market context".to_string(),
         });
     }
+    // 環境の判定は起動時に検証可能な値で行う（mainnetはPhase 2で拒否。E-2）。
+    hl_types::environment::parse_network(&network).map_err(environment::map_environment)?;
     db::tx::update(|connection| {
         db::repo::core_config::set_market_context(connection, &network, &dex)
     })
@@ -410,6 +410,50 @@ fn set_meta_cache(network: String, dex: String, universe: String) -> Result<(), 
         db::repo::meta::set_universe(connection, &network, &dex, &digest, &universe, now)
     })
     .map_err(map_db)
+}
+
+/// Hyperliquidのendpointを設定する（controllerのみ）。
+///
+/// 設定済みのnetworkと整合しないhost（例：testnet設定にmainnet endpoint）は拒否する。
+#[ic_cdk::update]
+fn set_venue_endpoints(exchange_url: String, info_url: String) -> Result<(), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can set the venue endpoints".to_string(),
+        });
+    }
+    let network = environment::resolved()?.network.into();
+    hl_types::environment::validate_endpoints(network, &exchange_url, &info_url)
+        .map_err(environment::map_environment)?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| {
+        db::repo::core_config::set_venue_endpoints(connection, &exchange_url, &info_url, now)
+    })
+    .map_err(map_db)
+}
+
+/// 閾値ECDSAのkey IDを設定する（controllerのみ）。
+///
+/// testnetの鍵名はデプロイ後に実測して確定する（`docs/phase-0/environments.md` 2節）。
+#[ic_cdk::update]
+fn set_ecdsa_key_id(key_id: String) -> Result<(), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can set the ecdsa key id".to_string(),
+        });
+    }
+    hl_types::environment::validate_key_id(&key_id).map_err(environment::map_environment)?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| db::repo::core_config::set_ecdsa_key_id(connection, &key_id, now))
+        .map_err(map_db)
+}
+
+/// 現在の環境設定（診断用・公開）。秘密は含まない。
+#[ic_cdk::query]
+fn get_environment() -> Result<api_types::environment::EnvironmentView, ErrorCode> {
+    environment::resolved()
 }
 
 /// 受付を1件処理する（認可・検証・冪等性・pending注文の登録）。
@@ -944,7 +988,7 @@ async fn request_agent_generation(
     let public_key = ecdsa_public_key(&EcdsaPublicKeyArgs {
         canister_id: None,
         derivation_path: path.clone(),
-        key_id: ecdsa_key_id(),
+        key_id: ecdsa_key_id()?,
     })
     .await
     .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
@@ -1045,11 +1089,12 @@ fn agent_derivation_path(account_id: &[u8; 32], generation: u64) -> Vec<Vec<u8>>
     ]
 }
 
-fn ecdsa_key_id() -> EcdsaKeyId {
-    EcdsaKeyId {
+/// 閾値ECDSAのkey ID（起動時の環境設定から解決する）。
+pub(crate) fn ecdsa_key_id() -> Result<EcdsaKeyId, ErrorCode> {
+    Ok(EcdsaKeyId {
         curve: EcdsaCurve::Secp256k1,
-        name: "test_key_1".to_string(),
-    }
+        name: environment::resolved()?.ecdsa_key_id,
+    })
 }
 
 /// 注文の取消を要求する（**封筒必須**。署名・送信はパイプラインが行う）。

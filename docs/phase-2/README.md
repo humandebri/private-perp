@@ -58,6 +58,13 @@ Phase 3以降（複数ユーザー分離・負荷・backup復元・cycles通知�
 - 試験：`crates/pocket-ic-tests/tests/core_pipeline.rs`（送信→照合の往復、拒否・不明の分類と非再送、約定後の予約解放、3口座の巡回、controller限定の手動sweep）。既存の送信試験は`venue_router_default`（送信応答のみ指定し、照合は既定応答）で駆動する。
 - 未実施：実HLへの送信はGATE 0後。自動timerは本番ビルドにしか組まないため、間隔・再arm・周期コストはtestnetデプロイ時に実測する（timerが失われても永続状態と手動`sweep`で再開できる）。`state-machines.md` 5節が求めるcycles予算の上限（残cyclesが閾値未満ならsweepを休止する等）は件数上限のみで未実装。建玉の証拠金は取引所の`marginSummary.totalMarginUsed`を取り込んでおらず、`margin_used`は未約定注文の予約合計を表す。
 
+### 5. 環境設定の一般化とE-2（M2の2A・残余）— **完了**
+- network・HL endpoint・tECDSA key IDをビルド定数から**起動時の設定**へ移した（`docs/phase-0/environments.md` 4.1節）。`funds_vault`は`set_network`・`set_venue_endpoints`・`set_ecdsa_key_id`、`trading_core`は`set_market_context`（network検証を追加）・`set_venue_endpoints`・`set_ecdsa_key_id`を持ち、いずれもcontroller専用。`get_environment`は公開の診断query。
+- 検証は純粋クレート`hl-types::environment`に集約：**mainnetを拒否**（Phase 2で実資金を扱わない）、endpointのhostがnetworkと一致しない場合は拒否（lookalike domainも拒否）、ローカルの設定で実venueのhostを拒否、key IDの形式検証。ホスト試験で固定。
+- 未設定の既定は`local`・ループバックendpoint・`test_key_1`。outcall（`/exchange`・`/info`）と署名鍵は呼び出し時に設定から解決する（`venue.rs`・`crypto.rs`）。
+- 試験：`core_environment.rs`・`vault_environment.rs`（mainnet拒否・不一致拒否・`get_environment`・**設定したendpointが実際のoutcall URLになること**）、`hl-types`のホスト試験。
+- E-1（mock eligibility token）は**未実施**：eligibility発行はPhase 3で、tokenが存在しない。E-5（mock endpointの本番混入）はmock endpointをコードへ埋め込まず設定でのみ与えることで構造的に満たす。
+
 ### 実行上の注意（並行作業対策）
 - PocketICは必ずスクリプト経由：`POCKET_IC_TEST_DIR=$PWD/target/test-venue-mine bash scripts/pocket-ic-test.sh --test <name>`。
 - 素の `cargo test` は本番用wasm（feature無し）を読むため偽の失敗になる。

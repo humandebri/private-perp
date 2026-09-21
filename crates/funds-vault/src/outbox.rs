@@ -5,7 +5,6 @@
 //! 同期ブロック（DB更新）を完結させてから `await` する順序を守る。
 
 use crate::auth::map_db;
-use crate::config;
 use crate::crypto;
 use crate::venue::{self, ExchangeOutcome};
 use api_types::error::ErrorCode;
@@ -22,6 +21,8 @@ const MAX_ACTIONS_PER_SWEEP: u32 = 4;
 const ACTION_LEASE_MS: u64 = 30_000;
 
 /// heartbeatの間隔（`#[ic_cdk::heartbeat]`は毎ラウンド呼ばれる）。
+/// 自動sweep（timer）の間隔。試験ビルドは自動sweepを組まないため定数も持たない。
+#[cfg(not(feature = "test-venue"))]
 pub const SWEEP_INTERVAL_MS: u64 = 5_000;
 
 fn internal(message: String) -> ErrorCode {
@@ -84,6 +85,7 @@ pub(crate) async fn ensure_custody_account(
     let address = hl_sign::address_from_public_key(&public_key)
         .map_err(|error| internal(error.to_string()))?;
     let derivation_path = format!("private-perp/{kind_name}/{}", hex::encode(account_id));
+    let network = crate::environment::network_name()?;
 
     let account = NewCustodyAccount {
         account_id: &account_id,
@@ -91,7 +93,7 @@ pub(crate) async fn ensure_custody_account(
         kind,
         derivation_path: &derivation_path,
         master_address: &address,
-        network: config::network_name(config::NETWORK),
+        network: &network,
     };
     db::tx::update(|connection| db::repo::ledger::ensure_custody_account(connection, &account, now))
         .map_err(|error| map_db(error, None))

@@ -19,6 +19,7 @@ pub mod meta;
 pub mod orders;
 pub mod policy;
 pub mod positions;
+pub mod vault_config;
 
 use crate::error::Error;
 

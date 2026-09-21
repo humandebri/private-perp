@@ -38,6 +38,7 @@ name = "api-types"
 version = "0.1.0"
 dependencies = [
  "candid",
+ "hl-types",
  "serde",
  "serde_bytes",
 ]

@@ -15,6 +15,7 @@ mod clock;
 mod config;
 mod crypto;
 mod deposits;
+mod environment;
 mod fund;
 mod outbox;
 mod random;
@@ -110,10 +111,11 @@ fn ingest_venue_deposit(
     input.extend_from_slice(tx_hash.as_ref());
     let event_id = hl_sign::keccak256(&input);
     let now = clock::now_ms();
+    let network = environment::network_name()?;
     db::tx::update(|connection| {
         let event = db::repo::events::ExternalEvent {
             event_id,
-            network: config::network_name(config::NETWORK).to_string(),
+            network: network.clone(),
             account_address: [0u8; 20],
             counterparty: [0u8; 20],
             asset: asset.clone(),
@@ -192,6 +194,64 @@ fn test_aad(expires_at: u64) -> Vec<u8> {
         &[],
         expires_at,
     )
+}
+
+/// controllerのみ許可する（設定変更の共通チェック）。
+fn require_controller(reason: &str) -> Result<(), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if ic_cdk::api::is_controller(&caller) {
+        Ok(())
+    } else {
+        Err(ErrorCode::Unauthenticated {
+            reason: reason.to_string(),
+        })
+    }
+}
+
+/// 環境のnetworkを設定する（controllerのみ）。
+///
+/// mainnetはPhase 2では拒否する（`docs/phase-0/environments.md` E-2）。
+#[ic_cdk::update]
+fn set_network(network: String) -> Result<(), ErrorCode> {
+    require_controller("only a controller can set the network")?;
+    hl_types::environment::parse_network(&network).map_err(environment::map_environment)?;
+    let now = clock::now_ms();
+    db::tx::update(|connection| db::repo::vault_config::set_network(connection, &network, now))
+        .map_err(|error| auth::map_db(error, None))
+}
+
+/// Hyperliquidのendpointを設定する（controllerのみ）。
+///
+/// 設定済みのnetworkと整合しないhost（例：testnet設定にmainnet endpoint）は拒否する。
+#[ic_cdk::update]
+fn set_venue_endpoints(exchange_url: String, info_url: String) -> Result<(), ErrorCode> {
+    require_controller("only a controller can set the venue endpoints")?;
+    let network: hl_types::Network = environment::network()?.into();
+    hl_types::environment::validate_endpoints(network, &exchange_url, &info_url)
+        .map_err(environment::map_environment)?;
+    let now = clock::now_ms();
+    db::tx::update(|connection| {
+        db::repo::vault_config::set_venue_endpoints(connection, &exchange_url, &info_url, now)
+    })
+    .map_err(|error| auth::map_db(error, None))
+}
+
+/// 閾値ECDSAのkey IDを設定する（controllerのみ）。
+///
+/// testnetの鍵名はデプロイ後に実測して確定する（`docs/phase-0/environments.md` 2節）。
+#[ic_cdk::update]
+fn set_ecdsa_key_id(key_id: String) -> Result<(), ErrorCode> {
+    require_controller("only a controller can set the ecdsa key id")?;
+    hl_types::environment::validate_key_id(&key_id).map_err(environment::map_environment)?;
+    let now = clock::now_ms();
+    db::tx::update(|connection| db::repo::vault_config::set_ecdsa_key_id(connection, &key_id, now))
+        .map_err(|error| auth::map_db(error, None))
+}
+
+/// 現在の環境設定（診断用・公開）。秘密は含まない。
+#[ic_cdk::query]
+fn get_environment() -> Result<api_types::environment::EnvironmentView, ErrorCode> {
+    environment::resolved()
 }
 
 /// 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
@@ -487,8 +547,17 @@ fn credit_venue_deposit(
             detail: "address must be 20 bytes".to_string(),
         })?;
     let now = deposits::now_ms();
+    let network = environment::network_name()?;
     db::tx::update(|connection| {
-        deposits::credit(connection, tx_hash.as_ref(), amount, &address, &asset, now)
+        deposits::credit(
+            connection,
+            &network,
+            tx_hash.as_ref(),
+            amount,
+            &address,
+            &asset,
+            now,
+        )
     })
     .map_err(|error| auth::map_db(error, None))
 }
@@ -523,9 +592,9 @@ fn claim_unmatched_deposit(
             detail: "user_id must be 32 bytes".to_string(),
         })?;
     let now = clock::now_ms();
-    let network = config::network_name(config::NETWORK);
+    let network = environment::network_name()?;
     db::tx::update(|connection| {
-        let event = db::repo::events::find_external_event(connection, network, &event_id)?
+        let event = db::repo::events::find_external_event(connection, &network, &event_id)?
             .ok_or(db::error::Error::NotFound)?;
         let kind = db::repo::ledger::journal_kind_by_external_event(connection, &event_id)?
             .ok_or(db::error::Error::Invariant("event was not credited"))?;
@@ -587,6 +656,7 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
             retryable: false,
         })?;
     let now = clock::now_ms();
+    let network = environment::network_name()?;
     let mut credited = 0;
     for entry in entries {
         let Some(hash) = entry.get("hash").and_then(|value| value.as_str()) else {
@@ -608,7 +678,7 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
             .and_then(|value| value.as_u64())
             .unwrap_or(now);
         let inserted = db::tx::update(|connection| {
-            deposits::credit(connection, &tx_hash, amount, &address, "usdc", at)
+            deposits::credit(connection, &network, &tx_hash, amount, &address, "usdc", at)
         })
         .map_err(|error| auth::map_db(error, None))?;
         if inserted {

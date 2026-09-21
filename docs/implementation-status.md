@@ -99,7 +99,7 @@ Canisterコードは `version` とDB初期化だけの雛形ではない（資�
 必要な次の成果物：
 
 1. ~~Rust/PocketICでの資金・署名・認証の実装と検証~~ → ローカル範囲は完了。testnet検証が残る。
-2. Candid、network・Canister ID、本人認証・失効の実契約。
+2. Candid生成とCanister ID、本人認証・失効の実契約。network・endpoint・tECDSA key IDは起動時の設定（controller専用setter）として実装済みで、testnetデプロイ後に実値へ確定する。
 3. ~~認証済みHPKE公開鍵の取得・鍵更新・要求と応答の暗号化仕様~~ → 鍵レジストリ・封筒・個人API4件（`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`）への適用まで実装・検証済み。`submit_order`等の書き込み系への適用はPhase 3で判断する。
 4. ~~注文・資金移動の照合fixtureと、unknownの回復契約~~ → outboxの照合と`unknown`解消を実装・検証済み。`orderStatus`照合の自動化が残る。
 5. HL公開市況の接続、口座状態・建玉・PnL・SL/TP・決済の接続。
@@ -115,8 +115,8 @@ Cloudflare公開、SNSローンチ、controller変更、ウォレット接続、
 ## Phase 1（S2・S3）のCanister実装状況（2026-09-21・ローカル検証）
 
 Canister側は「`version`とDB初期化だけの雛形」ではなくなった。資金層（S2）と統制（S3）のローカルで
-検証できる範囲が動作し、PocketICで**27ファイル・79試験すべて成功**している（2026-09-21のPhase 2
-2C/2D/2E＋T-605＋本番パイプラインの追加後。Phase 1時点は21ファイル・60試験）。ただし**Phase 1の
+検証できる範囲が動作し、PocketICで**29ファイル・83試験すべて成功**している（2026-09-21のPhase 2
+2C/2D/2E＋T-605＋本番パイプライン＋環境設定の一般化の追加後。Phase 1時点は21ファイル・60試験）。ただし**Phase 1の
 Go/No-Goは未合格**であり、testnet往復は未実施。
 
 ### 検証済み（証跡: `docs/phase-1/evidence/P1-001`〜`P1-010`）
@@ -132,7 +132,8 @@ Go/No-Goは未合格**であり、testnet往復は未実施。
 | HPKE（鍵世代の更新・公開鍵配布・封筒の往復・`aad`束縛） | 実装・検証済み | P1-007 |
 | `control_guard`（SNS限定・7日猶予・内容一致・迂回APIなし・同時実行の単一性） | 実装・検証済み（実サイズwasmの実行は下記制約で保留） | P1-009 |
 | `policy_registry`（fail-closed・停止方向のみ） | 実装・検証済み | P1-010 |
-| `trading_core`（認可境界・注文受付・Agent鍵署名・送信・取消送信・約定取り込み・`orderStatus`照合・snapshot・リスク予約・SL/TP・全決済・個人API封筒） | 実装・検証済み | P1-008 |
+| `trading_core`（認可境界・注文受付・Agent鍵署名・送信・取消送信・約定取り込み・`orderStatus`照合・snapshot・リスク予約・SL/TP・全決済・個人API封筒・環境設定） | 実装・検証済み | P1-008 |
+| 環境分離（network・endpoint・tECDSA key IDの起動時設定、mainnet拒否＝E-2） | 実装・検証済み（E-1はeligibility未実装のため未実施） | `core_environment.rs`・`vault_environment.rs` |
 
 ローカルの閾値ECDSAはPocketICの**テスト用閾値鍵サブネット**で有効（key id `test_key_1`）。
 PocketIC上の署名往復は約17.9ms（本番subnetの性能値ではない）。

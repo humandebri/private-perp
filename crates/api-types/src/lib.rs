@@ -8,6 +8,7 @@
 
 pub mod auth;
 pub mod envelope;
+pub mod environment;
 pub mod error;
 pub mod fund;
 pub mod guard;
