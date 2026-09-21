@@ -638,6 +638,16 @@ pub async fn request_recovery(
             now,
         )?;
         if accepted == AcceptOutcome::Accepted {
+            // 回収は取引口座から出るため、取引口座のequityに対して拘束する
+            // （拘束しないと同じequityへ複数の回収が同時に送信され得る）。
+            db::repo::funds::reserve_trading_funds(
+                connection,
+                &session.user_id,
+                client_request_id,
+                "user_trading",
+                amount,
+                now,
+            )?;
             db::repo::funds::set_request_state(
                 connection,
                 &session.user_id,

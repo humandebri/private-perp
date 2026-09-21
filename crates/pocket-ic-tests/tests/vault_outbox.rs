@@ -627,13 +627,28 @@ fn an_unknown_action_can_be_resolved_as_not_executed() {
     assert_eq!(unknown.unknowns.len(), 1);
     let action_id = unknown.unknowns[0].action_id.clone();
 
+    // 証跡が空の解消は拒否する（取引所へ照会した記録を必須にする）。
+    let no_evidence: Result<(), ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "resolve_unknown_action",
+        (action_id.clone(), false, String::new()),
+    )
+    .expect("call");
+    assert!(no_evidence.is_err(), "証跡なしの解消は拒否する");
+
     // controllerが「未実行」として解消すると、予約が戻り要求はrejectedになる。
     let resolved: Result<(), ErrorCode> = update_args(
         &pic,
         vault,
         controller,
         "resolve_unknown_action",
-        (action_id.clone(), false),
+        (
+            action_id.clone(),
+            false,
+            "testnetの/api照会でcloidの注文が存在しないことを確認".to_string(),
+        ),
     )
     .expect("call");
     resolved.expect("resolved");
@@ -662,7 +677,7 @@ fn an_unknown_action_can_be_resolved_as_not_executed() {
         vault,
         controller,
         "resolve_unknown_action",
-        (action_id, false),
+        (action_id, false, "再確認".to_string()),
     )
     .expect("call");
     assert!(again.is_err(), "解消済みは再度解消できない");

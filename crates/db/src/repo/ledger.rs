@@ -244,6 +244,46 @@ pub fn user_balances(connection: &Connection, user_id: &[u8; 32]) -> Result<User
     })
 }
 
+/// 本人の移動中の額（負債の残高）。
+///
+/// 取引口座への直接入金を「配分の確定」と誤認しないための境界に使う。
+pub fn user_in_transit_balance(connection: &Connection, user_id: &[u8; 32]) -> Result<u64, Error> {
+    liability_balance(connection, &user_in_transit(user_id))
+}
+
+/// 取引口座への直接入金（配分として説明できない着金）の計上。
+///
+/// 移動中の額を超える着金は配分の確定ではないため、取引口座のequityへ直接与信する
+/// （保留中の配分が無いのに `allocation_confirm` を呼ぶと `user_in_transit` が
+/// 負債超過になり、以後の残高参照が不変条件違反で失敗する）。
+pub fn trading_deposit_confirmed(
+    connection: &mut UpdateConnection<'_>,
+    trading_account_id: &[u8; 32],
+    amount: u64,
+    at: u64,
+) -> Result<i64, Error> {
+    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
+    post_journal(
+        connection,
+        "trading_deposit",
+        at,
+        None,
+        None,
+        &[
+            Posting {
+                account: CASH_TRADING.to_string(),
+                kind: AccountKind::Asset,
+                amount,
+            },
+            Posting {
+                account: user_trading(trading_account_id),
+                kind: AccountKind::Liability,
+                amount: -amount,
+            },
+        ],
+    )
+}
+
 /// 配分（予約→取引口座）の開始仕訳。
 pub fn allocation_start(
     connection: &mut UpdateConnection<'_>,

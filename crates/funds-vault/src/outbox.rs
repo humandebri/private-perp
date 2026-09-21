@@ -571,6 +571,8 @@ async fn dispatch_recovery(
                     now,
                     &event_id,
                 )?;
+                // 台帳で資金が動いたので予約も消費する。
+                db::repo::funds::consume_reservation(connection, &action.user_id, request_id)?;
                 db::repo::funds::set_request_state(
                     connection,
                     &action.user_id,
@@ -589,6 +591,7 @@ async fn dispatch_recovery(
         }
         Ok((ExchangeOutcome::Rejected { message }, _response)) => {
             db::tx::update(|connection| {
+                db::repo::funds::release_reservation(connection, &action.user_id, request_id, now)?;
                 db::repo::funds::set_request_state(
                     connection,
                     &action.user_id,

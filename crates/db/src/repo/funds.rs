@@ -247,6 +247,60 @@ pub fn held_allocation_total(connection: &Connection, user_id: &[u8; 32]) -> Res
     u64::try_from(total).map_err(|_| Error::Invariant("negative reservation total"))
 }
 
+/// 回収（recovery）で拘束中の合計（取引口座のequityに対する拘束）。
+pub fn held_recovery_total(connection: &Connection, user_id: &[u8; 32]) -> Result<u64, Error> {
+    let total = connection
+        .query_scalar::<i64>(
+            "SELECT COALESCE(SUM(r.amount), 0)
+               FROM reservations r
+               JOIN fund_requests f
+                 ON f.user_id = r.user_id AND f.client_request_id = r.client_request_id
+              WHERE r.user_id = ?1 AND r.state = 'held' AND f.kind = 'recovery'",
+            params![user_id.as_slice()],
+        )
+        .map_err(sql)?;
+    u64::try_from(total).map_err(|_| Error::Invariant("negative reservation total"))
+}
+
+/// 取引口座のequityに対して残高を拘束する（回収の受付）。
+///
+/// 回収は取引口座から出るため、準備口座の残高ではなく取引口座のequityと比較する。
+/// 拘束しないと、同じequityに対して複数の回収が同時に送信され得る。
+pub fn reserve_trading_funds(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    client_request_id: &[u8],
+    account_name: &str,
+    amount: u64,
+    now: u64,
+) -> Result<(), Error> {
+    let balances = crate::repo::ledger::user_balances(connection, user_id)?;
+    let available = balances
+        .trading_equity
+        .checked_sub(held_recovery_total(connection, user_id)?)
+        .ok_or(Error::Invariant("recovery holds exceed the trading equity"))?;
+    if available < amount {
+        return Err(Error::InsufficientFunds {
+            available: i64::try_from(available).unwrap_or(i64::MAX),
+            requested: i64::try_from(amount).unwrap_or(i64::MAX),
+        });
+    }
+
+    let amount = amount_i64(amount, "amount out of range")?;
+    connection
+        .execute(
+            "INSERT INTO reservations (user_id, client_request_id, account_name, amount, state, created_at, released_at)
+             VALUES (?1, ?2, ?3, ?4, 'held', ?5, NULL)",
+            params![
+                user_id.as_slice(),
+                client_request_id,
+                account_name,
+                amount,
+                now as i64
+            ],
+        )
+        .map_err(sql)
+}
 /// 残高を拘束する。未配分残高が不足する場合は拒否する。
 ///
 /// 出金の拘束は `withdrawal_reserve` が台帳で行うため、ここで引くのは配分の拘束だけ。

@@ -605,9 +605,14 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
 /// 不明なactionを「未実行」として解消する（controllerのみ）。
 ///
 /// 取引所が実行済みと確認できた場合の消込は、証跡（tx）を伴う別経路で行うため
-/// ここでは受け付けない（`OperationNotAvailable`）。
+/// ここでは受け付けない（`OperationNotAvailable`）。`unknown` と `dispatching` の
+/// どちらも対象にするが、**取引所へ照会した証跡**を `evidence` として必須にする。
 #[ic_cdk::update]
-fn resolve_unknown_action(action_id: api_types::Blob, executed: bool) -> Result<(), ErrorCode> {
+fn resolve_unknown_action(
+    action_id: api_types::Blob,
+    executed: bool,
+    evidence: String,
+) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
         return Err(ErrorCode::Unauthenticated {
@@ -617,6 +622,12 @@ fn resolve_unknown_action(action_id: api_types::Blob, executed: bool) -> Result<
     if executed {
         return Err(ErrorCode::NotAllowed {
             code: api_types::error::NotAllowedCode::OperationNotAvailable,
+        });
+    }
+    if evidence.trim().is_empty() {
+        return Err(ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MissingField,
+            detail: "evidence is required to resolve an action as not executed".to_string(),
         });
     }
     let action_id: [u8; 32] = action_id
@@ -633,8 +644,15 @@ fn resolve_unknown_action(action_id: api_types::Blob, executed: bool) -> Result<
                 .ok_or(db::error::Error::NotFound)?;
         let state = db::repo::actions::action_state(connection, &action_id)?
             .ok_or(db::error::Error::NotFound)?;
-        if state != api_types::fund::ActionState::Unknown {
-            return Err(db::error::Error::Invariant("action is not unknown"));
+        // `unknown`（応答が不明）に加えて `dispatching`（POST直前に停止し、送信の有無を
+        // 自動では判定できない）も、運用者が取引所へ照会して未実行を確認した場合だけ
+        // 解消できる。`executed = true` を受け付けないのは従来どおり。
+        if state != api_types::fund::ActionState::Unknown
+            && state != api_types::fund::ActionState::Dispatching
+        {
+            return Err(db::error::Error::Invariant(
+                "action is neither unknown nor dispatching",
+            ));
         }
         let request_id = request_id.ok_or(db::error::Error::Invariant("action without request"))?;
         let request = db::repo::funds::fund_request(connection, &user_id, &request_id)?
@@ -659,10 +677,10 @@ fn resolve_unknown_action(action_id: api_types::Blob, executed: bool) -> Result<
         db::repo::actions::mark_resolved(connection, &action_id, epoch, now)?;
         db::repo::events::insert_audit(
             connection,
-            "system",
+            "controller",
             "resolve_unknown_action",
             None,
-            Some("not_executed"),
+            Some(&format!("not_executed: {evidence}")),
             now,
         )
     })

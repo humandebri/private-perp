@@ -368,6 +368,73 @@ fn a_withdrawal_reservation_over_half_the_balance_keeps_reads_working() {
     );
 }
 
+/// 署名済み出金intentのnonceは単回使用（同じ署名を別の受付IDで再送できない）。
+#[test]
+fn a_withdrawal_intent_nonce_cannot_be_reused() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(26);
+    let key = secret(207);
+    let (session, eoa) = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 4);
+
+    let now = pic.get_time().as_nanos_since_unix_epoch() / 1_000_000;
+    let intent = private_perp::Withdrawal {
+        eoa,
+        amount: 100_000,
+        asset: "usdc".to_string(),
+        destination: format!("0x{}", hex::encode(eoa)),
+        network: "local".to_string(),
+        nonce: 7,
+        expires_at: now + 600_000,
+        canister: vault.as_slice().to_vec(),
+    };
+    let signature = intent
+        .sign_for_tests(&key)
+        .expect("sign")
+        .to_bytes65()
+        .to_vec();
+    let submit = |request: &[u8]| -> Result<FundRequestAccepted, ErrorCode> {
+        update(
+            &pic,
+            vault,
+            caller,
+            "request_withdrawal",
+            WithdrawalRequest {
+                session: session.clone(),
+                client_request_id: request_id(request),
+                amount: intent.amount,
+                asset: AssetId::Usdc,
+                destination: Destination::AuthenticatedEoaHlAccount,
+                network: Network::Local,
+                nonce: intent.nonce,
+                expires_at: intent.expires_at,
+                intent_signature: signature.clone().into(),
+            },
+        )
+        .expect("call")
+    };
+
+    submit(b"wd-nonce-1").expect("accepted");
+
+    // 同じ署名・同じnonceを別の受付IDで再送すると拒否する（二重送金の防止）。
+    let reused = submit(b"wd-nonce-2").expect_err("must reject a reused nonce");
+    assert!(
+        matches!(
+            reused,
+            ErrorCode::BadRequest {
+                code: BadRequestCode::NonceReused,
+                ..
+            }
+        ),
+        "{reused:?}"
+    );
+
+    // 同一ID・同一本文の再送は従来どおり冪等（nonceの再使用としては拒否しない）。
+    let duplicate = submit(b"wd-nonce-1").expect("duplicate");
+    assert_eq!(duplicate.state, FundRequestState::Accepted);
+}
+
 #[test]
 fn a_session_from_another_caller_is_rejected() {
     let pic = pic();

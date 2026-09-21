@@ -150,15 +150,38 @@ pub fn credit(
     }
     match db::repo::ledger::custody_account_by_address(connection, address)? {
         Some(owner) if owner.kind == "trading" => {
-            // 取引口座への着金＝配分の確定（移動中→取引）。
-            db::repo::ledger::allocation_confirm(
-                connection,
-                &owner.user_id,
-                &owner.account_id,
-                amount,
-                now,
-                &event_id,
-            )?;
+            // 取引口座への着金＝配分の確定（移動中→取引）。移動中の額を超える分は
+            // 配分として説明できないため、取引口座への直接入金として与信する
+            // （そうしないと `user_in_transit` が負債超過になり残高参照が壊れる）。
+            let in_transit = db::repo::ledger::user_in_transit_balance(connection, &owner.user_id)?;
+            let confirmed = amount.min(in_transit);
+            if confirmed > 0 {
+                db::repo::ledger::allocation_confirm(
+                    connection,
+                    &owner.user_id,
+                    &owner.account_id,
+                    confirmed,
+                    now,
+                    &event_id,
+                )?;
+            }
+            let excess = amount - confirmed;
+            if excess > 0 {
+                db::repo::ledger::trading_deposit_confirmed(
+                    connection,
+                    &owner.account_id,
+                    excess,
+                    now,
+                )?;
+                db::repo::events::insert_audit(
+                    connection,
+                    "system",
+                    "trading_deposit_direct",
+                    None,
+                    Some(&hex::encode(address)),
+                    now,
+                )?;
+            }
         }
         Some(owner) => {
             // 準備口座への着金＝利用者への与信。

@@ -46,13 +46,14 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// SQLiteの制約違反を `Conflict` として扱うか判定する。
+/// SQLiteの**一意制約**違反を `Conflict` として扱うか判定する。
+///
+/// CHECK・NOT NULL・外部キー違反を `Conflict` に含めない。含めると
+/// `ingest_external_event` が不正な内容（asset違い・amount=0など）を「既知の
+/// イベント」として黙って捨て、二重計上防止の判定と区別できなくなる。
 pub fn classify_sql(message: String) -> Error {
     let lowered = message.to_lowercase();
-    if lowered.contains("unique constraint")
-        || lowered.contains("primary key")
-        || lowered.contains("constraint failed")
-    {
+    if lowered.contains("unique constraint") || lowered.contains("primary key") {
         Error::Conflict
     } else {
         Error::Sql(message)

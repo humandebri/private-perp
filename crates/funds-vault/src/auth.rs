@@ -225,9 +225,10 @@ pub async fn open_session(
 
     // 束縛されたprincipalを**消費の前**に確認する（他人がchallengeを消費して正規の
     // ログインを妨害できないようにする。T-102）。
-    let owner = db::tx::query(|connection| db::repo::auth::challenge_row(connection, &challenge_id))
-        .map_err(|error| map_db(error, None))?
-        .ok_or_else(|| bad(BadRequestCode::ChallengeExpired, "unknown challenge"))?;
+    let owner =
+        db::tx::query(|connection| db::repo::auth::challenge_row(connection, &challenge_id))
+            .map_err(|error| map_db(error, None))?
+            .ok_or_else(|| bad(BadRequestCode::ChallengeExpired, "unknown challenge"))?;
     if owner.principal != caller.as_slice() {
         return Err(ErrorCode::Unauthenticated {
             reason: "challenge was issued for another principal".to_string(),

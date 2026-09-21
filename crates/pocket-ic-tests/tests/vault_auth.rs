@@ -247,3 +247,77 @@ fn a_challenge_signed_for_another_origin_is_rejected() {
         }
     );
 }
+
+/// T-102: challengeは発行時のprincipalへ束縛され、別principalではredeemできない。
+///
+/// 束縛を確認しないと、他人が取得した署名を自分のprincipalで使ってセッションを
+/// 得られる（フロントエンドのJSは配信側で差し替えられうるという前提の防御）。
+#[test]
+fn a_challenge_bound_to_a_principal_cannot_be_redeemed_by_another() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(17);
+    let secret_key = secret(112);
+    let eoa = address_from_secret(&secret_key).expect("address");
+
+    let response = issue(&pic, vault, caller, eoa);
+    let challenge = rebuild(vault, caller, eoa, &response, ORIGIN, "local");
+    let signature = challenge.sign_for_tests(&secret_key).expect("sign");
+
+    // 別principalが同じ署名でセッションを開こうとしても拒否する。
+    let attacker = principal(18);
+    let stolen: Result<SessionHandle, ErrorCode> = update(
+        &pic,
+        vault,
+        attacker,
+        "open_session",
+        OpenSessionRequest {
+            challenge_id: response.challenge_id.clone(),
+            eoa_signature: signature.to_bytes65().to_vec().into(),
+        },
+    )
+    .expect("call");
+    let error = stolen.expect_err("must reject another principal");
+    assert!(
+        matches!(error, ErrorCode::Unauthenticated { .. }),
+        "{error:?}"
+    );
+
+    // 束縛の確認は消費の前に行うため、正規のcallerは同じchallengeをまだ使える
+    // （他人が消費してログインを妨害できない）。
+    let legitimate: Result<SessionHandle, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "open_session",
+        OpenSessionRequest {
+            challenge_id: response.challenge_id,
+            eoa_signature: signature.to_bytes65().to_vec().into(),
+        },
+    )
+    .expect("call");
+    legitimate.expect("正当なprincipalはセッションを開ける");
+}
+
+/// challengeの発行は呼び出し元principalの申告と一致することを要求する。
+#[test]
+fn a_challenge_principal_must_match_the_caller() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(19);
+    let eoa = address_from_secret(&secret(113)).expect("address");
+
+    let outcome: Result<ChallengeResponse, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "issue_challenge",
+        challenge_request(principal(20), eoa),
+    )
+    .expect("call");
+    let error = outcome.expect_err("must reject another principal");
+    assert!(
+        matches!(error, ErrorCode::Unauthenticated { .. }),
+        "{error:?}"
+    );
+}

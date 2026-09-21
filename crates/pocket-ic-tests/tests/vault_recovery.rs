@@ -16,6 +16,7 @@ use pocket_ic_tests::{
 
 const ORIGIN: &str = "https://app.example.test";
 const ACCEPTED: &[u8] = br#"{"status":"ok","response":{"type":"default"}}"#;
+const REJECTED: &[u8] = br#"{"status":"err","response":"insufficient balance"}"#;
 
 fn secret(seed: u8) -> [u8; 32] {
     let mut bytes = [0u8; 32];
@@ -25,6 +26,51 @@ fn secret(seed: u8) -> [u8; 32] {
 
 fn blob(value: &[u8]) -> Blob {
     value.to_vec().into()
+}
+
+/// テスト専用の入金計上（`test-venue`）。
+fn credit(
+    pic: &PocketIc,
+    vault: Principal,
+    caller: Principal,
+    session: &SessionHandle,
+    amount: u64,
+    seed: u8,
+) {
+    let outcome: Result<(), ErrorCode> = update_args(
+        pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (session.clone(), amount, blob(&[seed; 32])),
+    )
+    .expect("call");
+    outcome.expect("credit");
+}
+
+/// 配分を要求する（受付のみ。署名・送信はsweep）。
+fn allocate(
+    pic: &PocketIc,
+    vault: Principal,
+    caller: Principal,
+    session: &SessionHandle,
+    request: &[u8],
+    amount: u64,
+) -> Result<FundRequestAccepted, ErrorCode> {
+    update(
+        pic,
+        vault,
+        caller,
+        "request_allocation",
+        AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(request),
+            amount,
+            target: AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .expect("call")
 }
 
 fn open_session(
@@ -199,4 +245,177 @@ fn allocated_funds_arrive_and_can_be_recovered() {
         events.expect("events").items[0].state,
         FundRequestState::Settled
     );
+}
+
+/// 取引口座のequityを超える回収と、equityを超える二重の回収を拒否する。
+///
+/// 拘束が無いと、同じequityに対して複数の回収が同時に署名・送信され得る。
+#[test]
+fn a_recovery_over_the_trading_equity_is_rejected() {
+    let pic = pic();
+    let controller = principal(97);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let caller = principal(95);
+    let session = open_session(&pic, vault, caller, &secret(165));
+    credit(&pic, vault, caller, &session, 1_000_000, 5);
+    allocate(&pic, vault, caller, &session, b"recv-alloc", 400_000).expect("allocation");
+
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("allocation sweep"), 1);
+
+    // 着金を取り込んで取引口座のequityを400,000にする。
+    let trading: Result<api_types::Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "get_trading_address",
+        session.clone(),
+    )
+    .expect("call");
+    let trading_address = blob(&trading.expect("trading address"));
+    let credited: Result<bool, ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "credit_venue_deposit",
+        (
+            blob(&[31u8; 32]),
+            400_000u64,
+            trading_address.clone(),
+            "usdc".to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(credited.expect("arrival"));
+
+    // equityを超える回収は残高不足として拒否する。
+    let too_much: Result<FundRequestAccepted, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "request_recovery",
+        (session.clone(), blob(b"recv-too-much"), 500_000u64),
+    )
+    .expect("call");
+    let error = too_much.expect_err("must reject over the trading equity");
+    assert!(
+        matches!(error, ErrorCode::InsufficientFunds { .. }),
+        "{error:?}"
+    );
+
+    // 1件目の回収（全額）を予約した後、2件目は拘束により拒否する。
+    let first: Result<FundRequestAccepted, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "request_recovery",
+        (session.clone(), blob(b"recv-first"), 400_000u64),
+    )
+    .expect("call");
+    first.expect("first recovery");
+    let second: Result<FundRequestAccepted, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "request_recovery",
+        (session.clone(), blob(b"recv-second"), 400_000u64),
+    )
+    .expect("call");
+    let error = second.expect_err("must reject a second concurrent recovery");
+    assert!(
+        matches!(error, ErrorCode::InsufficientFunds { .. }),
+        "{error:?}"
+    );
+
+    // 取引所が拒否した場合は拘束が戻り、再要求できる。
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, REJECTED.to_vec())),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("recovery sweep"), 1);
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
+    assert_eq!(status.expect("status").trading_equity, 400_000);
+    let retry: Result<FundRequestAccepted, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "request_recovery",
+        (session.clone(), blob(b"recv-retry"), 400_000u64),
+    )
+    .expect("call");
+    retry.expect("拒否後は拘束が解けて再要求できる");
+}
+
+/// 取引口座への直接入金（保留中の配分が無い着金）も取引残高へ計上できる。
+///
+/// 以前は無条件に `allocation_confirm` を呼んでいたため `in_transit` が負債超過に
+/// なり、以後の残高参照が不変条件違反で失敗した。
+#[test]
+fn a_direct_deposit_to_the_trading_account_is_credited() {
+    let pic = pic();
+    let controller = principal(98);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let caller = principal(96);
+    let session = open_session(&pic, vault, caller, &secret(166));
+    credit(&pic, vault, caller, &session, 1_000_000, 6);
+    allocate(&pic, vault, caller, &session, b"recv-direct", 100_000).expect("allocation");
+
+    let trading: Result<api_types::Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "get_trading_address",
+        session.clone(),
+    )
+    .expect("call");
+    let trading_address = blob(&trading.expect("trading address"));
+
+    // 配分の着金を取り込まずに、取引口座へ直接入金する。
+    let credited: Result<bool, ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "credit_venue_deposit",
+        (
+            blob(&[32u8; 32]),
+            250_000u64,
+            trading_address,
+            "usdc".to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(credited.expect("direct deposit"));
+
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
+    let status = status.expect("status");
+    assert_eq!(
+        status.trading_equity, 250_000,
+        "直接入金は取引口座のequityへ計上する"
+    );
+    assert_eq!(status.in_transit, 0, "保留中の配分は無い");
 }
