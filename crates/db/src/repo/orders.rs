@@ -800,3 +800,38 @@ pub fn mark_all_cancel_requested(
     let changed = crate::cas::changes(connection)?;
     u64::try_from(changed).map_err(|_| Error::Invariant("negative change count"))
 }
+
+/// 口座snapshotの改訂番号（利用者の注文・約定の追加で単調に増える）。
+///
+/// キャッシュ残高を持たないため、DBの追加行を改訂の指標にする。
+pub fn account_revision(connection: &Connection, user_id: &[u8; 32]) -> Result<u64, Error> {
+    let value = connection
+        .query_scalar::<i64>(
+            "SELECT (SELECT COALESCE(MAX(rowid), 0) FROM orders WHERE user_id = ?1)
+                  + (SELECT COALESCE(MAX(rowid), 0) FROM fills WHERE user_id = ?1)",
+            params![user_id.as_slice()],
+        )
+        .map_err(sql)?;
+    u64::try_from(value).map_err(|_| Error::Invariant("negative revision"))
+}
+
+/// 最後に取引所の約定を取り込んだ時刻（鮮度の指標）。
+pub fn latest_fill_at(
+    connection: &Connection,
+    user_id: &[u8; 32],
+) -> Result<Option<u64>, Error> {
+    // `MAX` は行が無いと NULL を返すため、nullable な行として読む。
+    let row = connection
+        .query_optional(
+            "SELECT MAX(filled_at) FROM fills WHERE user_id = ?1",
+            params![user_id.as_slice()],
+            |row| row.get::<Option<i64>>(0),
+        )
+        .map_err(sql)?;
+    match row.flatten() {
+        Some(value) => u64::try_from(value)
+            .map(Some)
+            .map_err(|_| Error::Invariant("negative timestamp")),
+        None => Ok(None),
+    }
+}

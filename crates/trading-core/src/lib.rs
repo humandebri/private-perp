@@ -660,6 +660,12 @@ async fn get_account_snapshot(
     let rows =
         db::tx::query(|connection| db::repo::orders::list_orders(connection, &user_id, None, 50))
             .map_err(map_db)?;
+    let revision =
+        db::tx::query(|connection| db::repo::orders::account_revision(connection, &user_id))
+            .map_err(map_db)?;
+    let latest_fill =
+        db::tx::query(|connection| db::repo::orders::latest_fill_at(connection, &user_id))
+            .map_err(map_db)?;
 
     let mut open_orders = Vec::new();
     let mut pending_orders = Vec::new();
@@ -717,8 +723,9 @@ async fn get_account_snapshot(
         open_orders,
         pending_orders,
         observed_at: now,
-        revision: 1,
-        data_age_ms: 0,
+        revision,
+        // 取引所由来のデータ（約定）の最終観測からの経過。約定が無い間は0とする。
+        data_age_ms: latest_fill.map_or(0, |filled_at| now.saturating_sub(filled_at)),
     })
 }
 
