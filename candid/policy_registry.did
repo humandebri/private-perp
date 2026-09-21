@@ -1,0 +1,96 @@
+// 入力不正の理由コード。
+type BadRequestCode = variant {
+  NonceReused;
+  UnsupportedMarket;
+  TooLarge;
+  NetworkMismatch;
+  MalformedPayload;
+  InvalidSignature;
+  QuantityOutOfRange;
+  ChallengeExpired;
+  ExpiredIntent;
+  AmountZero;
+  PrecisionExceeded;
+  OriginMismatch;
+  ChallengeReused;
+  DestinationNotAllowed;
+  MissingField;
+  PriceOutOfRange;
+  UnsupportedAsset;
+};
+// API全体のエラー。
+type ErrorCode = variant {
+  Internal : record { code : text };
+  DuplicateIgnored : record { request_id : blob };
+  SigningQueueFull;
+  NotAllowed : record { code : NotAllowedCode };
+  UpstreamUnavailable : record { venue : text };
+  UnknownPending : record { action_id : blob };
+  ReservationConflict;
+  StaleAccountState : record { max_age_ms : nat64; observed_at : nat64 };
+  IdempotencyConflict : record { request_id : blob };
+  UpstreamRejected : record { code : text; retryable : bool };
+  NotEligible : record { policy_version : nat64 };
+  VenueRateLimited : record { retry_after_ms : opt nat64 };
+  RiskLimitExceeded : record { limit : nat64 };
+  SessionRevoked;
+  BadRequest : record { code : BadRequestCode; detail : text };
+  PolicyUnavailable;
+  SessionExpired;
+  InsufficientFunds : record { requested : nat64; available : nat64 };
+  Unauthenticated : record { reason : text };
+};
+// 権限・状態に起因する拒否の理由コード。
+type NotAllowedCode = variant {
+  UpgradeContentMismatch;
+  AssetNotAllowed;
+  SessionIssuedByUnregisteredVault;
+  UpgradeTooEarly;
+  AccountNotOwned;
+  OrderNotFound;
+  CallerMismatch;
+  OrderNotCancellable;
+  UpgradeAlreadyExecuted;
+  OperationNotAvailable;
+  UpgradeNotScheduled;
+};
+// 現在の政策。
+type Policy = record {
+  // 取引を許可する銘柄（初期は BTC・ETH perpsのみ）。
+  markets : vec text;
+  version : nat64;
+};
+type Result = variant { Ok; Err : ErrorCode };
+type Result_1 = variant { Ok : Policy; Err : ErrorCode };
+// 停止状態（理由コードのみを公開する）。
+type StopStatus = record {
+  stopped : bool;
+  since : opt nat64;
+  reason : opt text;
+};
+service : () -> {
+  // 緊急停止の解除（SNS governanceのみ）。即時の緩和を運営鍵では行えないようにする。
+  clear_emergency_stop : () -> (Result);
+  // 現在の政策（allowlist）。未設定はエラー（fail-closed）。
+  get_policy : () -> (Result_1) query;
+  // 役割別のprincipal（診断用）。
+  get_role_principal : (text) -> (opt principal) query;
+  // 停止状態（理由コードのみを公開する）。
+  get_stop_status : () -> (StopStatus) query;
+  // 緊急停止（**停止方向のみ**）。解除は `clear_emergency_stop`（SNS経路）だけが行える。
+  set_emergency_stop : () -> (Result);
+  // `control_guard` のprincipalを設定する（controllerのみ、初期化時）。
+  // 
+  // 政策（版とallowlist）の変更はこのprincipalだけが行える（契約: control_guard経由のみ）。
+  set_guard_principal : (principal) -> (Result);
+  // 運営principalを設定する（controllerのみ、初期化時）。
+  set_operator : (principal) -> (Result);
+  // 政策（版とallowlist）を設定する（`control_guard`のみ）。版は厳密に増加させる。
+  set_policy_version : (nat64, vec text) -> (Result);
+  // SNS governanceのprincipalを設定する（controllerのみ、初期化時）。
+  // 
+  // 緊急停止の**解除**はこのprincipalだけが行える（契約: 解除は記録したSNS経路）。
+  set_sns_principal : (principal) -> (Result);
+  // このビルドのバージョン。デプロイ確認用。
+  version : () -> (text) query;
+}

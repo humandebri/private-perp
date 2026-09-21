@@ -65,7 +65,32 @@ Phase 3以降（複数ユーザー分離・負荷・backup復元・cycles通知�
 - 試験：`core_environment.rs`・`vault_environment.rs`（mainnet拒否・不一致拒否・`get_environment`・**設定したendpointが実際のoutcall URLになること**）、`hl-types`のホスト試験。
 - E-1（mock eligibility token）は**未実施**：eligibility発行はPhase 3で、tokenが存在しない。E-5（mock endpointの本番混入）はmock endpointをコードへ埋め込まず設定でのみ与えることで構造的に満たす。
 
-### 実行上の注意（並行作業対策）
+### ローカル接続（M4 3A/3Bの前提・2026-09-22に構築）
+
+testnet（GATE 0）を待たずに画面とcanisterを結ぶため、ローカルネットワークへの
+デプロイと初期設定をスクリプト化した。Candidはwasmから抽出してリポジトリに固定する。
+
+```sh
+# 1. Candid（.did）を抽出（本番feature無しのwasm。試験専用entry pointの混入も検査）
+bash scripts/extract-candid.sh
+
+# 2. ローカルネットワークとidentity（プロジェクト専用のICP_HOMEを使う）
+export ICP_HOME="$PWD/.icp-home"
+icp identity new private-perp-local --storage plaintext   # 初回のみ
+icp identity default private-perp-local                   # 初回のみ
+icp network start -d
+icp deploy --yes
+
+# 3. 初期設定（policyのallowlist・core/vaultのnetwork/endpoint/key id・HPKE鍵）
+bash scripts/bootstrap-local.sh
+```
+
+- `ICP_HOME`をプロジェクト内へ向けることで、**他のプロジェクトのidentityと既定を変更しない**。`.icp-home/`と`.icp/`は`.gitignore`対象（鍵とCanister IDをコミットしない）。
+- Canister IDは`icp canister status <name> --json`で引く（デプロイごとに変わり得るため、スクリプト・画面へハードコードしない）。canisterへは`PUBLIC_CANISTER_ID:<name>`が注入される。
+- `candid/*.did`は`scripts/extract-candid.sh`の生成物。Rustの契約（`api-types`）とCandidのずれはこのスクリプトの再実行で検出する。
+- 画面（`frontend/`）は次の段階でこのローカルcanisterへ接続する（3B）。ローカルのendpointは`get_environment`で確認できる。
+
+## 実行上の注意（並行作業対策）
 - PocketICは必ずスクリプト経由：`POCKET_IC_TEST_DIR=$PWD/target/test-venue-mine bash scripts/pocket-ic-test.sh --test <name>`。
 - 素の `cargo test` は本番用wasm（feature無し）を読むため偽の失敗になる。
 - 封筒を使う試験は、controllerが `rotate_hpke_key` を呼んで鍵を生成しておく（未生成の個人APIはfail-closedで拒否する）。

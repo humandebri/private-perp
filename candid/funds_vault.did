@@ -1,0 +1,367 @@
+// 口座の用途。共通保管（取引しない）とユーザー別取引口座を区別する。
+type AccountKind = variant { Reserve; Trading };
+// action状態（`docs/phase-0/state-machines.md` 2節）。
+type ActionState = variant {
+  Queued;
+  Signing;
+  Reconciled;
+  Dispatching;
+  Unknown;
+  Signed;
+  Aborted;
+};
+type AgentGeneration = record {
+  account_id : blob;
+  generation : nat64;
+  approved_at : opt nat64;
+  state : AgentState;
+  agent_address : blob;
+  expires_at : opt nat64;
+};
+// Agent世代の状態（`Implementation.md` 7章）。
+type AgentState = variant {
+  Failed;
+  Active;
+  Expiring;
+  Approving;
+  Requested;
+  Revoked;
+};
+type AllocationRequest = record {
+  client_request_id : blob;
+  target : AccountKind;
+  intent_signature : opt blob;
+  session : SessionHandle;
+  amount : nat64;
+};
+// 資産・銘柄。初期対応はHyperCore USDCとBTC・ETH perpsのみ。
+type AssetId = variant { Usdc; BtcPerp; EthPerp };
+// 入力不正の理由コード。
+type BadRequestCode = variant {
+  NonceReused;
+  UnsupportedMarket;
+  TooLarge;
+  NetworkMismatch;
+  MalformedPayload;
+  InvalidSignature;
+  QuantityOutOfRange;
+  ChallengeExpired;
+  ExpiredIntent;
+  AmountZero;
+  PrecisionExceeded;
+  OriginMismatch;
+  ChallengeReused;
+  DestinationNotAllowed;
+  MissingField;
+  PriceOutOfRange;
+  UnsupportedAsset;
+};
+// challengeの用途。`withdrawal` のchallengeはセッション確立に使えない。
+type ChallengePurpose = variant { Login; Withdrawal };
+type ChallengeRequest = record {
+  // ブラウザが生成する短命IC署名IdentityのPrincipal。
+  "principal" : principal;
+  origin : text;
+  network : Network;
+  purpose : ChallengePurpose;
+  // EOAアドレス（20バイト）。
+  eoa_address : blob;
+};
+type ChallengeResponse = record {
+  // EIP-712 typed data（origin・network・canister・用途・nonce・期限を含む）。
+  typed_data : blob;
+  nonce : blob;
+  challenge_id : blob;
+  expires_at : nat64;
+};
+type Destination = variant { AuthenticatedEoaHlAccount };
+// 解決済みの環境設定（既定値の適用と検証を通したもの）。
+type EnvironmentView = record {
+  // 閾値ECDSAのkey ID。
+  ecdsa_key_id : text;
+  // Hyperliquidの`/info` endpoint。
+  info_url : text;
+  network : Network;
+  // Hyperliquidの`/exchange` endpoint。
+  exchange_url : text;
+};
+// API全体のエラー。
+type ErrorCode = variant {
+  Internal : record { code : text };
+  DuplicateIgnored : record { request_id : blob };
+  SigningQueueFull;
+  NotAllowed : record { code : NotAllowedCode };
+  UpstreamUnavailable : record { venue : text };
+  UnknownPending : record { action_id : blob };
+  ReservationConflict;
+  StaleAccountState : record { max_age_ms : nat64; observed_at : nat64 };
+  IdempotencyConflict : record { request_id : blob };
+  UpstreamRejected : record { code : text; retryable : bool };
+  NotEligible : record { policy_version : nat64 };
+  VenueRateLimited : record { retry_after_ms : opt nat64 };
+  RiskLimitExceeded : record { limit : nat64 };
+  SessionRevoked;
+  BadRequest : record { code : BadRequestCode; detail : text };
+  PolicyUnavailable;
+  SessionExpired;
+  InsufficientFunds : record { requested : nat64; available : nat64 };
+  Unauthenticated : record { reason : text };
+};
+type FundActionKind = variant {
+  AgentRevocation;
+  Recovery;
+  Withdrawal;
+  AgentApproval;
+  Allocation;
+};
+// 資金履歴の1件。
+type FundEvent = record {
+  at : nat64;
+  kind : FundActionKind;
+  state : FundRequestState;
+  event_id : blob;
+  amount : nat64;
+};
+type FundRequestAccepted = record {
+  request_id : blob;
+  accepted_at : nat64;
+  // 送信するactionのID。wire payloadを構築する段階（署名時）に確定するため未確定は`None`。
+  fund_action_id : opt blob;
+  state : FundRequestState;
+};
+// 資金要求の状態（`state-machines.md` 3節）。
+type FundRequestState = variant {
+  Reserved;
+  Executing;
+  Rejected;
+  Accepted;
+  Unknown;
+  Settled;
+};
+type FundStatus = record {
+  trading_equity : nat64;
+  in_transit : nat64;
+  unknowns : vec UnresolvedAction;
+  trading_unrealized_pnl : int64;
+  withdrawable : nat64;
+  reserve_unallocated : nat64;
+  reserved_for_withdrawal : nat64;
+  revision : nat64;
+  observed_at : nat64;
+};
+type FundingInstructions = record {
+  asset : AssetId;
+  network : Network;
+  // 最小額。Phase 1の実測で確定するまでは `None`。
+  minimum_amount : opt nat64;
+  hl_account_address : blob;
+  memo_required : bool;
+  account_kind : AccountKind;
+};
+// # HTTP Header.
+// 
+// Represents a HTTP header.
+// 
+// See [`HttpRequestArgs::headers`] and [`HttpRequestResult::headers`].
+type HttpHeader = record {
+  // Value of the header.
+  value : text;
+  // Name of the header.
+  name : text;
+};
+// # HTTP Request Result
+// 
+// Result type of [`http_request`](https://docs.internetcomputer.org/references/management-canister/#http_request).
+type HttpRequestResult = record {
+  // The response status (e.g. 200, 404).
+  status : nat;
+  // The response’s body.
+  body : blob;
+  // List of HTTP response headers and their corresponding values.
+  headers : vec HttpHeader;
+};
+// IC network。`docs/phase-0/environments.md` の環境分離の単位。
+type Network = variant { Mainnet; Local; Testnet };
+// 権限・状態に起因する拒否の理由コード。
+type NotAllowedCode = variant {
+  UpgradeContentMismatch;
+  AssetNotAllowed;
+  SessionIssuedByUnregisteredVault;
+  UpgradeTooEarly;
+  AccountNotOwned;
+  OrderNotFound;
+  CallerMismatch;
+  OrderNotCancellable;
+  UpgradeAlreadyExecuted;
+  OperationNotAvailable;
+  UpgradeNotScheduled;
+};
+type OpenSessionRequest = record {
+  // 65バイトのEOA署名。
+  eoa_signature : blob;
+  challenge_id : blob;
+};
+// カーソルページング（`docs/phase-0/api-contract.md` 1.2）。
+type Paged = record {
+  next_cursor : opt blob;
+  items : vec FundEvent;
+  revision : nat64;
+  observed_at : nat64;
+};
+type Result = variant { Ok : AgentGeneration; Err : ErrorCode };
+type Result_1 = variant { Ok; Err : ErrorCode };
+type Result_10 = variant { Ok : ChallengeResponse; Err : ErrorCode };
+type Result_11 = variant { Ok : Paged; Err : ErrorCode };
+type Result_12 = variant { Ok : SessionHandle; Err : ErrorCode };
+type Result_13 = variant { Ok : nat32; Err : ErrorCode };
+type Result_14 = variant { Ok : FundRequestAccepted; Err : ErrorCode };
+type Result_15 = variant { Ok : SessionStatus; Err : ErrorCode };
+type Result_2 = variant { Ok : bool; Err : ErrorCode };
+type Result_3 = variant { Ok : opt AgentGeneration; Err : ErrorCode };
+type Result_4 = variant { Ok : record { nat64; nat64 }; Err : ErrorCode };
+type Result_5 = variant { Ok : EnvironmentView; Err : ErrorCode };
+type Result_6 = variant { Ok : FundStatus; Err : ErrorCode };
+type Result_7 = variant { Ok : FundingInstructions; Err : ErrorCode };
+type Result_8 = variant { Ok : blob; Err : ErrorCode };
+type Result_9 = variant { Ok : opt blob; Err : ErrorCode };
+// 失効世代付きセッション。`trading_core` はvaultが発行したものだけを受け入れる。
+type SessionHandle = record {
+  session_id : blob;
+  expires_at : nat64;
+  vault_principal : principal;
+  revocation_generation : nat64;
+};
+// セッションの有効性（`trading_core` がvaultへ問い合わせる）。
+// 
+// 束縛されたprincipalを含むため、呼び出し側は自分の`msg_caller`と比較して認可する
+// （vault側で呼び出し元を束縛できない、canister間の検証経路のため）。
+type SessionStatus = record {
+  "principal" : principal;
+  user_id : blob;
+  expires_at : nat64;
+  revocation_generation : nat64;
+};
+// # Transform Args.
+// 
+// ```text
+// record {
+// response : http_response;
+// context : blob;
+// }
+// ```
+// 
+// See [`TransformContext`].
+type TransformArgs = record {
+  // Context for response transformation
+  context : blob;
+  // Raw response from remote service, to be transformed
+  response : HttpRequestResult;
+};
+// 未解決のaction。出金可能額へ算入しない。
+type UnresolvedAction = record {
+  action_id : blob;
+  kind : FundActionKind;
+  since : nat64;
+  state : ActionState;
+};
+type WithdrawalRequest = record {
+  // 初期の出金先は認証EOAのHL口座のみ。
+  destination : Destination;
+  asset : AssetId;
+  client_request_id : blob;
+  network : Network;
+  intent_signature : blob;
+  session : SessionHandle;
+  nonce : nat64;
+  amount : nat64;
+  expires_at : nat64;
+};
+service : () -> {
+  // 渡されたAgentアドレスを世代へ承認する（master鍵で署名して送信し、結果を永続化する）。
+  // 
+  // `generation` は `trading_core` が採番した世代を渡す。承認はvaultの
+  // `agent_generations` に保存され、取引所の応答が不明な場合は `active` にしない。
+  approve_agent_generation : (SessionHandle, nat64, blob) -> (Result);
+  // 呼び出し元のPrincipal（診断用。認可の判断は各メソッド内で行う）。
+  caller_principal : () -> (principal) query;
+  // 宛先が未解決だった入金を、後から判明した利用者へ振り替える（controllerのみ）。
+  // 
+  // `credit` がsuspenseへ計上したイベントだけを対象にする（既に本人へ計上済みの
+  // イベントを再計上しない）。同一イベントの二重請求は仕訳の要求IDで拒否する。
+  claim_unmatched_deposit : (blob, blob) -> (Result_1);
+  // 取引所の入金を本人へ計上する（controllerのみ。宛先が導出口座の場合）。
+  credit_venue_deposit : (blob, nat64, blob, text) -> (Result_2);
+  // 口座・世代の承認状態（`trading_core` が状態表示と署名可否の判断に使う）。
+  get_agent_approval : (blob, nat64) -> (Result_3) query;
+  // 本人の残高（`trading_core` がsnapshotを作るための参照）。
+  // 
+  // 戻り値は `(取引口座の残高, 出金可能額)`。認可のcaller束縛は呼び出し側（core）が
+  // `session_status` で行う。
+  get_balances : (SessionHandle) -> (Result_4) query;
+  // 現在の環境設定（診断用・公開）。秘密は含まない。
+  get_environment : () -> (Result_5) query;
+  // 資金状態（認証済みセッションが必要）。
+  get_fund_status : (SessionHandle) -> (Result_6) query;
+  // 入金案内（認証済みセッションが必要）。
+  get_funding_instructions : (SessionHandle) -> (Result_7) query;
+  // 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
+  get_hpke_public_key : () -> (Result_8) query;
+  // 本人の取引口座ID（`trading_core` が所有権の確認に使う）。
+  get_trading_account : (SessionHandle) -> (Result_9) query;
+  // 本人の取引口座アドレス（着金確認や照合に使う）。
+  get_trading_address : (SessionHandle) -> (Result_8) query;
+  // 取引所の入金（ledger update）を記録する（controllerのみ）。
+  // 
+  // 正規化したイベントID（`keccak256("deposit" ‖ tx_hash)`）で**二重計上を防ぐ**。
+  // 本番ではreplicatedな`/info`照合がこの経路を呼ぶ。ユーザーへの紐付け（宛先アドレス→
+  // 利用者）と`deposit_confirmed`の起票は次段階（アドレス写像の実装後）に行う。
+  ingest_venue_deposit : (blob, nat64, text) -> (Result_2);
+  // ログインchallengeを発行する。
+  issue_challenge : (ChallengeRequest) -> (Result_10);
+  // 資金履歴（認証済みセッションが必要）。
+  list_fund_events : (SessionHandle, opt blob, nat32) -> (Result_11) query;
+  // challengeを消費してセッションを発行する。
+  open_session : (OpenSessionRequest) -> (Result_12);
+  // 入金先（準備口座）を用意する。`get_funding_instructions` の前提を作る。
+  provision_reserve_account : (SessionHandle) -> (Result_8);
+  // 取引所の入金を取得して取り込む（controllerのみ）。
+  // 
+  // 取得はreplicated outcall（変換関数で決定論化）、取り込みは検証済みの`deposits::credit`。
+  reconcile_deposits : (blob) -> (Result_13);
+  // 配分を要求する（受付＋予約）。
+  request_allocation : (AllocationRequest) -> (Result_14);
+  // 回収（trading口座→準備口座）を要求する。
+  request_recovery : (SessionHandle, blob, nat64) -> (Result_14);
+  // 出金を要求する（本人署名の検証＋受付＋予約）。
+  request_withdrawal : (WithdrawalRequest) -> (Result_14);
+  // 不明なactionを「未実行」として解消する（controllerのみ）。
+  // 
+  // 取引所が実行済みと確認できた場合の消込は、証跡（tx）を伴う別経路で行うため
+  // ここでは受け付けない（`OperationNotAvailable`）。`unknown` と `dispatching` の
+  // どちらも対象にするが、**取引所へ照会した証跡**を `evidence` として必須にする。
+  resolve_unknown_action : (blob, bool, text) -> (Result_1);
+  // セッションを失効させる。
+  revoke_session : (SessionHandle) -> (Result_1);
+  // HPKEの鍵世代を更新する（controllerのみ）。
+  // 
+  // 秘密鍵はcanister内のDBに留め、公開鍵のみを配布する（`Plan.md` 16.5）。
+  rotate_hpke_key : () -> (Result_8);
+  // セッションの有効性（canister間の検証経路。呼び出し元は返却されたprincipalを検証する）。
+  session_status : (SessionHandle) -> (Result_15) query;
+  // 閾値ECDSAのkey IDを設定する（controllerのみ）。
+  // 
+  // testnetの鍵名はデプロイ後に実測して確定する（`docs/phase-0/environments.md` 2節）。
+  set_ecdsa_key_id : (text) -> (Result_1);
+  // 環境のnetworkを設定する（controllerのみ）。
+  // 
+  // mainnetはPhase 2では拒否する（`docs/phase-0/environments.md` E-2）。
+  set_network : (text) -> (Result_1);
+  // Hyperliquidのendpointを設定する（controllerのみ）。
+  // 
+  // 設定済みのnetworkと整合しないhost（例：testnet設定にmainnet endpoint）は拒否する。
+  set_venue_endpoints : (text, text) -> (Result_1);
+  // 変換関数：必要な要素だけを決定論的に残す（順序・付随フィールドの揺れを除く）。
+  transform_info : (TransformArgs) -> (HttpRequestResult) query;
+  // このビルドのバージョン。デプロイ確認用。
+  version : () -> (text) query;
+}

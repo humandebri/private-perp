@@ -1,0 +1,94 @@
+// 入力不正の理由コード。
+type BadRequestCode = variant {
+  NonceReused;
+  UnsupportedMarket;
+  TooLarge;
+  NetworkMismatch;
+  MalformedPayload;
+  InvalidSignature;
+  QuantityOutOfRange;
+  ChallengeExpired;
+  ExpiredIntent;
+  AmountZero;
+  PrecisionExceeded;
+  OriginMismatch;
+  ChallengeReused;
+  DestinationNotAllowed;
+  MissingField;
+  PriceOutOfRange;
+  UnsupportedAsset;
+};
+// API全体のエラー。
+type ErrorCode = variant {
+  Internal : record { code : text };
+  DuplicateIgnored : record { request_id : blob };
+  SigningQueueFull;
+  NotAllowed : record { code : NotAllowedCode };
+  UpstreamUnavailable : record { venue : text };
+  UnknownPending : record { action_id : blob };
+  ReservationConflict;
+  StaleAccountState : record { max_age_ms : nat64; observed_at : nat64 };
+  IdempotencyConflict : record { request_id : blob };
+  UpstreamRejected : record { code : text; retryable : bool };
+  NotEligible : record { policy_version : nat64 };
+  VenueRateLimited : record { retry_after_ms : opt nat64 };
+  RiskLimitExceeded : record { limit : nat64 };
+  SessionRevoked;
+  BadRequest : record { code : BadRequestCode; detail : text };
+  PolicyUnavailable;
+  SessionExpired;
+  InsufficientFunds : record { requested : nat64; available : nat64 };
+  Unauthenticated : record { reason : text };
+};
+// 権限・状態に起因する拒否の理由コード。
+type NotAllowedCode = variant {
+  UpgradeContentMismatch;
+  AssetNotAllowed;
+  SessionIssuedByUnregisteredVault;
+  UpgradeTooEarly;
+  AccountNotOwned;
+  OrderNotFound;
+  CallerMismatch;
+  OrderNotCancellable;
+  UpgradeAlreadyExecuted;
+  OperationNotAvailable;
+  UpgradeNotScheduled;
+};
+type Result = variant { Ok; Err : ErrorCode };
+type ScheduleUpgradeArgs = record { request : UpgradeRequest };
+type ScheduledUpgrade = record {
+  // `scheduled_at + 7日`。予約内容を変更する場合は取消＋新規予約とし、新しい猶予を開始する。
+  executable_at : nat64;
+  request : UpgradeRequest;
+  state : UpgradeState;
+  scheduled_at : nat64;
+};
+type UpgradeRequest = record {
+  arg_hash : blob;
+  target : principal;
+  // 32バイトのWASMモジュールハッシュ。
+  wasm_hash : blob;
+};
+type UpgradeState = variant { Executable; Executed; Cancelled; Pending };
+type UpgradeStatus = record {
+  scheduled : opt ScheduledUpgrade;
+  guard_version : text;
+};
+service : () -> {
+  // 予約を取り消す（SNS governanceのみ）。対象を指定する。
+  // 
+  // 対象を指定せずに全件取消にすると、実行（対象ごとに1件）と対象が食い違う。
+  cancel_upgrade : (principal) -> (Result);
+  // 予約済みの内容と一致するupgradeを実行する（実行者は誰でもよい）。
+  execute_upgrade : (principal, blob, blob) -> (Result);
+  // SNS governanceのPrincipal（診断用）。
+  get_sns_principal : () -> (opt principal) query;
+  // 予約状況（公開）。
+  get_upgrade_status : () -> (UpgradeStatus) query;
+  // 変更を予約する（SNS governanceのみ）。7日後にだけ実行できる。
+  schedule_upgrade : (ScheduleUpgradeArgs) -> (Result);
+  // SNS governanceのPrincipalを設定する（controllerのみ、初期化時）。
+  set_sns_principal : (principal) -> (Result);
+  // このビルドのバージョン。デプロイ確認用。
+  version : () -> (text) query;
+}
