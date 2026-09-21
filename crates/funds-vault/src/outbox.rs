@@ -543,12 +543,7 @@ async fn dispatch_recovery(
     })
     .map_err(|error| map_db(error, None))?;
     db::tx::update(|connection| {
-        db::repo::actions::mark_dispatching(
-            connection,
-            &action.action_id,
-            action.worker_epoch,
-            now,
-        )
+        db::repo::actions::mark_dispatching(connection, &action.action_id, action.worker_epoch, now)
     })
     .map_err(|error| map_db(error, None))?;
 

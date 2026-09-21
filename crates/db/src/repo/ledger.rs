@@ -580,23 +580,40 @@ pub fn ensure_custody_account(
 pub fn custody_account_by_address(
     connection: &Connection,
     address: &[u8; 20],
-) -> Result<Option<([u8; 32], String)>, Error> {
+) -> Result<Option<CustodyOwner>, Error> {
     let row = connection
         .query_optional(
-            "SELECT user_id, kind FROM custody_accounts WHERE master_address = ?1 LIMIT 1",
+            "SELECT user_id, account_id, kind FROM custody_accounts WHERE master_address = ?1 LIMIT 1",
             params![address.as_slice()],
-            |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<Vec<u8>>(1)?,
+                    row.get::<String>(2)?,
+                ))
+            },
         )
         .map_err(sql)?;
-    row.map(|(user_id, kind)| {
-        Ok((
-            user_id
+    row.map(|(user_id, account_id, kind)| {
+        Ok(CustodyOwner {
+            user_id: user_id
                 .try_into()
                 .map_err(|_| Error::Invariant("expected a 32-byte user id"))?,
+            account_id: account_id
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte account id"))?,
             kind,
-        ))
+        })
     })
     .transpose()
+}
+
+/// 導出アドレスの所有者（利用者・口座・種別）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustodyOwner {
+    pub user_id: [u8; 32],
+    pub account_id: [u8; 32],
+    pub kind: String,
 }
 
 /// 入金先（準備口座）のアドレス（新しい順）。定期照合の対象。

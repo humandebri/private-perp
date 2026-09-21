@@ -129,10 +129,27 @@ pub fn credit(
     if !db::repo::events::ingest_external_event(connection, &event, now)? {
         return Ok(false);
     }
-    if let Some((user_id, _kind)) =
-        db::repo::ledger::custody_account_by_address(connection, address)?
-    {
-        db::repo::ledger::deposit_confirmed(connection, &user_id, amount, now, &event_id)?;
+    if let Some(owner) = db::repo::ledger::custody_account_by_address(connection, address)? {
+        if owner.kind == "trading" {
+            // 取引口座への着金＝配分の確定（移動中→取引）。
+            db::repo::ledger::allocation_confirm(
+                connection,
+                &owner.user_id,
+                &owner.account_id,
+                amount,
+                now,
+                &event_id,
+            )?;
+        } else {
+            // 準備口座への着金＝利用者への与信。
+            db::repo::ledger::deposit_confirmed(
+                connection,
+                &owner.user_id,
+                amount,
+                now,
+                &event_id,
+            )?;
+        }
     }
     Ok(true)
 }

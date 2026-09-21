@@ -204,6 +204,29 @@ fn get_hpke_public_key() -> Result<api_types::Blob, ErrorCode> {
         .ok_or(ErrorCode::PolicyUnavailable)
 }
 
+/// 本人の取引口座アドレス（着金確認や照合に使う）。
+#[ic_cdk::query]
+fn get_trading_address(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
+    let status = auth::session_status(&session)?;
+    let user_id: [u8; 32] =
+        status
+            .user_id
+            .as_ref()
+            .try_into()
+            .map_err(|_| ErrorCode::Internal {
+                code: "user_id must be 32 bytes".to_string(),
+            })?;
+    let account = db::tx::query(|connection| {
+        db::repo::ledger::custody_account(connection, &user_id, api_types::AccountKind::Trading)
+    })
+    .map_err(|error| auth::map_db(error, None))?;
+    account
+        .map(|account| account.master_address.to_vec().into())
+        .ok_or(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::OperationNotAvailable,
+        })
+}
+
 /// 本人の残高（`trading_core` がsnapshotを作るための参照）。
 ///
 /// 戻り値は `(取引口座の残高, 出金可能額)`。認可のcaller束縛は呼び出し側（core）が
