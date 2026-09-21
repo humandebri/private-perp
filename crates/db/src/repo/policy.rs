@@ -10,7 +10,7 @@ use ic_sqlite_vfs::db::UpdateConnection;
 use ic_sqlite_vfs::db::connection::Connection;
 use ic_sqlite_vfs::params;
 
-/// 政策を設定する（版とallowlist）。
+/// 政策を設定する（版とallowlist）。版は厳密に増加させる（巻き戻しを拒否する）。
 pub fn set_policy(
     connection: &mut UpdateConnection<'_>,
     version: u64,
@@ -20,10 +20,17 @@ pub fn set_policy(
     connection
         .execute(
             "INSERT INTO policy (singleton, version, markets) VALUES (1, ?1, ?2)
-             ON CONFLICT(singleton) DO UPDATE SET version = excluded.version, markets = excluded.markets",
+             ON CONFLICT(singleton) DO UPDATE SET version = excluded.version, markets = excluded.markets
+             WHERE excluded.version > policy.version",
             params![version as i64, markets.as_str()],
         )
-        .map_err(sql)
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    crate::cas::ensure_changed(
+        changed,
+        "version higher than the current policy",
+        "same or lower version",
+    )
 }
 
 /// 政策を読む。未設定はエラー（fail-closed）。
@@ -47,23 +54,30 @@ pub fn policy(connection: &Connection) -> Result<Policy, Error> {
     })
 }
 
-/// 運営principalを設定する（controllerが初期化時に1度だけ）。
-pub fn set_operator(connection: &mut UpdateConnection<'_>, operator: &[u8]) -> Result<(), Error> {
+/// 役割別のprincipalを設定する（controllerが初期化時に1度だけ）。
+pub fn set_role(
+    connection: &mut UpdateConnection<'_>,
+    role: &str,
+    principal: &[u8],
+    now: u64,
+) -> Result<(), Error> {
     connection
         .execute(
-            "INSERT INTO policy (singleton, version, markets, operator) VALUES (1, 0, '', ?1)
-             ON CONFLICT(singleton) DO UPDATE SET operator = excluded.operator",
-            params![operator],
+            "INSERT INTO policy_roles (role, principal, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(role) DO UPDATE SET
+               principal = excluded.principal,
+               updated_at = excluded.updated_at",
+            params![role, principal, now as i64],
         )
         .map_err(sql)
 }
 
-/// 運営principal。
-pub fn operator(connection: &Connection) -> Result<Option<Vec<u8>>, Error> {
+/// 役割別のprincipal。
+pub fn role(connection: &Connection, role: &str) -> Result<Option<Vec<u8>>, Error> {
     connection
         .query_optional_scalar::<Vec<u8>>(
-            "SELECT operator FROM policy WHERE singleton = 1",
-            params![],
+            "SELECT principal FROM policy_roles WHERE role = ?1",
+            params![role],
         )
         .map_err(sql)
 }

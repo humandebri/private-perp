@@ -117,6 +117,8 @@ mod tests {
         vec![
             ("vault", schema::vault::MIGRATIONS),
             ("core", schema::core::MIGRATIONS),
+            ("guard", schema::guard::MIGRATIONS),
+            ("policy", schema::policy::MIGRATIONS),
         ]
     }
 
@@ -164,39 +166,85 @@ mod tests {
 
     #[test]
     fn schema_covers_the_security_relevant_tables() {
+        // 表名は `CREATE TABLE <name> (` の形で探す。部分文字列一致だと
+        // "agents" が "agent_generations" に、といった誤検出で実表の欠落を見逃す。
+        fn assert_tables(schema: &str, name: &str, tables: &[&str]) {
+            for table in tables {
+                let needle = format!("CREATE TABLE {table} (");
+                assert!(schema.contains(&needle), "{name} schema lacks {needle}");
+            }
+        }
+
         let vault = schema::vault::MIGRATIONS
             .iter()
             .map(|migration| migration.sql)
             .collect::<String>();
-        for table in [
-            "challenges",
-            "sessions",
-            "journals",
-            "postings",
-            "fund_requests",
-            "reservations",
-            "fund_actions",
-            "master_nonces",
-            "external_events",
-            "key_registry",
-        ] {
-            assert!(vault.contains(table), "vault schema lacks {table}");
-        }
+        assert_tables(
+            &vault,
+            "vault",
+            &[
+                "identities",
+                "challenges",
+                "sessions",
+                "custody_accounts",
+                "accounts",
+                "journals",
+                "postings",
+                "fund_requests",
+                "reservations",
+                "fund_actions",
+                "action_events",
+                "master_nonces",
+                "external_events",
+                "key_registry",
+                "audit",
+                "agent_generations",
+                "hpke_keys",
+                "reconcile_cursor",
+                "used_intent_nonces",
+                "journal_requests",
+            ],
+        );
 
         let core = schema::core::MIGRATIONS
             .iter()
             .map(|migration| migration.sql)
             .collect::<String>();
-        for table in [
-            "agents",
-            "requests",
-            "actions",
-            "orders",
-            "nonces",
-            "meta_cache",
-        ] {
-            assert!(core.contains(table), "core schema lacks {table}");
-        }
+        assert_tables(
+            &core,
+            "core",
+            &[
+                "users",
+                "accounts",
+                "agents",
+                "requests",
+                "actions",
+                "orders",
+                "action_orders",
+                "order_events",
+                "risk_reservations",
+                "meta_cache",
+                "core_config",
+                "agent_generations",
+                "fills",
+            ],
+        );
+
+        let guard = schema::guard::MIGRATIONS
+            .iter()
+            .map(|migration| migration.sql)
+            .collect::<String>();
+        assert_tables(&guard, "guard", &["guard_config", "upgrades"]);
+
+        let policy = schema::policy::MIGRATIONS
+            .iter()
+            .map(|migration| migration.sql)
+            .collect::<String>();
+        assert_tables(
+            &policy,
+            "policy",
+            &["policy", "stop_status", "policy_roles"],
+        );
     }
 
     #[test]

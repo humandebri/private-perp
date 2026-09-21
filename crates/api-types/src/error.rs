@@ -99,13 +99,16 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// 同一の冪等性キーで再試行してよいか（`api-contract.md` 7節の分類）。
+    ///
+    /// `Internal` は含めない。設定不備・DB不整合のような恒久エラーが大半で、
+    /// 再送可と分類すると契約準拠のクライアントが無限に再送する。一時的な
+    /// インフラ失敗は `UpstreamUnavailable` として返す。
     pub fn retry_same_request(&self) -> bool {
         matches!(
             self,
             Self::UpstreamUnavailable { .. }
                 | Self::VenueRateLimited { .. }
                 | Self::SigningQueueFull
-                | Self::Internal { .. }
         )
     }
 
@@ -166,6 +169,17 @@ mod tests {
         let error = ErrorCode::NotAllowed {
             code: NotAllowedCode::UpgradeTooEarly,
         };
+        assert!(error.must_not_auto_resend());
+    }
+
+    #[test]
+    fn internal_is_never_retried_with_the_same_request() {
+        // 設定不備・DB不整合は再送しても直らない。再送可と分類すると
+        // 契約準拠のクライアントが恒久的に再送し続ける。
+        let error = ErrorCode::Internal {
+            code: "vault principal is not configured".to_string(),
+        };
+        assert!(!error.retry_same_request());
         assert!(error.must_not_auto_resend());
     }
 }

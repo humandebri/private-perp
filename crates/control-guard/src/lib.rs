@@ -20,7 +20,9 @@ use api_types::guard::{
 };
 use candid::Principal;
 use db::error::Error as DbError;
-use ic_cdk_management_canister::{CanisterInstallMode, InstallCodeArgs, install_code};
+use ic_cdk_management_canister::{
+    CanisterInstallMode, CanisterStatusArgs, InstallCodeArgs, canister_status, install_code,
+};
 use sha2::{Digest, Sha256};
 
 const MEMORY_ID: u8 = db::memory_id::CONTROL_GUARD_MAIN;
@@ -45,15 +47,19 @@ fn map_db(error: DbError) -> ErrorCode {
     }
 }
 
-/// Principalのバイト列表現を検証する（1〜29バイト）。
-fn check_principal(bytes: &[u8], what: &str) -> Result<(), ErrorCode> {
-    if bytes.is_empty() || bytes.len() > 29 {
+/// Principalを検証する（1〜29バイト、匿名は不可）。
+///
+/// 匿名principalを役割へ設定できてしまうと、匿名ingressから誰でも予約・実行・
+/// 解除を行える。
+fn check_principal(principal: Principal, what: &str) -> Result<Vec<u8>, ErrorCode> {
+    let bytes = principal.as_slice().to_vec();
+    if principal == Principal::anonymous() || bytes.is_empty() || bytes.len() > 29 {
         return Err(ErrorCode::BadRequest {
             code: api_types::error::BadRequestCode::MalformedPayload,
             detail: what.to_string(),
         });
     }
-    Ok(())
+    Ok(bytes)
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -84,11 +90,7 @@ fn set_sns_principal(principal: Principal) -> Result<(), ErrorCode> {
             reason: "only a controller can set the SNS principal".to_string(),
         });
     }
-    let principal = {
-        let bytes = principal.as_slice().to_vec();
-        check_principal(&bytes, "principal")?;
-        bytes
-    };
+    let principal = check_principal(principal, "invalid SNS principal")?;
     db::tx::update(|connection| db::repo::guard::set_sns_principal(connection, &principal))
         .map_err(map_db)
 }
@@ -110,11 +112,7 @@ fn schedule_upgrade(args: ScheduleUpgradeArgs) -> Result<(), ErrorCode> {
 
     let wasm_hash = to_fixed::<32>(&args.request.wasm_hash, "wasm_hash must be 32 bytes")?;
     let arg_hash = to_fixed::<32>(&args.request.arg_hash, "arg_hash must be 32 bytes")?;
-    let target = {
-        let bytes = args.request.target.as_slice().to_vec();
-        check_principal(&bytes, "invalid target principal")?;
-        bytes
-    };
+    let target = check_principal(args.request.target, "invalid target principal")?;
 
     require_sns(caller)?;
     db::tx::update(|connection| {
@@ -130,14 +128,17 @@ fn schedule_upgrade(args: ScheduleUpgradeArgs) -> Result<(), ErrorCode> {
     .map_err(map_db)
 }
 
-/// 予約を取り消す（SNS governanceのみ）。次の予約は新しい7日を開始する。
+/// 予約を取り消す（SNS governanceのみ）。対象を指定する。
+///
+/// 対象を指定せずに全件取消にすると、実行（対象ごとに1件）と対象が食い違う。
 #[ic_cdk::update]
-fn cancel_upgrade() -> Result<(), ErrorCode> {
+fn cancel_upgrade(target: Principal) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     let now = clock::now_ms();
+    let target = check_principal(target, "invalid target principal")?;
     require_sns(caller)?;
     db::tx::update(|connection| {
-        let cancelled = db::repo::guard::cancel_active(connection, now)?;
+        let cancelled = db::repo::guard::cancel_active_for_target(connection, &target, now)?;
         if !cancelled {
             return Err(DbError::NotFound);
         }
@@ -167,15 +168,13 @@ async fn execute_upgrade(
     arg: Vec<u8>,
 ) -> Result<(), ErrorCode> {
     let now = clock::now_ms();
-    let target_bytes = {
-        let bytes = target.as_slice().to_vec();
-        check_principal(&bytes, "invalid target principal")?;
-        bytes
-    };
+    let target_bytes = check_principal(target, "invalid target principal")?;
 
-    let reserved = db::tx::query(db::repo::guard::active_upgrade)
-        .map_err(map_db)?
-        .ok_or(not_allowed(NotAllowedCode::UpgradeNotScheduled))?;
+    let reserved = db::tx::query(|connection| {
+        db::repo::guard::active_upgrade_for_target(connection, &target_bytes)
+    })
+    .map_err(map_db)?
+    .ok_or(not_allowed(NotAllowedCode::UpgradeNotScheduled))?;
 
     if reserved.target != target_bytes {
         return Err(not_allowed(NotAllowedCode::UpgradeNotScheduled));
@@ -197,14 +196,40 @@ async fn execute_upgrade(
         return Err(not_allowed(NotAllowedCode::UpgradeAlreadyExecuted));
     }
 
-    install_code(&InstallCodeArgs {
+    if let Err(error) = install_code(&InstallCodeArgs {
         mode: CanisterInstallMode::Upgrade(None),
         canister_id: target,
         wasm_module,
         arg,
     })
     .await
-    .map_err(|error| internal(format!("install_code failed: {error}")))?;
+    {
+        // 失敗しても予約を `executing` のまま残さない（実行も取消もできない状態になる）。
+        // 対象のmodule hashを確認し、置き換わっていれば実行済み、置き換わっていなければ
+        // 実行権を戻して再実行できるようにする（猶予は既に経過している）。
+        let installed = match canister_status(&CanisterStatusArgs {
+            canister_id: target,
+        })
+        .await
+        {
+            Ok(status) => status.module_hash.as_deref() == Some(reserved.wasm_hash.as_slice()),
+            Err(_) => false,
+        };
+        if installed {
+            db::tx::update(|connection| {
+                db::repo::guard::mark_executed(connection, reserved.upgrade_id, clock::now_ms())
+            })
+            .map_err(map_db)?;
+            return Err(internal(format!(
+                "install_code returned an error but the reserved wasm is installed: {error}"
+            )));
+        }
+        db::tx::update(|connection| {
+            db::repo::guard::revert_executing(connection, reserved.upgrade_id)
+        })
+        .map_err(map_db)?;
+        return Err(internal(format!("install_code failed: {error}")));
+    }
 
     db::tx::update(|connection| {
         db::repo::guard::mark_executed(connection, reserved.upgrade_id, clock::now_ms())
@@ -216,10 +241,11 @@ async fn execute_upgrade(
 /// 予約状況（公開）。
 #[ic_cdk::query]
 fn get_upgrade_status() -> UpgradeStatus {
-    let active = db::tx::query(db::repo::guard::active_upgrade)
+    // 直近の予約を状態を問わず返す（実行済み・取消済みも監視できるようにする）。
+    let latest = db::tx::query(db::repo::guard::latest_upgrade)
         .ok()
         .flatten();
-    let scheduled = active.map(|row| ScheduledUpgrade {
+    let scheduled = latest.map(|row| ScheduledUpgrade {
         request: UpgradeRequest {
             target: Principal::from_slice(&row.target),
             wasm_hash: row.wasm_hash.to_vec().into(),

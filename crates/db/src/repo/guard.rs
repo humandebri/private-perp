@@ -102,11 +102,29 @@ pub fn insert_upgrade(
         .map_err(sql)
 }
 
-/// 有効な予約（pending／executable）を返す。
-pub fn active_upgrade(connection: &Connection) -> Result<Option<UpgradeRow>, Error> {
+/// 対象の有効な予約（pending／executable）を返す。
+///
+/// 対象を指定せずに最古の1件を実行すると、複数対象の予約が競合したときに
+/// 実行対象が不定になる（`upgrades_active_by_target` は対象ごとに1件を許す）。
+pub fn active_upgrade_for_target(
+    connection: &Connection,
+    target: &[u8],
+) -> Result<Option<UpgradeRow>, Error> {
     let raw = connection
         .query_optional(
-            &format!("SELECT {COLUMNS} FROM upgrades WHERE state IN ('pending', 'executable') ORDER BY upgrade_id LIMIT 1"),
+            &format!("SELECT {COLUMNS} FROM upgrades WHERE target = ?1 AND state IN ('pending', 'executable') ORDER BY upgrade_id LIMIT 1"),
+            params![target],
+            read_upgrade,
+        )
+        .map_err(sql)?;
+    raw.map(convert).transpose()
+}
+
+/// 直近の予約（状態を問わない）。実行済み・取消済みも状態表示に含める。
+pub fn latest_upgrade(connection: &Connection) -> Result<Option<UpgradeRow>, Error> {
+    let raw = connection
+        .query_optional(
+            &format!("SELECT {COLUMNS} FROM upgrades ORDER BY upgrade_id DESC LIMIT 1"),
             params![],
             read_upgrade,
         )
@@ -114,17 +132,38 @@ pub fn active_upgrade(connection: &Connection) -> Result<Option<UpgradeRow>, Err
     raw.map(convert).transpose()
 }
 
-/// 予約を取消す。
-pub fn cancel_active(connection: &mut UpdateConnection<'_>, now: Timestamp) -> Result<bool, Error> {
+/// 対象の有効な予約を取消す。
+pub fn cancel_active_for_target(
+    connection: &mut UpdateConnection<'_>,
+    target: &[u8],
+    now: Timestamp,
+) -> Result<bool, Error> {
     connection
         .execute(
-            "UPDATE upgrades SET state = 'cancelled', cancelled_at = ?1
-              WHERE state IN ('pending', 'executable')",
-            params![now as i64],
+            "UPDATE upgrades SET state = 'cancelled', cancelled_at = ?2
+              WHERE target = ?1 AND state IN ('pending', 'executable')",
+            params![target, now as i64],
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
     Ok(changed > 0)
+}
+
+/// 実行権を予約へ戻す（`install_code`が失敗し、対象が実際には置き換わっていない場合）。
+///
+/// 猶予は既に経過しているため、新しい7日を待たずに再実行できる。
+pub fn revert_executing(
+    connection: &mut UpdateConnection<'_>,
+    upgrade_id: i64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE upgrades SET state = 'executable' WHERE upgrade_id = ?1 AND state = 'executing'",
+            params![upgrade_id],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    crate::cas::ensure_changed(changed, "executing", "not executing")
 }
 
 /// 実行済みにする。

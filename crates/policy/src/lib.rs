@@ -58,63 +58,132 @@ fn get_stop_status() -> StopStatus {
 /// 運営principalを設定する（controllerのみ、初期化時）。
 #[ic_cdk::update]
 fn set_operator(operator: Principal) -> Result<(), ErrorCode> {
+    set_role_principal("operator", operator, "operator")
+}
+
+/// SNS governanceのprincipalを設定する（controllerのみ、初期化時）。
+///
+/// 緊急停止の**解除**はこのprincipalだけが行える（契約: 解除は記録したSNS経路）。
+#[ic_cdk::update]
+fn set_sns_principal(sns: Principal) -> Result<(), ErrorCode> {
+    set_role_principal("sns", sns, "SNS governance")
+}
+
+/// `control_guard` のprincipalを設定する（controllerのみ、初期化時）。
+///
+/// 政策（版とallowlist）の変更はこのprincipalだけが行える（契約: control_guard経由のみ）。
+#[ic_cdk::update]
+fn set_guard_principal(guard: Principal) -> Result<(), ErrorCode> {
+    set_role_principal("guard", guard, "control guard")
+}
+
+fn set_role_principal(role: &str, principal: Principal, what: &str) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
         return Err(ErrorCode::Unauthenticated {
-            reason: "only a controller can set the operator".to_string(),
+            reason: format!("only a controller can set the {what} principal"),
         });
     }
-    let bytes = operator.as_slice().to_vec();
-    check_principal(&bytes, "invalid operator principal")?;
-    db::tx::update(|connection| db::repo::policy::set_operator(connection, &bytes)).map_err(map_db)
+    let principal = check_principal(principal, &format!("invalid {what} principal"))?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| db::repo::policy::set_role(connection, role, &principal, now))
+        .map_err(map_db)
 }
 
-/// 政策（版とallowlist）を設定する。本番ではcontrol_guard経由に限定する。
+/// 役割別のprincipal（診断用）。
+#[ic_cdk::query]
+fn get_role_principal(role: String) -> Option<Principal> {
+    db::tx::query(|connection| db::repo::policy::role(connection, &role))
+        .ok()
+        .flatten()
+        .map(|bytes| Principal::from_slice(&bytes))
+}
+
+/// 政策（版とallowlist）を設定する（`control_guard`のみ）。版は厳密に増加させる。
 #[ic_cdk::update]
 fn set_policy_version(version: u64, markets: Vec<String>) -> Result<(), ErrorCode> {
-    require_operator(ic_cdk::api::msg_caller())?;
+    require_role(
+        ic_cdk::api::msg_caller(),
+        "guard",
+        "only the control guard may change policy",
+    )?;
     if markets.is_empty() || markets.len() > MAX_MARKETS {
         return Err(ErrorCode::BadRequest {
             code: BadRequestCode::TooLarge,
             detail: format!("markets must be 1..={MAX_MARKETS}"),
         });
     }
+    let mut seen: Vec<&str> = Vec::new();
+    for market in &markets {
+        // 空・区切り文字入り・長すぎる銘柄を拒否する（保存はカンマ区切りのため）。
+        if market.is_empty() || market.len() > 32 || market.contains(',') {
+            return Err(ErrorCode::BadRequest {
+                code: BadRequestCode::MalformedPayload,
+                detail: "each market must be 1..=32 characters without commas".to_string(),
+            });
+        }
+        if seen.contains(&market.as_str()) {
+            return Err(ErrorCode::BadRequest {
+                code: BadRequestCode::MalformedPayload,
+                detail: "markets must not contain duplicates".to_string(),
+            });
+        }
+        seen.push(market.as_str());
+    }
     db::tx::update(|connection| db::repo::policy::set_policy(connection, version, &markets))
         .map_err(map_db)
 }
 
-/// 緊急停止（停止方向のみ）。解除は同じ運営principalによる記録済み操作として扱う。
+/// 緊急停止（**停止方向のみ**）。解除は `clear_emergency_stop`（SNS経路）だけが行える。
 #[ic_cdk::update]
-fn set_emergency_stop(stopped: bool) -> Result<(), ErrorCode> {
-    require_operator(ic_cdk::api::msg_caller())?;
+fn set_emergency_stop() -> Result<(), ErrorCode> {
+    require_role(
+        ic_cdk::api::msg_caller(),
+        "operator",
+        "only the operator may stop the service",
+    )?;
     let now = ic_cdk::api::time() / 1_000_000;
-    let reason = if stopped {
-        "operator_stop"
-    } else {
-        "operator_clear"
-    };
-    db::tx::update(|connection| db::repo::policy::set_stop(connection, stopped, Some(reason), now))
-        .map_err(map_db)
+    db::tx::update(|connection| {
+        db::repo::policy::set_stop(connection, true, Some("operator_stop"), now)
+    })
+    .map_err(map_db)
 }
 
-fn check_principal(bytes: &[u8], what: &str) -> Result<(), ErrorCode> {
-    if bytes.is_empty() || bytes.len() > 29 {
+/// 緊急停止の解除（SNS governanceのみ）。即時の緩和を運営鍵では行えないようにする。
+#[ic_cdk::update]
+fn clear_emergency_stop() -> Result<(), ErrorCode> {
+    require_role(
+        ic_cdk::api::msg_caller(),
+        "sns",
+        "only the SNS governance principal may clear the stop",
+    )?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| {
+        db::repo::policy::set_stop(connection, false, Some("sns_clear"), now)
+    })
+    .map_err(map_db)
+}
+
+fn check_principal(principal: Principal, what: &str) -> Result<Vec<u8>, ErrorCode> {
+    let bytes = principal.as_slice().to_vec();
+    if principal == Principal::anonymous() || bytes.is_empty() || bytes.len() > 29 {
         return Err(ErrorCode::BadRequest {
             code: BadRequestCode::MalformedPayload,
             detail: what.to_string(),
         });
     }
-    Ok(())
+    Ok(bytes)
 }
 
-fn require_operator(caller: Principal) -> Result<(), ErrorCode> {
-    let operator = db::tx::query(db::repo::policy::operator).map_err(map_db)?;
-    match operator {
+fn require_role(caller: Principal, role: &str, reason: &str) -> Result<(), ErrorCode> {
+    let principal =
+        db::tx::query(|connection| db::repo::policy::role(connection, role)).map_err(map_db)?;
+    match principal {
         Some(bytes) if bytes == caller.as_slice() => Ok(()),
         Some(_) => Err(ErrorCode::Unauthenticated {
-            reason: "only the operator may change policy".to_string(),
+            reason: reason.to_string(),
         }),
-        None => Err(internal("operator is not configured".to_string())),
+        None => Err(internal(format!("{role} principal is not configured"))),
     }
 }
 

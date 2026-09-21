@@ -185,9 +185,11 @@ fn a_matching_reservation_executes_the_upgrade() {
     }
 
     execute(&pic, guard, principal(55), target, MINIMAL_WASM.to_vec()).expect("execute");
-    assert!(
-        status(&pic, guard).scheduled.is_none(),
-        "実行後は予約が消える"
+    // 状態表示は直近の予約を返す（実行済みも監視できる）。有効な予約は残っていない。
+    assert_eq!(
+        status(&pic, guard).scheduled.expect("latest").state,
+        UpgradeState::Executed,
+        "実行済みとして残る"
     );
 
     // 二重実行は拒否する。
@@ -258,7 +260,10 @@ fn only_one_concurrent_execution_wins() {
         .count();
     assert_eq!(wins, 1, "実行者は1つだけ: {outcomes:?}");
     assert_eq!(losses, 1, "他方は拒否される: {outcomes:?}");
-    assert!(status(&pic, guard).scheduled.is_none());
+    assert_eq!(
+        status(&pic, guard).scheduled.expect("latest").state,
+        UpgradeState::Executed
+    );
 }
 
 #[test]
@@ -284,9 +289,12 @@ fn cancelling_starts_a_new_seven_day_window() {
     pic.tick();
 
     let cancelled: Result<(), ErrorCode> =
-        update(&pic, guard, sns, "cancel_upgrade", ()).expect("call");
+        update(&pic, guard, sns, "cancel_upgrade", target).expect("call");
     cancelled.expect("cancel_upgrade");
-    assert!(status(&pic, guard).scheduled.is_none());
+    assert_eq!(
+        status(&pic, guard).scheduled.expect("latest").state,
+        UpgradeState::Cancelled
+    );
 
     // 予約内容の変更は取消＋新規予約であり、新しい7日を開始する。
     schedule(&pic, guard, sns, target, wasm_hash).expect("reschedule");
@@ -307,7 +315,72 @@ fn cancelling_starts_a_new_seven_day_window() {
 
     // 非SNSによる取消は拒否する。
     let denied: Result<(), ErrorCode> =
-        update(&pic, guard, principal(59), "cancel_upgrade", ()).expect("call");
+        update(&pic, guard, principal(59), "cancel_upgrade", target).expect("call");
     let denied = denied.expect_err("non-SNS cancel must be rejected");
     assert!(matches!(denied, ErrorCode::Unauthenticated { .. }));
+}
+
+/// 匿名principalは役割として設定できない（設定できると匿名ingressから誰でも実行できる）。
+#[test]
+fn an_anonymous_principal_cannot_be_configured() {
+    let pic = pic();
+    let controller = principal(70);
+    let guard = deploy_guard(&pic, controller);
+
+    let anonymous: Result<(), ErrorCode> = update(
+        &pic,
+        guard,
+        controller,
+        "set_sns_principal",
+        Principal::anonymous(),
+    )
+    .expect("call");
+    assert!(
+        anonymous.is_err(),
+        "匿名をSNS principalへ設定できない: {anonymous:?}"
+    );
+}
+
+/// `install_code` が失敗した場合、予約は `executable` へ戻り、猶予をやり直さず再実行できる。
+///
+/// 以前は `executing` のまま固まり、取消（pending/executableのみ）の対象外になって
+/// 新しい7日を待たないと再実行できなかった。
+#[test]
+fn a_failed_install_returns_the_reservation_to_executable() {
+    let pic = pic();
+    let controller = principal(71);
+    let guard = deploy_guard(&pic, controller);
+    let sns = principal(72);
+    let target = deploy(
+        &pic,
+        POLICY_WASM,
+        Some(vec![guard]),
+        candid::encode_one(()).unwrap(),
+    );
+    // 壊れたwasmを予約する（install_codeは失敗する）。
+    let broken = b"this is not a wasm module".to_vec();
+    let broken_hash = hash_of(&broken);
+
+    let set: Result<(), ErrorCode> =
+        update(&pic, guard, controller, "set_sns_principal", sns).expect("call");
+    set.expect("set_sns_principal");
+    schedule(&pic, guard, sns, target, broken_hash).expect("schedule");
+
+    pic.advance_time(Duration::from_millis(8 * DAY_MS));
+    pic.tick();
+
+    let failed = execute(&pic, guard, principal(73), target, broken.clone())
+        .expect_err("broken wasm must fail to install");
+    assert!(matches!(failed, ErrorCode::Internal { .. }), "{failed:?}");
+
+    // 実行権が戻っている（実行済みでもexecutingでもない）。
+    let scheduled = status(&pic, guard).scheduled.expect("scheduled");
+    assert_eq!(scheduled.state, UpgradeState::Executable);
+
+    // 対象は置き換わっていないので、猶予をやり直さずに再実行を試せる。
+    let retried = execute(&pic, guard, principal(73), target, broken)
+        .expect_err("broken wasm must keep failing");
+    assert!(matches!(retried, ErrorCode::Internal { .. }), "{retried:?}");
+    let scheduled = status(&pic, guard).scheduled.expect("scheduled");
+    assert_eq!(scheduled.state, UpgradeState::Executable);
 }

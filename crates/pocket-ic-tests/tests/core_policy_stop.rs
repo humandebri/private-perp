@@ -122,9 +122,12 @@ fn a_stopped_policy_blocks_new_orders() {
     let operator: Result<(), ErrorCode> =
         update(&pic, policy, controller, "set_operator", controller).expect("call");
     operator.expect("set_operator");
-    // 政策未設定は安全側（停止）を返すため、まず解除して受付可能にする。
+    let sns: Result<(), ErrorCode> =
+        update(&pic, policy, controller, "set_sns_principal", controller).expect("call");
+    sns.expect("set_sns_principal");
+    // 政策未設定は安全側（停止）を返すため、まずSNS経路で解除して受付可能にする。
     let armed: Result<(), ErrorCode> =
-        update(&pic, policy, controller, "set_emergency_stop", false).expect("call");
+        update(&pic, policy, controller, "clear_emergency_stop", ()).expect("call");
     armed.expect("armed");
 
     let meta: Result<(), ErrorCode> = update_args(
@@ -199,7 +202,7 @@ fn a_stopped_policy_blocks_new_orders() {
 
     // 停止中は拒否する。
     let stop: Result<(), ErrorCode> =
-        update(&pic, policy, controller, "set_emergency_stop", true).expect("call");
+        update(&pic, policy, controller, "set_emergency_stop", ()).expect("call");
     stop.expect("stop");
     let blocked: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
@@ -216,7 +219,7 @@ fn a_stopped_policy_blocks_new_orders() {
 
     // 解除後は再び受け付ける。
     let clear: Result<(), ErrorCode> =
-        update(&pic, policy, controller, "set_emergency_stop", false).expect("call");
+        update(&pic, policy, controller, "clear_emergency_stop", ()).expect("call");
     clear.expect("clear");
     let after: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,

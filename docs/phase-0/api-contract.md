@@ -273,9 +273,9 @@ type PendingOrderView = record {
 | # | メソッド | 種別 | caller要件 |
 |---|---|---|---|
 | 18 | `schedule_upgrade` | update | SNS governance principal のみ |
-| 19 | `cancel_upgrade` | update | SNS governance principal のみ |
+| 19 | `cancel_upgrade(target)` | update | SNS governance principal のみ。対象を指定する |
 | 20 | `execute_upgrade` | update | 誰でも可（予約内容が一致する場合のみ） |
-| 21 | `get_upgrade_status` | query | 公開 |
+| 21 | `get_upgrade_status` | query | 公開（直近の予約を状態を問わず返す） |
 
 ```candid
 type UpgradeRequest = record {
@@ -304,11 +304,15 @@ type UpgradeStatus = record {
 |---|---|---|---|
 | 22 | `get_policy` | query | Canister間 callers（資金・注文系） |
 | 23 | `get_stop_status` | query | 公開（理由コードのみ） |
-| 24 | `set_policy_version` | update | control_guard経由のみ |
-| 25 | `set_emergency_stop` | update | 限定運営権限またはSNS。**停止方向のみ** |
+| 24 | `set_policy_version` | update | control_guard principal のみ。版は厳密に増加させる |
+| 25 | `set_emergency_stop` | update | 限定運営権限のみ。**停止方向のみ**（引数なし） |
+| 26 | `clear_emergency_stop` | update | SNS governance principal のみ（記録した解除経路） |
+| 27 | `set_operator` / `set_sns_principal` / `set_guard_principal` | update | controller のみ。匿名は拒否 |
+| 28 | `get_role_principal` | query | 公開（診断用） |
 
 - 読み取り失敗はfail-closedとし、新規受付・新規リスク増加を停止する。
-- 緊急停止の解除・制限緩和は記録したSNS経路で行う。任意送金・即時upgrade・出金先変更は提供しない。
+- 緊急停止の解除・制限緩和は記録したSNS経路（`clear_emergency_stop`）で行う。任意送金・即時upgrade・出金先変更は提供しない。
+- 政策の変更は `control_guard` principal に限定し、allowlist の各要素は空・カンマ入り・重複を拒否する。
 
 ### 5.1 `Implementation.md` 14.3からの追加
 
@@ -397,9 +401,9 @@ type NotAllowedCode = variant {
 
 | 分類 | エラー | クライアントの責務 |
 |---|---|---|
-| 同一`client_request_id`・同一本文で再試行可 | `UpstreamUnavailable`、`VenueRateLimited`、`SigningQueueFull`、`Internal` | 同じ冪等性キーで再送。新しいcloid・nonceを作らない |
+| 同一`client_request_id`・同一本文で再試行可 | `UpstreamUnavailable`、`VenueRateLimited`、`SigningQueueFull` | 同じ冪等性キーで再送。新しいcloid・nonceを作らない |
 | 状態更新後に再試行可 | `StaleAccountState`、`PolicyUnavailable`、`ReservationConflict` | 状態を再取得し、`revision`と`observed_at`を更新してから再判断 |
-| 再試行不可 | `Unauthenticated`、`SessionExpired`、`SessionRevoked`、`NotEligible`、`BadRequest`、`IdempotencyConflict`、`InsufficientFunds`、`RiskLimitExceeded`、`NotAllowed` | 理由を表示し、入力を修正する。自動再送しない |
+| 再試行不可 | `Unauthenticated`、`SessionExpired`、`SessionRevoked`、`NotEligible`、`BadRequest`、`IdempotencyConflict`、`InsufficientFunds`、`RiskLimitExceeded`、`NotAllowed`、`Internal` | 理由を表示し、入力を修正する。自動再送しない（`Internal`は設定不備・DB不整合を含む恒久エラーのため） |
 | 成功扱い（重複受付） | `DuplicateIgnored` | 既存の受付状態を表示する。エラー表示にしない |
 | 自動再送禁止（照合のみ） | `UnknownPending` | 結果不明として表示し、照合結果が届くまで再発注しない |
 | 上位の拒否 | `UpstreamRejected` | `retryable`に従う。`retryable = false`は入力・リスクを見直す |
