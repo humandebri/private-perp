@@ -919,14 +919,13 @@ fn resolve_asset(market: &str) -> Result<(u32, u32), ErrorCode> {
         serde_json::from_str(&universe).map_err(|error| internal(error.to_string()))?;
     for (index, entry) in entries.iter().enumerate() {
         if entry.get("name").and_then(|name| name.as_str()) == Some(market) {
-            let index =
-                u32::try_from(index).map_err(|_| internal("index overflow".to_string()))?;
+            let index = u32::try_from(index).map_err(|_| internal("index overflow".to_string()))?;
             let sz_decimals = entry
                 .get("szDecimals")
                 .and_then(|value| value.as_u64())
                 .ok_or(ErrorCode::PolicyUnavailable)?;
-            let sz_decimals =
-                u32::try_from(sz_decimals).map_err(|_| internal("szDecimals overflow".to_string()))?;
+            let sz_decimals = u32::try_from(sz_decimals)
+                .map_err(|_| internal("szDecimals overflow".to_string()))?;
             return Ok((index, sz_decimals));
         }
     }

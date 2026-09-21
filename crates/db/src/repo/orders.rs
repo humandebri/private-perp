@@ -816,10 +816,7 @@ pub fn account_revision(connection: &Connection, user_id: &[u8; 32]) -> Result<u
 }
 
 /// 最後に取引所の約定を取り込んだ時刻（鮮度の指標）。
-pub fn latest_fill_at(
-    connection: &Connection,
-    user_id: &[u8; 32],
-) -> Result<Option<u64>, Error> {
+pub fn latest_fill_at(connection: &Connection, user_id: &[u8; 32]) -> Result<Option<u64>, Error> {
     // `MAX` は行が無いと NULL を返すため、nullable な行として読む。
     let row = connection
         .query_optional(
