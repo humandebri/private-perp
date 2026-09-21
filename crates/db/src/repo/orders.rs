@@ -642,3 +642,75 @@ pub fn signable(
     })
     .transpose()
 }
+
+/// 取消送信の対象（取消要求済みで未送信、`hl_oid`既知の未終端注文）。
+pub fn cancel_candidates(connection: &Connection, limit: u32) -> Result<Vec<[u8; 32]>, Error> {
+    let rows = connection
+        .query_all(
+            "SELECT order_id FROM orders
+              WHERE cancel_requested = 1 AND cancel_dispatch_state IS NULL
+                AND hl_oid IS NOT NULL AND state IN ('open', 'partially_filled')
+              ORDER BY rowid LIMIT ?1",
+            params![limit as i64],
+            |row| row.get::<Vec<u8>>(0),
+        )
+        .map_err(sql)?;
+    rows.into_iter()
+        .map(|bytes| {
+            bytes
+                .try_into()
+                .map_err(|_| Error::Invariant("expected a 32-byte order id"))
+        })
+        .collect()
+}
+
+/// 取消の送信権を取得する（単一実行者）。
+pub fn claim_cancel(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+) -> Result<bool, Error> {
+    connection
+        .execute(
+            "UPDATE orders SET cancel_dispatch_state = 'signing'
+              WHERE order_id = ?1 AND cancel_dispatch_state IS NULL AND cancel_requested = 1",
+            params![order_id.as_slice()],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    Ok(changed > 0)
+}
+
+/// 取消を送信済みにする（受理時は`cancelled`へ倒す。HLの最終状態は`orderStatus`照合で確認）。
+pub fn mark_cancel_sent(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    wire_payload: &[u8],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders SET cancel_dispatch_state = 'sent', wire_payload = ?2, state = 'cancelled', updated_at = ?3
+              WHERE order_id = ?1 AND cancel_dispatch_state = 'signing'",
+            params![order_id.as_slice(), wire_payload, now as i64],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    crate::cas::ensure_changed(changed, "signing", "not claimed")
+}
+
+/// 取消の送信結果が不明。
+pub fn mark_cancel_unknown(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders SET cancel_dispatch_state = 'unknown', updated_at = ?2
+              WHERE order_id = ?1 AND cancel_dispatch_state = 'signing'",
+            params![order_id.as_slice(), now as i64],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    crate::cas::ensure_changed(changed, "signing", "not claimed")
+}

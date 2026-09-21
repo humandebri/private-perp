@@ -85,6 +85,7 @@ CREATE TABLE orders (
     dispatch_state TEXT NOT NULL DEFAULT 'queued',
     wire_payload BLOB,
     signature BLOB,
+    cancel_dispatch_state TEXT,
     order_id BLOB PRIMARY KEY NOT NULL CHECK (length(order_id) = 32),
     user_id BLOB NOT NULL,
     account_id BLOB NOT NULL,

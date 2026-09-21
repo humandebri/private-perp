@@ -3,7 +3,9 @@
 #
 # 1. PocketICサーババイナリを用意する（未取得ならscripts/fetch-pocket-ic.sh）
 # 2. Canisterのwasmをビルドする
-# 3. POCKET_IC_BINを設定して crates/pocket-ic-tests の試験を実行する
+#    2a. 本番と同じfeature無しのwasm（デプロイ成果物の検査用）
+#    2b. test-venue付きのwasm（**別のtargetディレクトリ**へ出し、本番成果物を上書きしない）
+# 3. POCKET_IC_BIN と POCKET_IC_WASM_DIR を設定して crates/pocket-ic-tests の試験を実行する
 #
 # 使い方: bash scripts/pocket-ic-test.sh [cargo test へ渡す引数...]
 set -euo pipefail
@@ -22,13 +24,23 @@ if [[ "${POCKET_IC_BIN_OVERRIDE:-}" != "1" ]]; then
 fi
 
 echo "pocket-ic-test: POCKET_IC_BIN=$POCKET_IC_BIN"
-echo "pocket-ic-test: wasmをビルドします"
-# funds-vault はテスト専用の入金計上（test-venue）を有効にしてビルドする。
-# 本番ビルド（icp build / CIのwasmビルド）は feature 無しでビルドする。
+
+# test-venue 付きのwasmを本番成果物と同じパス（target/wasm32-unknown-unknown/release）へ
+# 書かない。icp build / icp deploy が参照するwasmを試験用ビルドで汚さないため、
+# 試験用は target/test-venue 配下へ出す（crates/pocket-ic-tests が参照する）。
+test_venue_target="$repo_root/target/test-venue"
+export POCKET_IC_WASM_DIR="$test_venue_target/wasm32-unknown-unknown/release"
+
+echo "pocket-ic-test: 本番feature無しのwasmをビルドします（デプロイ成果物の検査用）"
 cargo build --release --target wasm32-unknown-unknown \
-  -p policy -p control-guard -p trading-core
-cargo build --release --target wasm32-unknown-unknown -p funds-vault --features test-venue
+  -p policy -p funds-vault -p control-guard -p trading-core
+
+echo "pocket-ic-test: test-venue付きのwasmをビルドします（POCKET_IC_WASM_DIR=$POCKET_IC_WASM_DIR）"
+CARGO_TARGET_DIR="$test_venue_target" cargo build --release --target wasm32-unknown-unknown \
+  -p policy -p control-guard
+CARGO_TARGET_DIR="$test_venue_target" cargo build --release --target wasm32-unknown-unknown \
+  -p funds-vault -p trading-core \
+  --features funds-vault/test-venue,trading-core/test-venue
 
 echo "pocket-ic-test: 試験を実行します"
-  cargo build --release --target wasm32-unknown-unknown -p trading-core --features test-venue
 cargo test -p pocket-ic-tests "$@"

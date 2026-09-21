@@ -10,8 +10,8 @@ pub mod fixed_rng;
 
 use candid::{CandidType, Principal};
 use pocket_ic::common::rest::{
-    CanisterHttpHeader, CanisterHttpReject, CanisterHttpReply, CanisterHttpResponse,
-    MockCanisterHttpResponse,
+    CanisterHttpHeader, CanisterHttpMethod, CanisterHttpReject, CanisterHttpReplication,
+    CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse,
 };
 use pocket_ic::{CanisterSettings, PocketIc, PocketIcBuilder};
 use serde::de::DeserializeOwned;
@@ -47,6 +47,10 @@ pub fn principal(seed: u8) -> Principal {
 }
 
 /// ビルド済みwasmのパス。
+///
+/// 既定は `target/wasm32-unknown-unknown/release`。`scripts/pocket-ic-test.sh` は
+/// test-venue付きのwasmを別ディレクトリへビルドし、`POCKET_IC_WASM_DIR` で指定する
+/// （本番成果物と同じパスへ試験用ビルドを書かないため）。
 pub fn wasm_path(file: &str) -> PathBuf {
     let root = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR")
@@ -54,9 +58,9 @@ pub fn wasm_path(file: &str) -> PathBuf {
         .expect("crates directory")
         .0
         .to_string();
-    PathBuf::from(root)
-        .join("target/wasm32-unknown-unknown/release")
-        .join(file)
+    let wasm_dir = std::env::var("POCKET_IC_WASM_DIR")
+        .unwrap_or_else(|_| "target/wasm32-unknown-unknown/release".to_string());
+    PathBuf::from(root).join(wasm_dir).join(file)
 }
 
 /// wasmを読み込む。未ビルドの場合はスクリプトの実行を促す。
