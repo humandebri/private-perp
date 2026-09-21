@@ -16,6 +16,7 @@ pub mod ledger;
 pub mod meta;
 pub mod orders;
 pub mod policy;
+pub mod positions;
 
 use crate::error::Error;
 

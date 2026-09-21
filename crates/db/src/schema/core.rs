@@ -192,6 +192,24 @@ CREATE TABLE fills (
 );
 ";
 
+/// 建玉（`/info`のclearinghouseState照合で更新する）。
+const POSITIONS: &str = "
+CREATE TABLE positions (
+    account_id BLOB NOT NULL CHECK (length(account_id) = 32),
+    market TEXT NOT NULL,
+    size TEXT NOT NULL,
+    entry_price TEXT NOT NULL,
+    liquidation_price TEXT,
+    unrealized_pnl INTEGER NOT NULL,
+    leverage INTEGER NOT NULL,
+    margin_mode TEXT NOT NULL,
+    stop_loss TEXT,
+    take_profit TEXT,
+    observed_at INTEGER NOT NULL,
+    PRIMARY KEY (account_id, market)
+);
+";
+
 /// `trading_core` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -213,5 +231,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 5,
         sql: FILLS,
+    },
+    Migration {
+        version: 6,
+        sql: POSITIONS,
     },
 ];
