@@ -43,6 +43,7 @@ fn map_db(error: DbError) -> ErrorCode {
         DbError::Overflow => internal("integer overflow".to_string()),
         DbError::Invariant(message) => internal(message.to_string()),
         DbError::InsufficientFunds { .. } => internal("unexpected funds error".to_string()),
+        DbError::RiskLimitExceeded { limit } => ErrorCode::RiskLimitExceeded { limit },
         DbError::StateConflict { .. } => not_allowed(NotAllowedCode::UpgradeAlreadyExecuted),
     }
 }

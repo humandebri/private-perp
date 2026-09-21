@@ -1,20 +1,20 @@
 //! 注文受付の入力検証（2E）の試験。
 
+use api_types::Blob;
 use api_types::Network;
 use api_types::auth::{
     ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
 };
 use api_types::error::ErrorCode;
-use api_types::fund::{AgentGeneration, AllocationRequest, FundRequestAccepted};
+use api_types::fund::AgentGeneration;
 use api_types::order::{OrderKind, Side, SubmitOrderArgs, SubmitOrderResult};
-use api_types::{AccountKind, Blob};
 use candid::Principal;
 use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, TRADING_CORE_WASM, configure_policy, deploy, deploy_default, pic, principal,
-    update, update_args,
+    FUNDS_VAULT_WASM, TRADING_CORE_WASM, configure_policy, deploy, fund_trading_account, pic,
+    principal, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -105,8 +105,13 @@ fn args(
 #[test]
 fn invalid_orders_are_rejected_without_side_effects() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(180);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -145,30 +150,17 @@ fn invalid_orders_are_rejected_without_side_effects() {
 
     let caller = principal(181);
     let session = open_session(&pic, vault, caller, &secret(230));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[171u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"validate-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"validate-alloc-fund",
+        5_000_000_000,
+        171,
+    );
     let agent: Result<AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -263,8 +255,13 @@ fn invalid_orders_are_rejected_without_side_effects() {
 #[test]
 fn orders_are_rejected_when_the_policy_is_not_configured() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(181);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,

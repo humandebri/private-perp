@@ -150,6 +150,81 @@ pub fn configure_policy(
     policy
 }
 
+/// 取引口座を用意して着金させ、取引可能なequityを作る。
+///
+/// `trading_core` は注文の受付時に取引口座のequityに対するリスク上限を検査するため、
+/// 注文を扱う試験は事前にこれを呼ぶ。配分の着金を待たずに取引口座へ直接入金する
+/// （`credit_venue_deposit`はcontrollerのみ）。戻り値は取引口座アドレス。
+#[allow(clippy::too_many_arguments)]
+pub fn fund_trading_account(
+    pic: &PocketIc,
+    vault: Principal,
+    controller: Principal,
+    caller: Principal,
+    session: &api_types::auth::SessionHandle,
+    request_id: &[u8],
+    amount: u64,
+    seed: u8,
+) -> [u8; 20] {
+    // 1. 本人へ入金を計上する（test-venue）。配分の予約が残る分を見込んで2倍入れる。
+    let credit: Result<(), api_types::error::ErrorCode> = update_args(
+        pic,
+        vault,
+        caller,
+        "test_credit_deposit",
+        (
+            session.clone(),
+            amount.saturating_mul(2),
+            api_types::Blob::from(vec![seed; 32]),
+        ),
+    )
+    .expect("call");
+    credit.expect("credit");
+
+    // 2. 配分の受付で取引口座が作られる（送信はしない）。
+    let allocated: Result<api_types::fund::FundRequestAccepted, api_types::error::ErrorCode> =
+        update(
+            pic,
+            vault,
+            caller,
+            "request_allocation",
+            api_types::fund::AllocationRequest {
+                session: session.clone(),
+                client_request_id: api_types::Blob::from(request_id.to_vec()),
+                amount,
+                target: api_types::AccountKind::Trading,
+                intent_signature: None,
+            },
+        )
+        .expect("call");
+    allocated.expect("allocation");
+
+    // 3. 取引口座アドレスを取得し、着金させる。
+    let trading: Result<api_types::Blob, api_types::error::ErrorCode> =
+        update(pic, vault, caller, "get_trading_address", session.clone()).expect("call");
+    let trading: [u8; 20] = trading
+        .expect("trading address")
+        .as_ref()
+        .try_into()
+        .expect("20-byte address");
+
+    let credited: Result<bool, api_types::error::ErrorCode> = update_args(
+        pic,
+        vault,
+        controller,
+        "credit_venue_deposit",
+        (
+            api_types::Blob::from(vec![seed; 32]),
+            amount,
+            api_types::Blob::from(trading.to_vec()),
+            "usdc".to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(credited.expect("arrival"), "取引口座への着金を取り込む");
+    trading
+}
+
 /// vaultでAgent世代を承認する（取引所へのoutcallはmockで受理させる）。
 ///
 /// `trading_core` はvaultが承認した世代でしか署名しないため、注文を送信する試験は

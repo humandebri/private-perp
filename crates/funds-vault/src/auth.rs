@@ -39,6 +39,7 @@ pub fn map_db(error: DbError, request_id: Option<&[u8]>) -> ErrorCode {
             available: u64::try_from(available).unwrap_or(0),
             requested: u64::try_from(requested).unwrap_or(0),
         },
+        DbError::RiskLimitExceeded { limit } => ErrorCode::RiskLimitExceeded { limit },
         DbError::Conflict => match request_id {
             Some(request_id) => ErrorCode::IdempotencyConflict {
                 request_id: request_id.to_vec().into(),

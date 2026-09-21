@@ -254,16 +254,10 @@ fn get_balances(session: SessionHandle) -> Result<(u64, u64), ErrorCode> {
         user_id,
         session_id,
     };
-    // 複式では負債アカウントの符号が反転するため、利用者の取り分は符号を戻す。
-    let trading = db::tx::query(|connection| {
-        db::repo::ledger::signed_balance(connection, &db::repo::ledger::user_trading(&user_id))
-    })
-    .map_err(|error| auth::map_db(error, None))?;
-    let withdrawable = fund::fund_status_with_holds(&verified)?.withdrawable;
-    let trading = u64::try_from(-trading).map_err(|_| ErrorCode::Internal {
-        code: "trading balance is out of range".to_string(),
-    })?;
-    Ok((trading, withdrawable))
+    // 取引口座のequityは **口座ID** で導出する（`user_trading:<account_id>`）。
+    // 利用者IDで引くと常に0になる。出金可能額と同じ導出（`user_balances`）を使う。
+    let status = fund::fund_status_with_holds(&verified)?;
+    Ok((status.trading_equity, status.withdrawable))
 }
 
 /// 本人の取引口座ID（`trading_core` が所有権の確認に使う）。

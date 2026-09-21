@@ -38,6 +38,7 @@ fn map_db(error: DbError) -> ErrorCode {
         DbError::Overflow => internal("integer overflow".to_string()),
         DbError::Invariant(message) => internal(message.to_string()),
         DbError::InsufficientFunds { .. } => internal("unexpected funds error".to_string()),
+        DbError::RiskLimitExceeded { limit } => ErrorCode::RiskLimitExceeded { limit },
         DbError::StateConflict { .. } => ErrorCode::ReservationConflict,
     }
 }
@@ -294,6 +295,8 @@ async fn submit_order(
 
     let account_id = trading_account(&session).await?;
     let notional = notional_micros(args.limit_price.as_deref().unwrap_or("0"), &args.quantity)?;
+    // リスク上限の判断に使う取引口座のequity（vaultが導出する残高）。
+    let equity = vault_trading_equity(&session).await?;
 
     let cloid = ic_cdk_management_canister::raw_rand()
         .await
@@ -326,6 +329,8 @@ async fn submit_order(
         if db::repo::orders::pending_order_count(connection, &account_id)? >= MAX_PENDING_ORDERS {
             return Err(DbError::Invariant("too many pending orders"));
         }
+        // 予約済みリスクに今回の想定元本を足してもequityを超えないこと。
+        db::repo::orders::ensure_risk_within_equity(connection, &account_id, notional, equity)?;
         db::repo::orders::reserve_risk(
             connection,
             &account_id,
@@ -841,6 +846,21 @@ async fn vault_session_status(session: &SessionHandle) -> Result<SessionStatus, 
         .candid()
         .map_err(|error| internal(error.to_string()))?;
     status
+}
+
+/// vaultから本人の取引口座equityを取得する（リスク上限の判断に使う）。
+async fn vault_trading_equity(session: &SessionHandle) -> Result<u64, ErrorCode> {
+    let vault = vault_principal()?;
+    let response = Call::bounded_wait(vault, "get_balances")
+        .with_arg(session.clone())
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: format!("vault get_balances: {error}"),
+        })?;
+    let balances: Result<(u64, u64), ErrorCode> = response
+        .candid()
+        .map_err(|error| internal(error.to_string()))?;
+    Ok(balances?.0)
 }
 
 fn vault_principal() -> Result<Principal, ErrorCode> {

@@ -4,17 +4,16 @@ use api_types::auth::{
     ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
 };
 use api_types::error::{ErrorCode, NotAllowedCode};
-use api_types::fund::AllocationRequest;
 use api_types::order::{OrderKind, OrderSummary, Side, SubmitOrderArgs, SubmitOrderResult};
-use api_types::{AccountKind, Blob, Network};
+use api_types::{Blob, Network};
 use candid::Principal;
 use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
     FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, approve_agent_at_vault,
-    call_with_mocked_outcall, configure_policy, deploy, deploy_default, pic, principal, query_args,
-    update, update_args,
+    call_with_mocked_outcall, configure_policy, deploy, fund_trading_account, pic, principal,
+    query_args, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -104,8 +103,13 @@ fn order_args(
 #[test]
 fn orders_are_accepted_idempotently_after_authorization() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(110);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -135,30 +139,17 @@ fn orders_are_accepted_idempotently_after_authorization() {
     let caller = principal(111);
     let key = secret(181);
     let session = open_session(&pic, vault, caller, &key);
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[31u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"alloc-for-orders"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"alloc-for-orders-fund",
+        5_000_000_000,
+        31,
+    );
 
     // 銘柄解決の設定が無い状態ではfail-closedで拒否する（固定値を使わない）。
     let no_context: Result<SubmitOrderResult, ErrorCode> = update_args(
@@ -368,8 +359,13 @@ fn orders_are_accepted_idempotently_after_authorization() {
 #[test]
 fn core_derives_agent_keys_for_the_account() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(116);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -384,30 +380,17 @@ fn core_derives_agent_keys_for_the_account() {
 
     let caller = principal(117);
     let session = open_session(&pic, vault, caller, &secret(183));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[41u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"agent-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"agent-alloc-fund",
+        5_000_000_000,
+        41,
+    );
 
     let requested: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
@@ -490,8 +473,13 @@ fn core_derives_agent_keys_for_the_account() {
 #[test]
 fn core_signs_orders_with_the_agent_key() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(119);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -528,30 +516,17 @@ fn core_signs_orders_with_the_agent_key() {
 
     let caller = principal(120);
     let session = open_session(&pic, vault, caller, &secret(184));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[51u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"sign-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"sign-alloc-fund",
+        5_000_000_000,
+        51,
+    );
 
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
@@ -607,8 +582,13 @@ fn core_signs_orders_with_the_agent_key() {
 #[test]
 fn orders_are_dispatched_and_record_the_venue_oid() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(121);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -645,30 +625,17 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
 
     let caller = principal(122);
     let session = open_session(&pic, vault, caller, &secret(185));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[61u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"dispatch-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"dispatch-alloc-fund",
+        5_000_000_000,
+        61,
+    );
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -721,8 +688,13 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
 #[test]
 fn rejected_and_uncertain_orders_are_classified_without_resending() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(123);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -759,30 +731,17 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
 
     let caller = principal(124);
     let session = open_session(&pic, vault, caller, &secret(186));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[71u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"outcome-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"outcome-alloc-fund",
+        5_000_000_000,
+        71,
+    );
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -866,8 +825,13 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
 #[test]
 fn the_snapshot_merges_vault_balances_and_core_orders() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(125);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -904,30 +868,17 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
 
     let caller = principal(126);
     let session = open_session(&pic, vault, caller, &secret(187));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[81u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"snapshot-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"snapshot-alloc-fund",
+        5_000_000_000,
+        81,
+    );
 
     let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
@@ -950,7 +901,10 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
         snapshot.withdrawable, 5_000_000_000,
         "vaultの出金可能額（入金1,000,000 − 予約300,000）"
     );
-    assert_eq!(snapshot.equity, 0, "着金の確定前は取引口座に残高が無い");
+    assert_eq!(
+        snapshot.equity, 5_000_000_000,
+        "取引口座へ着金済みのequityが返る"
+    );
     assert!(snapshot.open_orders.is_empty());
     assert_eq!(
         snapshot.pending_orders.len(),
@@ -964,8 +918,13 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
 #[test]
 fn fills_are_listed_only_for_the_authorized_caller() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(127);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -980,30 +939,17 @@ fn fills_are_listed_only_for_the_authorized_caller() {
 
     let caller = principal(128);
     let session = open_session(&pic, vault, caller, &secret(188));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[91u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"fills-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"fills-alloc-fund",
+        5_000_000_000,
+        91,
+    );
 
     let fills: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> = update_args(
         &pic,
@@ -1035,8 +981,13 @@ fn fills_are_listed_only_for_the_authorized_caller() {
 #[test]
 fn fills_are_ingested_idempotently() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(132);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -1073,30 +1024,17 @@ fn fills_are_ingested_idempotently() {
 
     let caller = principal(133);
     let session = open_session(&pic, vault, caller, &secret(190));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[111u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"fills-ingest-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"fills-ingest-alloc-fund",
+        5_000_000_000,
+        111,
+    );
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -1183,8 +1121,13 @@ fn fills_are_ingested_idempotently() {
 #[test]
 fn order_status_updates_are_reflected() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(134);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -1221,30 +1164,17 @@ fn order_status_updates_are_reflected() {
 
     let caller = principal(135);
     let session = open_session(&pic, vault, caller, &secret(191));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[121u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"status-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"status-alloc-fund",
+        5_000_000_000,
+        121,
+    );
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -1358,8 +1288,13 @@ fn the_policy_principal_is_settable_by_controllers() {
 #[test]
 fn a_cancellation_is_dispatched_to_the_venue() {
     let pic = pic();
-    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
     let controller = principal(143);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
     let core = deploy(
         &pic,
         TRADING_CORE_WASM,
@@ -1396,30 +1331,17 @@ fn a_cancellation_is_dispatched_to_the_venue() {
 
     let caller = principal(144);
     let session = open_session(&pic, vault, caller, &secret(195));
-    let credit: Result<(), ErrorCode> = update_args(
+    // 取引口座へ着金させてequityを作る（注文はequityに対してリスク上限を検査する）。
+    fund_trading_account(
         &pic,
         vault,
+        controller,
         caller,
-        "test_credit_deposit",
-        (session.clone(), 10_000_000_000u64, blob(&[211u8; 32])),
-    )
-    .expect("call");
-    credit.expect("credit");
-    let allocated: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "request_allocation",
-        AllocationRequest {
-            session: session.clone(),
-            client_request_id: blob(b"cancel-alloc"),
-            amount: 5_000_000_000,
-            target: AccountKind::Trading,
-            intent_signature: None,
-        },
-    )
-    .expect("call");
-    allocated.expect("allocation");
+        &session,
+        b"cancel-alloc-fund",
+        5_000_000_000,
+        211,
+    );
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,

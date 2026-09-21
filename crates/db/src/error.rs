@@ -14,6 +14,8 @@ pub enum Error {
     Conflict,
     /// 残高・予約が不足している。
     InsufficientFunds { available: i64, requested: i64 },
+    /// 取引口座のequityに対するリスク上限を超える。
+    RiskLimitExceeded { limit: u64 },
     /// 状態遷移が許可されていない、またはCASに敗れた。
     StateConflict { expected: String, actual: String },
     /// 整数オーバーフロー。
@@ -32,6 +34,9 @@ impl std::fmt::Display for Error {
                 available,
                 requested,
             } => write!(formatter, "insufficient funds: {available} < {requested}"),
+            Self::RiskLimitExceeded { limit } => {
+                write!(formatter, "risk limit exceeded: equity {limit}")
+            }
             Self::StateConflict { expected, actual } => {
                 write!(
                     formatter,

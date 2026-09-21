@@ -158,6 +158,22 @@ pub fn reserve_risk(
         .map_err(sql)
 }
 
+/// 予約済みリスクに今回の想定元本を足しても equity を超えないことを検査する。
+///
+/// 取引口座のequity（vaultが導出）に対する上限で、口座ごとの無制限な発注を防ぐ。
+pub fn ensure_risk_within_equity(
+    connection: &Connection,
+    account_id: &[u8; 32],
+    notional: u64,
+    equity: u64,
+) -> Result<(), Error> {
+    let held = held_risk(connection, account_id)?;
+    if held.saturating_add(notional) > equity {
+        return Err(Error::RiskLimitExceeded { limit: equity });
+    }
+    Ok(())
+}
+
 /// 口座の保有リスク予約の合計。
 pub fn held_risk(connection: &Connection, account_id: &[u8; 32]) -> Result<u64, Error> {
     let total = connection
