@@ -719,7 +719,8 @@ async fn get_account_snapshot(
         .map_err(map_db)?,
         withdrawable,
         unrealized_pnl: 0,
-        positions: Vec::new(),
+        positions: db::tx::query(|connection| db::repo::positions::list(connection, &account_id))
+            .map_err(map_db)?,
         open_orders,
         pending_orders,
         observed_at: now,
@@ -1467,6 +1468,78 @@ async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCod
         }
     }
     Ok(true)
+}
+
+/// テスト専用：`clearinghouseState`相当の建玉を取り込む（`test-venue`限定）。
+#[cfg(feature = "test-venue")]
+#[ic_cdk::update]
+async fn test_ingest_positions(
+    session: api_types::auth::SessionHandle,
+    positions_json: String,
+) -> Result<u32, ErrorCode> {
+    authorize(&session).await?;
+    let account_id = trading_account(&session).await?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    let value: serde_json::Value =
+        serde_json::from_str(&positions_json).map_err(|error| internal(error.to_string()))?;
+    let entries = value
+        .get("assetPositions")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut count = 0;
+    for entry in entries {
+        let Some(position) = entry.get("position") else {
+            continue;
+        };
+        let Some(coin) = position.get("coin").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        // 未実現損益はUSD建ての十進文字列。ローカルではf64で近似する（厳密な桁は照合段階の課題）。
+        let unrealized_pnl = position
+            .get("unrealizedPnl")
+            .and_then(|value| value.as_str())
+            .and_then(|text| text.parse::<f64>().ok())
+            .map(|value| (value * 1_000_000.0).round() as i64)
+            .unwrap_or(0);
+        let view = api_types::order::PositionView {
+            market: coin.to_string(),
+            size: position
+                .get("szi")
+                .and_then(|value| value.as_str())
+                .unwrap_or("0")
+                .to_string(),
+            entry_price: position
+                .get("entryPx")
+                .and_then(|value| value.as_str())
+                .unwrap_or("0")
+                .to_string(),
+            liquidation_price: position
+                .get("liquidationPx")
+                .and_then(|value| value.as_str())
+                .map(|text| text.to_string()),
+            unrealized_pnl,
+            leverage: position
+                .get("leverage")
+                .and_then(|value| value.get("value"))
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0),
+            margin_mode: position
+                .get("marginMode")
+                .and_then(|value| value.as_str())
+                .unwrap_or("cross")
+                .to_string(),
+            stop_loss: None,
+            take_profit: None,
+        };
+        db::tx::update(|connection| {
+            db::repo::positions::upsert(connection, &account_id, &view, now)
+        })
+        .map_err(map_db)?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn init_db() {

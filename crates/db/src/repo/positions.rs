@@ -78,3 +78,19 @@ pub fn list(connection: &Connection, account_id: &[u8; 32]) -> Result<Vec<Positi
         )
         .map_err(sql)
 }
+
+/// 建玉の最新観測時刻（データ鮮度の判定に使う）。
+pub fn latest_observed(
+    connection: &Connection,
+    account_id: &[u8; 32],
+) -> Result<Option<u64>, Error> {
+    let value = connection
+        .query_optional_scalar::<i64>(
+            "SELECT MAX(observed_at) FROM positions WHERE account_id = ?1",
+            params![account_id.as_slice()],
+        )
+        .map_err(sql)?;
+    value
+        .map(|value| u64::try_from(value).map_err(|_| Error::Invariant("negative time")))
+        .transpose()
+}
