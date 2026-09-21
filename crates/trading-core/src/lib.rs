@@ -667,7 +667,7 @@ async fn get_account_snapshot(
                     request_id: order.order_id.clone(),
                     cloid: Some(order.cloid.clone()),
                     order_id: Some(order.order_id.clone()),
-                    action_state: api_types::fund::ActionState::Queued,
+                    action_state: order.dispatch_state,
                     since: order.created_at,
                     last_error: None,
                 });

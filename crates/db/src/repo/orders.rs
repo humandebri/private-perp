@@ -225,7 +225,8 @@ pub fn list_orders(
     let rows = connection
         .query_all(
             "SELECT rowid, order_id, cloid, market, asset_index, side, kind, price, quantity,
-                    filled_quantity, reduce_only, state, cancel_requested, hl_oid, created_at, updated_at
+                    filled_quantity, reduce_only, state, cancel_requested, hl_oid, created_at, updated_at,
+                    dispatch_state
                FROM orders
               WHERE user_id = ?1 AND (?2 IS NULL OR rowid < ?2)
               ORDER BY rowid DESC
@@ -256,6 +257,7 @@ pub fn list_orders(
                     row.get::<Option<i64>>(13)?,
                     row.get::<i64>(14)?,
                     row.get::<i64>(15)?,
+                    row.get::<String>(16)?,
                 ))
             },
         )
@@ -265,6 +267,8 @@ pub fn list_orders(
         .map(|row| {
             let state =
                 order_state_from_str(&row.11).ok_or(Error::Invariant("unknown order state"))?;
+            let dispatch_state = crate::states::action_state_from_str(&row.16)
+                .ok_or(Error::Invariant("unknown dispatch state"))?;
             Ok((
                 row.0,
                 OrderSummary {
@@ -279,6 +283,7 @@ pub fn list_orders(
                     filled_quantity: row.9,
                     reduce_only: row.10 != 0,
                     state,
+                    dispatch_state,
                     cancel_requested: row.12 != 0,
                     hl_oid: row
                         .13

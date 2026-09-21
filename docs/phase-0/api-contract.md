@@ -254,6 +254,15 @@ type PendingOrderView = record {
   request_id : RequestId; cloid : opt Cloid; action_state : ActionState;
   since : Timestamp; last_error : opt ErrorCode;
 };
+
+// `list_orders` が返す型（`OrderView`の拡張。outboxの送信状態を含む）。
+type OrderSummary = record {
+  order_id : Blob32; cloid : Cloid; market : text; asset_index : nat32;
+  is_buy : bool; kind : text; price : opt text; quantity : text;
+  filled_quantity : text; reduce_only : bool; state : OrderState;
+  dispatch_state : ActionState; cancel_requested : bool; hl_oid : opt nat64;
+  created_at : Timestamp; updated_at : Timestamp;
+};
 ```
 
 | # | メソッド | 種別 | 冪等性キー |
@@ -265,7 +274,8 @@ type PendingOrderView = record {
 | 16 | `list_orders` | query | なし（カーソル） |
 | 17 | `list_fills` | query | なし（カーソル） |
 
-- `list_orders`・`list_fills`は`Paged<OrderView>`／`Paged<FillView>`を返す。`FillView`は約定時刻・価格・数量・手数料・cloid・`hl_oid`を持つ。
+- `list_orders`は`Paged<OrderSummary>`（`dispatch_state`を含む）、`list_fills`は
+  `Paged<FillView>`を返す。`FillView`は約定時刻・価格・数量・手数料・cloid・`hl_oid`を持つ。
 - 受付はHLの受理でも約定でもない。`submit_order`の応答は`queued`のみを返し、HL状態は`get_account_snapshot`または`list_orders`の照合結果で更新する（`Implementation.md` 6.3）。
 
 ## 4. control_guard

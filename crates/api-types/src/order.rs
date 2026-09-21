@@ -184,6 +184,8 @@ pub struct OrderSummary {
     pub filled_quantity: String,
     pub reduce_only: bool,
     pub state: OrderState,
+    /// outboxの送信状態（受付から照合までの進み具合）。
+    pub dispatch_state: ActionState,
     pub cancel_requested: bool,
     pub hl_oid: Option<u64>,
     pub created_at: Timestamp,
