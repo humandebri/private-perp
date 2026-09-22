@@ -33,6 +33,9 @@ const MEMORY_ID: u8 = db::memory_id::FUNDS_VAULT_MAIN;
 thread_local! {
     /// 直近の入金照合時刻（timerの起動間隔より長い周期で回すためのゲート）。
     static LAST_DEPOSIT_RECONCILE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SWEEP_TIMER: std::cell::RefCell<Option<ic_cdk_timers::TimerId>> = const {
+        std::cell::RefCell::new(None)
+    };
 }
 
 /// このビルドのバージョン。デプロイ確認用。
@@ -245,7 +248,8 @@ fn set_ecdsa_key_id(key_id: String) -> Result<(), ErrorCode> {
     hl_types::environment::validate_key_id(&key_id).map_err(environment::map_environment)?;
     let now = clock::now_ms();
     db::tx::update(|connection| db::repo::vault_config::set_ecdsa_key_id(connection, &key_id, now))
-        .map_err(|error| auth::map_db(error, None))
+        .map_err(|error| auth::map_db(error, None))?;
+    Ok(())
 }
 
 /// 現在の環境設定（診断用・公開）。秘密は含まない。
@@ -483,18 +487,27 @@ fn test_credit_deposit(
 /// （`Implementation.md` 6.3、`state-machines.md` 5節）。
 #[cfg(not(feature = "test-venue"))]
 fn schedule_sweep() {
-    ic_cdk_timers::set_timer_interval(
+    if SWEEP_TIMER.with(|timer| timer.borrow().is_some()) {
+        return;
+    }
+    let timer_id = ic_cdk_timers::set_timer_interval_serial(
         core::time::Duration::from_millis(outbox::SWEEP_INTERVAL_MS),
-        || async {
+        async || {
             let now = clock::now_ms();
             // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
             if let Err(error) = outbox::sweep(now).await {
                 ic_cdk::println!("fund outbox sweep failed: {error:?}");
             }
 
-            // 入金の定期照合（60秒間隔・1回あたり2件まで。outcallの回数を抑える）。
+            // ローカル実接続はE2Eの待ち時間を抑えるため5秒、それ以外は60秒。
+            // いずれも1回あたり2件までとしてoutcall数を制限する。
+            let deposit_interval = if environment::network_name().ok().as_deref() == Some("local") {
+                5_000
+            } else {
+                60_000
+            };
             let due_deposits = LAST_DEPOSIT_RECONCILE.with(|cell| {
-                if now.saturating_sub(cell.get()) < 60_000 {
+                if now.saturating_sub(cell.get()) < deposit_interval {
                     false
                 } else {
                     cell.set(now);
@@ -506,6 +519,7 @@ fn schedule_sweep() {
             }
         },
     );
+    SWEEP_TIMER.with(|timer| *timer.borrow_mut() = Some(timer_id));
 }
 
 /// テスト専用のsweep（`test-venue` featureでのみ存在）。
@@ -795,8 +809,6 @@ fn init_db() {
 #[ic_cdk::init]
 fn init() {
     init_db();
-    // 試験ビルドでは自動sweepを組まない（PocketICの時刻前進で、試験が待つoutcallと
-    // 取り違えるため）。同じsweepを`test_sweep_now`で決定的に駆動する。
     #[cfg(not(feature = "test-venue"))]
     schedule_sweep();
 }

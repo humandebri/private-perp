@@ -113,6 +113,12 @@ fn typed_data_json(challenge: &private_perp::Challenge) -> Result<Vec<u8>, Error
         "nonce": format!("0x{}", hex::encode(challenge.nonce)),
         "expiresAt": challenge.expires_at,
     });
+    let domain_types = serde_json::json!([
+        { "name": "name", "type": "string" },
+        { "name": "version", "type": "string" },
+        { "name": "chainId", "type": "uint256" },
+        { "name": "verifyingContract", "type": "address" },
+    ]);
     let typed_data = serde_json::json!({
         "domain": {
             "name": domain.name,
@@ -120,7 +126,10 @@ fn typed_data_json(challenge: &private_perp::Challenge) -> Result<Vec<u8>, Error
             "chainId": domain.chain_id,
             "verifyingContract": "0x0000000000000000000000000000000000000000",
         },
-        "types": { private_perp::CHALLENGE_PRIMARY_TYPE: types },
+        "types": {
+            "EIP712Domain": domain_types,
+            private_perp::CHALLENGE_PRIMARY_TYPE: types,
+        },
         "primaryType": private_perp::CHALLENGE_PRIMARY_TYPE,
         "message": message,
     });

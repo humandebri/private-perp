@@ -285,6 +285,27 @@ DROP TABLE key_registry;
 DROP TABLE vault_legacy_cleanup_guard;
 ";
 
+/// v10: allocation着金を要求単位へ対応付ける。
+///
+/// Hyperliquidのledger updateにはclient request IDが含まれないため、同一取引口座の
+/// 実行中要求へ作成順で充当する。1イベントが複数要求を満たす場合と、1要求が複数の
+/// 部分着金で満たされる場合の両方を記録する。
+const ALLOCATION_CONFIRMATIONS: &str = "
+CREATE TABLE allocation_confirmations (
+    external_event_id BLOB NOT NULL CHECK (length(external_event_id) = 32),
+    user_id BLOB NOT NULL CHECK (length(user_id) = 32),
+    client_request_id BLOB NOT NULL,
+    amount INTEGER NOT NULL CHECK (amount > 0),
+    confirmed_at INTEGER NOT NULL,
+    PRIMARY KEY (external_event_id, user_id, client_request_id),
+    FOREIGN KEY (user_id, client_request_id)
+        REFERENCES fund_requests (user_id, client_request_id)
+);
+
+CREATE INDEX allocation_confirmations_by_request
+    ON allocation_confirmations (user_id, client_request_id);
+";
+
 /// `funds_vault` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -322,5 +343,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 9,
         sql: REMOVE_LEGACY_KEY_REGISTRY,
+    },
+    Migration {
+        version: 10,
+        sql: ALLOCATION_CONFIRMATIONS,
     },
 ];

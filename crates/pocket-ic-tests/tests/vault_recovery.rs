@@ -11,7 +11,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy, pic, principal, update, update_args,
+    FUNDS_VAULT_WASM, call_with_mocked_outcall, call_with_routed_outcalls, deploy, pic, principal,
+    update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -205,6 +206,19 @@ fn allocated_funds_arrive_and_can_be_recovered() {
     let status = status.expect("status");
     assert_eq!(status.trading_equity, 400_000, "着金で取引口座残高が増える");
     assert_eq!(status.in_transit, 0, "移動中から取引へ移る");
+    let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    assert_eq!(
+        events.expect("events").items[0].state,
+        FundRequestState::Settled,
+        "取引口座への着金でallocation自体も完了する"
+    );
 
     // 回収（取引口座→準備口座）を要求して送信する。
     let recovered: Result<FundRequestAccepted, ErrorCode> = update_args(
@@ -245,6 +259,146 @@ fn allocated_funds_arrive_and_can_be_recovered() {
         events.expect("events").items[0].state,
         FundRequestState::Settled
     );
+}
+
+/// allocationは複数のledger updateで部分着金しても、累計額で完了する。
+#[test]
+fn allocation_settles_after_partial_arrivals() {
+    let pic = pic();
+    let controller = principal(94);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let caller = principal(93);
+    let session = open_session(&pic, vault, caller, &secret(164));
+    credit(&pic, vault, caller, &session, 1_000_000, 41);
+    allocate(
+        &pic,
+        vault,
+        caller,
+        &session,
+        b"partial-allocation",
+        400_000,
+    )
+    .expect("allocation");
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("call");
+    assert_eq!(swept.expect("allocation sweep"), 1);
+
+    let trading: Result<Blob, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone()).expect("call");
+    let trading_address = trading.expect("trading address");
+    for (seed, amount) in [(42u8, 150_000u64), (43u8, 250_000u64)] {
+        let credited: Result<bool, ErrorCode> = update_args(
+            &pic,
+            vault,
+            controller,
+            "credit_venue_deposit",
+            (
+                blob(&[seed; 32]),
+                amount,
+                trading_address.clone(),
+                "usdc".to_string(),
+            ),
+        )
+        .expect("call");
+        assert!(credited.expect("arrival"));
+
+        let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+            &pic,
+            vault,
+            caller,
+            "list_fund_events",
+            (session.clone(), None::<Blob>, 10u32),
+        )
+        .expect("call");
+        let expected = if amount == 150_000 {
+            FundRequestState::Executing
+        } else {
+            FundRequestState::Settled
+        };
+        assert_eq!(events.expect("events").items[0].state, expected);
+    }
+
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session).expect("call");
+    let status = status.expect("status");
+    assert_eq!(status.in_transit, 0);
+    assert_eq!(status.trading_equity, 400_000);
+}
+
+/// 1件の着金が複数要求を満たす場合もFIFOで全要求を完了し、超過分は直接与信する。
+#[test]
+fn one_arrival_settles_multiple_allocations_and_credits_excess() {
+    let pic = pic();
+    let controller = principal(92);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let caller = principal(91);
+    let session = open_session(&pic, vault, caller, &secret(163));
+    credit(&pic, vault, caller, &session, 1_000_000, 44);
+    allocate(&pic, vault, caller, &session, b"allocation-a", 200_000).expect("allocation a");
+    allocate(&pic, vault, caller, &session, b"allocation-b", 400_000).expect("allocation b");
+    let (swept, calls): (Result<u32, ErrorCode>, _) =
+        call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |_| {
+            Ok((200, ACCEPTED.to_vec()))
+        })
+        .expect("call");
+    assert_eq!(swept.expect("allocation sweep"), 2);
+    assert_eq!(calls.len(), 2);
+
+    let trading: Result<Blob, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone()).expect("call");
+    let credited: Result<bool, ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "credit_venue_deposit",
+        (
+            blob(&[45u8; 32]),
+            700_000u64,
+            trading.expect("trading address"),
+            "usdc".to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(credited.expect("arrival"));
+
+    let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("call");
+    let events = events.expect("events");
+    assert_eq!(events.items.len(), 2);
+    assert!(
+        events
+            .items
+            .iter()
+            .all(|event| event.state == FundRequestState::Settled)
+    );
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session).expect("call");
+    let status = status.expect("status");
+    assert_eq!(status.in_transit, 0);
+    assert_eq!(status.trading_equity, 700_000);
 }
 
 /// 取引口座のequityを超える回収と、equityを超える二重の回収を拒否する。

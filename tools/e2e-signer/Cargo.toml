@@ -1,0 +1,11 @@
+[package]
+name = "e2e-signer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex.workspace = true
+hl-sign = { path = "../../crates/hl-sign" }
+serde_json.workspace = true

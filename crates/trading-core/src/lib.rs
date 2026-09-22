@@ -23,6 +23,12 @@ use ic_cdk_management_canister::{EcdsaCurve, EcdsaKeyId, EcdsaPublicKeyArgs, ecd
 
 const MEMORY_ID: u8 = db::memory_id::TRADING_CORE_MAIN;
 
+thread_local! {
+    static SWEEP_TIMER: std::cell::RefCell<Option<ic_cdk_timers::TimerId>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// 取引所データを「古い」とみなす閾値（ミリ秒）。
 const STALE_DATA_MS: u64 = 10_000;
 
@@ -447,7 +453,8 @@ fn set_ecdsa_key_id(key_id: String) -> Result<(), ErrorCode> {
     hl_types::environment::validate_key_id(&key_id).map_err(environment::map_environment)?;
     let now = ic_cdk::api::time() / 1_000_000;
     db::tx::update(|connection| db::repo::core_config::set_ecdsa_key_id(connection, &key_id, now))
-        .map_err(map_db)
+        .map_err(map_db)?;
+    Ok(())
 }
 
 /// 現在の環境設定（診断用・公開）。秘密は含まない。
@@ -1776,9 +1783,12 @@ async fn sweep() -> Result<api_types::order::SweepOutcome, ErrorCode> {
 /// （`state-machines.md` 5節）。
 #[cfg(not(feature = "test-venue"))]
 fn schedule_sweep() {
-    ic_cdk_timers::set_timer_interval(
+    if SWEEP_TIMER.with(|timer| timer.borrow().is_some()) {
+        return;
+    }
+    let timer_id = ic_cdk_timers::set_timer_interval_serial(
         core::time::Duration::from_millis(pipeline::SWEEP_INTERVAL_MS),
-        || async {
+        async || {
             // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
             let now = ic_cdk::api::time() / 1_000_000;
             if let Err(error) = pipeline::sweep_once(now).await {
@@ -1786,6 +1796,7 @@ fn schedule_sweep() {
             }
         },
     );
+    SWEEP_TIMER.with(|timer| *timer.borrow_mut() = Some(timer_id));
 }
 
 /// テスト専用：`/info`の`userFills`相当を取り込む（`test-venue`のみ）。
@@ -1847,8 +1858,6 @@ fn init_db() {
 #[ic_cdk::init]
 fn init() {
     init_db();
-    // 試験ビルドでは自動sweepを組まない（PocketICの時刻前進で、試験が待つoutcallと
-    // 取り違えるため）。同じ`sweep_once`を`test_sweep_now`で決定的に駆動する。
     #[cfg(not(feature = "test-venue"))]
     schedule_sweep();
 }

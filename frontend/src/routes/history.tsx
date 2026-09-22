@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { DemoApp } from '../ui/demo-app'
+import { HistoryApp } from '../ui/local-app'
 export const Route = createFileRoute('/history')({
   ssr: false,
-  component: () => <DemoApp screen="history" />,
+  component: HistoryApp,
 })

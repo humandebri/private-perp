@@ -153,7 +153,15 @@ pub fn credit(
             // 配分として説明できないため、取引口座への直接入金として与信する
             // （そうしないと `user_in_transit` が負債超過になり残高参照が壊れる）。
             let in_transit = db::repo::ledger::user_in_transit_balance(connection, &owner.user_id)?;
-            let confirmed = amount.min(in_transit);
+            let confirmable = amount.min(in_transit);
+            let confirmed = db::repo::funds::confirm_executing_allocations(
+                connection,
+                &owner.user_id,
+                &owner.account_id,
+                &event_id,
+                confirmable,
+                now,
+            )?;
             if confirmed > 0 {
                 db::repo::ledger::allocation_confirm(
                     connection,
@@ -212,12 +220,13 @@ pub fn now_ms() -> u64 {
     clock::now_ms()
 }
 
-/// 有界な定期照合。カーソルの位置から `limit` 件の入金先を確認して計上する。
+/// 有界な定期照合。カーソルの位置から `limit` 件のcustody口座を確認して計上する。
 ///
 /// 先頭N件固定では3人目以降が永久に対象外になるため、`(created_at, master_address)` の
 /// キーセットで巡回し、末尾まで到達したら次回は先頭から始める。1件の取得失敗や
 /// 解釈できないイベントで巡回全体を止めない（次のheartbeatで再試行される）。
-/// 有効な入金先を巡回して入金を取り込む（自動sweep専用。試験は`reconcile_deposits`を使う）。
+/// reserveへの入金とtradingへのallocation着金を巡回して取り込む
+/// （自動sweep専用。試験は`reconcile_deposits`を使う）。
 #[cfg(not(feature = "test-venue"))]
 pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
     let internal = |error: DbError| ErrorCode::Internal {
@@ -225,7 +234,7 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
     };
     let cursor = db::tx::query(db::repo::ledger::reconcile_cursor).map_err(internal)?;
     let addresses = db::tx::query(|connection| {
-        db::repo::ledger::reserve_addresses_after(connection, limit, cursor)
+        db::repo::ledger::custody_addresses_after(connection, limit, cursor)
     })
     .map_err(internal)?;
 

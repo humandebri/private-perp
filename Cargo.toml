@@ -11,6 +11,7 @@ members = [
     "crates/control-guard",
     "crates/trading-core",
     "crates/pocket-ic-tests",
+    "tools/e2e-signer",
 ]
 # ホストで実行できる純粋クレートのみを既定の対象にする。
 # Canisterクレートと `db` の実装は wasm32 ビルドでのみ検証する（Implementation.md 3.2、3.3）。

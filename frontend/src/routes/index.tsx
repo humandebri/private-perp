@@ -4,7 +4,7 @@ export const Route = createFileRoute('/')({ component: Home })
 function Home() {
   return (
     <main className="landing">
-      <div className="eyebrow">PRIVATE PERPETUALS / ENGINEERING PREVIEW</div>
+      <div className="eyebrow">PRIVATE PERPETUALS / LOCAL INTEGRATION</div>
       <h1>
         取引に集中する。
         <br />
@@ -13,11 +13,11 @@ function Home() {
       <p className="lead">
         Hyperliquidの取引体験と、ICPによる資金管理をつなぐ。
         <br />
-        機密性を検証しながら作る、次の取引インターフェース。
+        MetaMask認証と実Canisterを一巡させる、loopback限定の開発環境。
       </p>
       <div className="hero-actions">
         <Link to="/trade" className="primary button">
-          デモ取引画面を開く ↗
+          ローカル取引画面を開く ↗
         </Link>
         <Link to="/funds" className="button secondary">
           資金フローを見る
@@ -41,7 +41,8 @@ function Home() {
         </article>
       </div>
       <aside className="notice">
-        この画面は合成データのプロトタイプです。注文・預入・出金はネットワークへ送信されません。実際の機密性、資金安全性、SNS構成は未検証です。
+        LOCAL MOCKは実資金を扱いません。接続先はloopbackのIC replicaとmock
+        venueだけに制限され、testnet・mainnetでは起動しません。
       </aside>
     </main>
   )

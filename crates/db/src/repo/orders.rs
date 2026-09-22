@@ -1051,7 +1051,6 @@ pub fn ensure_action_nonces(
         .query_optional_scalar::<Vec<u8>>(
             "SELECT agent_address FROM agent_generations
               WHERE account_id = (SELECT account_id FROM orders WHERE order_id = ?1)
-                AND state = 'active'
               ORDER BY generation DESC LIMIT 1",
             params![order_id.as_slice()],
         )
@@ -1308,7 +1307,7 @@ pub fn claim_cancel(
         .query_optional(
             "SELECT cancel_worker_epoch, cancel_nonce,
                     (SELECT agent_address FROM agent_generations
-                      WHERE account_id = orders.account_id AND state = 'active'
+                      WHERE account_id = orders.account_id
                       ORDER BY generation DESC LIMIT 1)
                FROM orders WHERE order_id = ?1",
             params![order_id.as_slice()],

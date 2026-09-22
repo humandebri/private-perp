@@ -6,45 +6,30 @@ import {
   secureResponse,
 } from '../../src/server-policy'
 
-const requestWithCountry = (country?: string) =>
-  Object.assign(new Request('https://demo.test', { headers: { 'CF-IPCountry': 'JP' } }), {
-    cf: country === undefined ? {} : { country },
-  })
 describe('edge boundary', () => {
   it('rejects financial POSTs without parsing them', () => {
     expect(
       gateRequest(
-        new Request('https://demo.test/trade', { method: 'POST', body: 'secret' }),
-        'demo',
-        'US',
+        new Request('http://127.0.0.1/trade', { method: 'POST', body: 'secret' }),
+        'local',
       )?.status,
     ).toBe(405)
   })
   it('cannot accidentally run as a live service', () => {
-    expect(gateRequest(new Request('https://demo.test'), 'mainnet', 'US')?.status).toBe(503)
+    expect(gateRequest(new Request('http://127.0.0.1'), 'mainnet')?.status).toBe(503)
   })
-  it('uses platform country metadata, not spoofable request headers', () => {
-    expect(gateRequest(requestWithCountry('US'), 'demo', 'US')?.status).toBe(403)
-    expect(gateRequest(requestWithCountry('JP'), 'demo', 'US')).toBeNull()
-  })
-  it('normalises case on both sides of the comparison', () => {
-    expect(gateRequest(requestWithCountry('us'), 'demo', 'US')?.status).toBe(403)
-    expect(gateRequest(requestWithCountry('jp'), 'demo', ' us , jp ')?.status).toBe(403)
-  })
-  it('fails closed when the country cannot be determined', () => {
-    const unknown = requestWithCountry()
-    expect(gateRequest(unknown, 'demo', 'US')?.status).toBe(403)
-    expect(gateRequest(new Request('https://demo.test'), 'demo', 'US')?.status).toBe(403)
-    expect(gateRequest(unknown, 'demo', 'US', { allowUnknownCountry: true })).toBeNull()
-  })
-  it('tolerates a missing blocklist without throwing', () => {
-    expect(gateRequest(requestWithCountry('JP'), 'demo', undefined)).toBeNull()
-    expect(
-      gateRequest(requestWithCountry('JP'), 'demo', '', { allowUnknownCountry: true }),
-    ).toBeNull()
+  it('allows local stage only on loopback', () => {
+    expect(gateRequest(new Request('http://127.0.0.1/trade'), 'local')).toBeNull()
+    expect(gateRequest(new Request('http://localhost/trade'), 'local')).toBeNull()
+    expect(gateRequest(new Request('https://private-perp.example/trade'), 'local')?.status).toBe(
+      403,
+    )
   })
   it('sets security and non-cache headers', () => {
-    const response = secureResponse(new Response('public'))
+    const response = secureResponse(new Response('public'), 'no-store', [
+      'http://127.0.0.1:18100',
+      'http://127.0.0.1:8080',
+    ])
     expect(response.headers.get('cache-control')).toBe('no-store')
     expect(response.headers.get('referrer-policy')).toBe('no-referrer')
     expect(response.headers.get('x-frame-options')).toBe('DENY')
@@ -53,6 +38,8 @@ describe('edge boundary', () => {
     expect(csp).toContain("default-src 'self'")
     expect(csp).toContain("script-src 'self'")
     expect(csp).toContain("connect-src 'self'")
+    expect(csp).toContain('http://127.0.0.1:18100')
+    expect(csp).toContain('http://127.0.0.1:8080')
     expect(csp).toContain("img-src 'self' data:")
     expect(csp).toContain("style-src 'self' 'unsafe-inline'")
     expect(csp).toContain("object-src 'none'")

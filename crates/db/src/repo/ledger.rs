@@ -809,10 +809,12 @@ pub fn reset_reconcile_cursor(
         .map_err(sql)
 }
 
-/// カーソルより後の入金先（準備口座）を `(created_at, master_address)` 昇順で返す。
+/// カーソルより後の全custody口座を `(created_at, master_address)` 昇順で返す。
 ///
-/// 先頭N件固定では3人目以降が永久に対象外になるため、キーセットで巡回する。
-pub fn reserve_addresses_after(
+/// reserveへの外部入金だけでなく、allocationの送金先であるtrading口座も同じ
+/// ledger update経路で確定する必要がある。先頭N件固定では古い口座が永久に
+/// 対象外になるため、キーセットで巡回する。
+pub fn custody_addresses_after(
     connection: &Connection,
     limit: u32,
     cursor: Option<(u64, [u8; 20])>,
@@ -836,8 +838,7 @@ pub fn reserve_addresses_after(
     let rows = connection
         .query_all(
             "SELECT master_address, created_at FROM custody_accounts
-              WHERE kind = 'reserve'
-                AND (?1 IS NULL
+              WHERE (?1 IS NULL
                      OR created_at > ?1
                      OR (created_at = ?1 AND master_address > ?2))
               ORDER BY created_at, master_address

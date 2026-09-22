@@ -1,16 +1,11 @@
 // The edge never parses a financial request or acts as a trading proxy.
-export type GateOptions = {
-  /** Local demo only: opt in to serving requests without platform country metadata. */
-  allowUnknownCountry?: boolean
-}
-const REGION_DENIED = 'This interface is unavailable in your region.'
 /** Executable inline scripts are allow-listed by hash, so script-src stays free of 'unsafe-inline'. */
 const INLINE_SCRIPT_PATTERN = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi
-function contentSecurityPolicy(scriptHashes: string[]): string {
+function contentSecurityPolicy(scriptHashes: string[], connectSources: string[] = []): string {
   return [
     "default-src 'self'",
     ["script-src 'self'", ...scriptHashes].join(' '),
-    "connect-src 'self'",
+    ["connect-src 'self'", ...connectSources].join(' '),
     "img-src 'self' data:",
     // React writes layout through the `style` attribute (chart sizing, depth bars),
     // which CSP only allows with 'unsafe-inline' on style-src.
@@ -21,7 +16,6 @@ function contentSecurityPolicy(scriptHashes: string[]): string {
     "form-action 'none'",
   ].join('; ')
 }
-const CONTENT_SECURITY_POLICY = contentSecurityPolicy([])
 /**
  * Applies the HTML parser's input preprocessing (newline normalisation and NUL
  * replacement) so a hash matches the text the browser actually checks.
@@ -53,33 +47,25 @@ function securityHeaders(source: Headers): Headers {
   headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
   return headers
 }
-export function gateRequest(
-  request: Request & { cf?: { country?: string } },
-  stage: string,
-  blocked: string | undefined,
-  options: GateOptions = {},
-): Response | null {
-  if (stage !== 'demo') return new Response('Live service is not configured.', { status: 503 })
+export function gateRequest(request: Request, stage: string): Response | null {
+  if (stage !== 'local') return new Response('Local service is not configured.', { status: 503 })
+  const hostname = new URL(request.url).hostname
+  if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) {
+    return new Response('Loopback access only.', { status: 403 })
+  }
   if (!['GET', 'HEAD'].includes(request.method))
     return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } })
-  // Fail closed: without platform country metadata the region cannot be checked,
-  // so only an explicit local-demo opt-in may pass.
-  const country = request.cf?.country?.toUpperCase()
-  if (!country) {
-    return options.allowUnknownCountry ? null : new Response(REGION_DENIED, { status: 403 })
-  }
-  const blockedCountries = (blocked ?? '')
-    .split(',')
-    .map((code) => code.trim().toUpperCase())
-    .filter(Boolean)
-  if (blockedCountries.includes(country)) return new Response(REGION_DENIED, { status: 403 })
   return null
 }
 
-export function secureResponse(response: Response, cacheControl = 'no-store'): Response {
+export function secureResponse(
+  response: Response,
+  cacheControl = 'no-store',
+  connectSources: string[] = [],
+): Response {
   const headers = securityHeaders(response.headers)
   headers.set('Cache-Control', cacheControl)
-  headers.set('Content-Security-Policy', CONTENT_SECURITY_POLICY)
+  headers.set('Content-Security-Policy', contentSecurityPolicy([], connectSources))
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -92,13 +78,20 @@ export function secureResponse(response: Response, cacheControl = 'no-store'): R
  * policy is derived from the document that is actually served. The body is read
  * once to hash it; non-HTML responses keep the static policy untouched.
  */
-export async function secureRenderedResponse(response: Response): Promise<Response> {
+export async function secureRenderedResponse(
+  response: Response,
+  connectSources: string[] = [],
+): Promise<Response> {
   const contentType = response.headers.get('content-type') ?? ''
-  if (!contentType.includes('text/html')) return secureResponse(response)
+  if (!contentType.includes('text/html'))
+    return secureResponse(response, 'no-store', connectSources)
   const html = await response.text()
   const headers = securityHeaders(response.headers)
   headers.set('Cache-Control', 'no-store')
-  headers.set('Content-Security-Policy', contentSecurityPolicy(await inlineScriptHashes(html)))
+  headers.set(
+    'Content-Security-Policy',
+    contentSecurityPolicy(await inlineScriptHashes(html), connectSources),
+  )
   headers.delete('content-length')
   headers.delete('content-encoding')
   return new Response(html, {

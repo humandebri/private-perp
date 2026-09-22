@@ -217,6 +217,101 @@ pub fn set_request_state(
     crate::cas::ensure_changed(changed, "existing request", "missing request")
 }
 
+/// 1件の取引口座着金を、同一口座の実行中allocationへ作成順で充当する。
+///
+/// 戻り値はallocationとして説明できた額。残額は呼び出し側が直接入金として扱う。
+/// 1イベントが過大な数の要求を跨ぐ場合は処理を中断し、イベント全体を再試行可能に
+/// 保つ（`db::tx::update`の同一トランザクション内から呼ぶこと）。
+pub fn confirm_executing_allocations(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    account_id: &[u8; 32],
+    external_event_id: &[u8; 32],
+    amount: u64,
+    now: u64,
+) -> Result<u64, Error> {
+    const MAX_MATCHES: usize = 100;
+    let rows = connection
+        .query_all(
+            "SELECT f.client_request_id, f.amount, COALESCE(SUM(c.amount), 0)
+               FROM fund_requests f
+               LEFT JOIN allocation_confirmations c
+                 ON c.user_id = f.user_id
+                AND c.client_request_id = f.client_request_id
+              WHERE f.user_id = ?1
+                AND f.account_id = ?2
+                AND f.kind = 'allocation'
+                AND f.state = 'executing'
+              GROUP BY f.client_request_id, f.amount, f.created_at
+              ORDER BY f.created_at, f.client_request_id
+              LIMIT ?3",
+            params![
+                user_id.as_slice(),
+                account_id.as_slice(),
+                (MAX_MATCHES + 1) as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<i64>(2)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+
+    let mut remaining = amount;
+    let mut confirmed = 0u64;
+    for (index, (request_id, requested, already_confirmed)) in rows.into_iter().enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        if index == MAX_MATCHES {
+            return Err(Error::Invariant(
+                "allocation confirmation batch limit exceeded",
+            ));
+        }
+        let requested =
+            u64::try_from(requested).map_err(|_| Error::Invariant("negative allocation amount"))?;
+        let already_confirmed = u64::try_from(already_confirmed)
+            .map_err(|_| Error::Invariant("negative allocation confirmation"))?;
+        let outstanding = requested
+            .checked_sub(already_confirmed)
+            .ok_or(Error::Invariant("allocation confirmation exceeds request"))?;
+        if outstanding == 0 {
+            return Err(Error::Invariant("settled allocation is still executing"));
+        }
+        let applied = remaining.min(outstanding);
+        connection
+            .execute(
+                "INSERT INTO allocation_confirmations
+                   (external_event_id, user_id, client_request_id, amount, confirmed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    external_event_id.as_slice(),
+                    user_id.as_slice(),
+                    request_id.as_slice(),
+                    i64::try_from(applied).map_err(|_| Error::Overflow)?,
+                    now as i64
+                ],
+            )
+            .map_err(sql)?;
+        remaining -= applied;
+        confirmed = confirmed.checked_add(applied).ok_or(Error::Overflow)?;
+
+        if already_confirmed + applied == requested {
+            set_request_state(
+                connection,
+                user_id,
+                &request_id,
+                FundRequestState::Settled,
+                now,
+            )?;
+        }
+    }
+    Ok(confirmed)
+}
+
 /// 保持中の予約合計（未解放）。
 pub fn held_reservation_total(connection: &Connection, user_id: &[u8; 32]) -> Result<u64, Error> {
     let total = connection

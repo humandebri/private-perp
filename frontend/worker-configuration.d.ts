@@ -3,18 +3,13 @@
 // Runtime types generated with workerd@1.20260916.1 2026-09-18 nodejs_compat
 interface __BaseEnv_Env {
 	ASSETS: Fetcher;
-	APP_STAGE: "live" | "demo";
-	BLOCKED_COUNTRIES: "US,KP,IR" | "";
-	ALLOW_UNKNOWN_COUNTRY?: "1";
+	APP_STAGE: "local";
+	IC_HOST: "http://127.0.0.1:18100";
+	MOCK_HL_URL: "http://127.0.0.1:8080";
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/server");
-	}
-	interface ProductionEnv {
-		ASSETS: Fetcher;
-		APP_STAGE: "live";
-		BLOCKED_COUNTRIES: "US,KP,IR";
 	}
 	interface Env extends __BaseEnv_Env {}
 }
@@ -23,7 +18,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "APP_STAGE" | "BLOCKED_COUNTRIES" | "ALLOW_UNKNOWN_COUNTRY">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "APP_STAGE" | "IC_HOST" | "MOCK_HL_URL">> {}
 }
 
 // Begin runtime types

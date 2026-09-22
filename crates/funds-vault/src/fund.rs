@@ -199,7 +199,7 @@ pub async fn request_allocation(
                 client_request_id: request_id,
                 body_hash: &fingerprint,
                 kind: RequestKind::Allocation,
-                account_id: None,
+                account_id: Some(&trading.account_id),
                 amount: request.amount,
                 destination: Some(destination_address.as_str()),
             },

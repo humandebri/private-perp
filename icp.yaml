@@ -28,3 +28,9 @@ canisters:
       type: "@dfinity/rust@v3.2.0"
       configuration:
         package: trading-core
+
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 18100

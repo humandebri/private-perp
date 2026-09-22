@@ -1,13 +1,14 @@
 import { createRootRoute, HeadContent, Link, Scripts } from '@tanstack/react-router'
 import type { ReactNode } from 'react'
 import stylesheet from '../styles.css?url'
+import { LocalSessionProvider } from '../ui/local-session'
 
 export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { title: 'VEIL / Private Perpetuals — Demo' },
+      { title: 'VEIL / Private Perpetuals — Local' },
     ],
     links: [{ rel: 'stylesheet', href: stylesheet }],
   }),
@@ -36,15 +37,15 @@ function Document({ children }: { children: ReactNode }) {
             <Link to="/funds">資金</Link>
             <Link to="/history">履歴</Link>
           </nav>
-          <span className="badge">DEMO · 合成データ</span>
+          <span className="badge">LOCAL MOCK</span>
         </header>
-        {children}
+        <LocalSessionProvider>{children}</LocalSessionProvider>
         <footer>
           <span>
             <i className="status-dot" />
-            ローカルシミュレーション
+            ローカルCanister接続
           </span>
-          <span>ICP 未接続 · 実資金・ウォレットは使用しません</span>
+          <span>loopback限定 · 実資金・testnet・mainnetは対象外</span>
         </footer>
         <Scripts />
       </body>

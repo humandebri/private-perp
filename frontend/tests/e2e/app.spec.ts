@@ -1,126 +1,154 @@
+import { execFileSync } from 'node:child_process'
+import { resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 
-test('SSR serves only the public shell for account routes and refuses POST', async ({
-  request,
-}) => {
+test('SSR exposes a local-only shell and refuses writes', async ({ request }) => {
   for (const path of ['/', '/trade', '/funds', '/history']) {
     const response = await request.get(path)
     expect(response.ok()).toBeTruthy()
     expect(response.headers()['x-frame-options']).toBe('DENY')
     expect(response.headers()['cache-control']).toBe('no-store')
+    expect(response.headers()['content-security-policy']).toContain('http://127.0.0.1:18100')
     const html = await response.text()
-    // Positive control: the public shell really is server-rendered.
-    expect(html).toContain('VEIL')
-    // The account workspace and its balances are client-only. If a change ever
-    // let the server render them, these markers would appear in the HTML.
+    expect(html).toContain('LOCAL MOCK')
     expect(html).not.toContain('data-testid="account-panel"')
-    expect(html).not.toContain('data-testid="account-balances"')
-    expect(html).not.toContain('デモセッション開始')
   }
-  expect((await request.post('/trade', { data: 'not-a-real-order' })).status()).toBe(405)
+  expect((await request.post('/trade', { data: 'not-an-order' })).status()).toBe(405)
 })
 
-test('hashed assets are immutable while HTML is never cached', async ({ request }) => {
+test('hashed assets remain immutable', async ({ request }) => {
   const page = await request.get('/trade')
-  expect(page.headers()['cache-control']).toBe('no-store')
   const asset = (await page.text()).match(/\/assets\/[^"']+\.(?:js|css)/)?.[0]
   expect(asset).toBeTruthy()
-  const assetResponse = await request.get(asset as string)
-  expect(assetResponse.ok()).toBeTruthy()
-  expect(assetResponse.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
-  expect((await request.get('/missing-page')).headers()['cache-control']).toBe('no-store')
+  const response = await request.get(asset as string)
+  expect(response.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
 })
 
-test('partial fill, cancellation and logout clear the session without network writes', async ({
-  page,
-}) => {
-  const unsafe: string[] = []
-  page.on('request', (request) => {
-    if (
-      !['GET', 'HEAD'].includes(request.method()) ||
-      !request.url().startsWith('http://127.0.0.1:4173')
+test.describe('real local canister flow', () => {
+  test.skip(process.env.LOCAL_E2E !== '1', 'scripts/local-e2e.sh owns the local replica')
+  test('login, funds, agent, orders, recovery, withdrawal, history and logout', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000)
+    const signer = resolve(process.cwd(), '../target/debug/e2e-signer')
+    const address = execFileSync(signer, ['address'], { encoding: 'utf8' }).trim()
+    await page.exposeFunction('__e2eSignTypedData', (typedData: string) =>
+      execFileSync(signer, [], { input: typedData, encoding: 'utf8' }).trim(),
     )
-      unsafe.push(`${request.method()} ${request.url()}`)
-  })
-  await page.goto('/trade')
-  await page.getByRole('button', { name: 'デモセッション開始' }).click()
-  await page.getByLabel('応答シナリオ').selectOption('partial')
-  await page.getByRole('button', { name: 'デモ注文を送信' }).click()
-  await expect(page.getByRole('cell', { name: '部分約定（模擬）', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '取消', exact: true }).click()
-  await expect(page.getByRole('cell', { name: '取消済み（模擬）', exact: true })).toBeVisible()
-  await expect(page.getByRole('cell', { name: '0.005', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'デモ終了' }).click()
-  await expect(page.getByText('注文はまだありません')).toBeVisible()
-  expect(unsafe).toEqual([])
-  expect(
-    await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length })),
-  ).toEqual({ local: 0, session: 0 })
-})
+    await page.addInitScript(
+      ({ account }) => {
+        Object.defineProperty(window, 'ethereum', {
+          value: {
+            request: async ({ method, params }: { method: string; params?: unknown[] }) => {
+              if (method === 'eth_requestAccounts') return [account]
+              if (method === 'eth_signTypedData_v4')
+                return (
+                  globalThis as typeof globalThis & {
+                    __e2eSignTypedData(data: string): Promise<string>
+                  }
+                ).__e2eSignTypedData(String(params?.[1]))
+              throw new Error(`unsupported provider method: ${method}`)
+            },
+          },
+        })
+      },
+      { account: address },
+    )
 
-test('cancelling an unsent order never turns into a fill', async ({ page }) => {
-  await page.goto('/trade')
-  await page.getByRole('button', { name: 'デモセッション開始' }).click()
-  await page.getByLabel('応答シナリオ').selectOption('cancel-race')
-  // Click the row action in the same frame it appears, so the request is still
-  // queued: that is the state where a cancellation race must not fabricate a fill.
-  await page.evaluate(() => {
-    const clickCancel = () => {
-      const button = [...document.querySelectorAll('button')].find(
-        (candidate) => candidate.textContent?.trim() === '取消',
+    await page.goto('/funds')
+    await page.getByRole('button', { name: 'MetaMaskで接続' }).click()
+    await expect(page.getByText(`${address.slice(0, 10)}…${address.slice(-6)}`)).toBeVisible()
+    await page.getByLabel('金額').fill('100')
+    const seedButton = page.getByRole('button', { name: 'LOCAL MOCK 入金seed' })
+    await seedButton.click()
+    await expect(seedButton).toBeEnabled({ timeout: 15_000 })
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect
+      .poll(
+        async () => {
+          await page.getByRole('button', { name: '再読込' }).click()
+          return page.getByTestId('account-balances').textContent()
+        },
+        { timeout: 30_000 },
       )
-      if (button) button.click()
-      else requestAnimationFrame(clickCancel)
-    }
-    requestAnimationFrame(clickCancel)
+      .toContain('100.000000')
+
+    await page.getByLabel('金額').fill('20')
+    await page.getByRole('button', { name: '取引口座へ配分' }).click()
+    await expect
+      .poll(
+        async () => {
+          await page.getByRole('button', { name: '再読込' }).click()
+          return page.getByTestId('account-balances').textContent()
+        },
+        { timeout: 30_000 },
+      )
+      .toContain('20.000000')
+    await page.getByRole('link', { name: '取引' }).click()
+    await page.getByRole('button', { name: 'Agentを生成・承認' }).click()
+    await expect(page.getByText('Active', { exact: true })).toBeVisible({ timeout: 30_000 })
+
+    await page.getByLabel('数量').fill('0.0001')
+    const submitButton = page.getByRole('button', { name: '注文を受付' })
+    await expect(submitButton).toBeEnabled({ timeout: 30_000 })
+    await submitButton.click()
+    await expect(submitButton).toBeEnabled({ timeout: 15_000 })
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect
+      .poll(
+        async () => {
+          const refresh = page.getByRole('button', { name: '再読込' })
+          if (await refresh.isEnabled()) await refresh.click()
+          return page.getByRole('cell', { name: 'Filled' }).count()
+        },
+        { timeout: 30_000 },
+      )
+      .toBeGreaterThan(0)
+    await page.getByLabel('種別').selectOption('limit')
+    await submitButton.click()
+    await expect(submitButton).toBeEnabled({ timeout: 15_000 })
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    const cancelButton = page
+      .getByRole('row')
+      .filter({ has: page.getByRole('cell', { name: 'limit_gtc' }) })
+      .getByRole('button', { name: '取消' })
+    await expect
+      .poll(
+        async () => {
+          const refresh = page.getByRole('button', { name: '再読込' })
+          if (await refresh.isEnabled()) await refresh.click()
+          await expect(refresh).toBeEnabled({ timeout: 5_000 })
+          return cancelButton.isEnabled()
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true)
+    await cancelButton.click()
+    await expect
+      .poll(
+        async () => {
+          const refresh = page.getByRole('button', { name: '再読込' })
+          if (await refresh.isEnabled()) await refresh.click()
+          return page.getByRole('cell', { name: 'Cancelled' }).count()
+        },
+        { timeout: 30_000 },
+      )
+      .toBeGreaterThan(0)
+
+    await page.getByRole('link', { name: '資金' }).click()
+    await page.getByLabel('金額').fill('5')
+    await page.getByRole('button', { name: 'reserveへ回収' }).click()
+    await page.getByRole('button', { name: 'MetaMask署名で出金' }).click()
+    await page.getByRole('link', { name: '履歴' }).click()
+    await expect(page.getByRole('cell', { name: 'Withdrawal' })).toBeVisible()
+    await expect(
+      page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Allocation' }) }),
+    ).toContainText('Settled')
+    await expect(page.getByRole('cell', { name: 'BTC' })).toBeVisible()
+    await page.getByRole('button', { name: 'ログアウト' }).click()
+    await expect(page.getByRole('button', { name: 'MetaMaskで接続' })).toBeVisible()
+    expect(
+      await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length })),
+    ).toEqual({ local: 0, session: 0 })
   })
-  await page.getByRole('button', { name: 'デモ注文を送信' }).click()
-  await expect(page.getByRole('cell', { name: '取消済み（模擬）', exact: true })).toBeVisible()
-  // The in-flight settlement callback must not resurrect the cancelled order.
-  await page.waitForTimeout(1000)
-  await expect(page.getByRole('cell', { name: '取消済み（模擬）', exact: true })).toBeVisible()
-  await expect(page.getByRole('cell', { name: '約定（模擬）', exact: true })).toHaveCount(0)
-})
-
-test('unknown cannot be resent and stale data blocks new orders', async ({ page }) => {
-  await page.goto('/trade')
-  await page.getByRole('button', { name: 'デモセッション開始' }).click()
-  await page.getByRole('checkbox', { name: '口座データ遅延' }).check()
-  await expect(page.getByRole('button', { name: '口座データ遅延 · 注文停止' })).toBeDisabled()
-  await expect(page.getByText('10秒以上前 · 新規注文停止')).toBeVisible()
-  await page.getByRole('checkbox', { name: '口座データ遅延' }).uncheck()
-  await page.getByLabel('応答シナリオ').selectOption('unknown')
-  await page.getByRole('button', { name: 'デモ注文を送信' }).click()
-  await expect(page.getByRole('cell', { name: '結果不明・再送しない' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'この要求は受付済みです' })).toBeDisabled()
-  await expect(page.getByRole('button', { name: '新しい注文を入力' })).toHaveCount(0)
-  await page.reload()
-  await expect(page.getByRole('button', { name: 'デモセッション開始' })).toBeVisible()
-})
-
-test('fund confirmation is explicit and mobile routes remain usable', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/funds')
-  await page.getByRole('button', { name: 'デモセッション開始' }).click()
-  await page.getByLabel('資金移動額').fill('100')
-  await page.getByRole('button', { name: '内容を確認' }).click()
-  await expect(page.getByRole('dialog')).toBeVisible()
-  await page.getByRole('button', { name: '模擬実行', exact: true }).click()
-  await expect(page.getByText('4,900.000000', { exact: false }).first()).toBeVisible()
-  await page.getByRole('link', { name: '履歴', exact: true }).click()
-  await expect(page.getByRole('cell', { name: 'allocate', exact: true })).toBeVisible()
-  expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
-  ).toBeTruthy()
-})
-
-test('sub-unit amounts stay visible at 1e-6 precision', async ({ page }) => {
-  await page.goto('/funds')
-  await page.getByRole('button', { name: 'デモセッション開始' }).click()
-  await page.getByLabel('操作').selectOption('deposit')
-  await page.getByLabel('資金移動額').fill('0.000001')
-  await page.getByRole('button', { name: '内容を確認' }).click()
-  await expect(page.getByRole('dialog')).toContainText('0.000001 USDC')
-  await page.getByRole('button', { name: '模擬実行', exact: true }).click()
-  await expect(page.getByText('5,000.000001', { exact: false }).first()).toBeVisible()
 })

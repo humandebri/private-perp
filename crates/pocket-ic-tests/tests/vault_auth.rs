@@ -83,6 +83,7 @@ fn login_with_a_valid_signature_opens_a_session() {
     let typed: serde_json::Value =
         serde_json::from_slice(&response.typed_data).expect("typed data");
     assert_eq!(typed["primaryType"], "PrivatePerpChallenge");
+    assert_eq!(typed["types"]["EIP712Domain"].as_array().unwrap().len(), 4);
     assert_eq!(typed["domain"]["name"], "private-perp");
     assert_eq!(typed["message"]["origin"], ORIGIN);
 
