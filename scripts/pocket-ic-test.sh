@@ -46,7 +46,7 @@ echo "pocket-ic-test: 本番feature無しのwasmをビルドします（デプ�
 cargo build --release --target wasm32-unknown-unknown \
   -p policy -p funds-vault -p control-guard -p trading-core
 
-echo "pocket-ic-test: test-venue付きのwasmをビルドします（POCKET_IC_WASM_DIR=$POCKET_IC_WASM_DIR）"
+echo "pocket-ic-test: test-venue付きのwasmをビルドします（POCKET_IC_WASM_DIR=${POCKET_IC_WASM_DIR}）"
 CARGO_TARGET_DIR="$test_venue_target" cargo build --release --target wasm32-unknown-unknown \
   -p policy -p control-guard
 CARGO_TARGET_DIR="$test_venue_target" cargo build --release --target wasm32-unknown-unknown \

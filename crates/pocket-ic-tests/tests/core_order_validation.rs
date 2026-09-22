@@ -244,7 +244,10 @@ fn invalid_orders_are_rejected_without_side_effects() {
     let snapshot: Result<api_types::order::AccountSnapshot, ErrorCode> =
         envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
     let snapshot = snapshot.expect("snapshot");
-    assert_eq!(snapshot.margin_used, 0, "拒否された注文は予約を残さない");
+    assert_eq!(
+        snapshot.open_order_risk_reserved, 0,
+        "拒否された注文は予約を残さない"
+    );
     assert!(snapshot.pending_orders.is_empty());
 }
 

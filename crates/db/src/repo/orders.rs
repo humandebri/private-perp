@@ -269,6 +269,29 @@ pub fn list_orders(
     before_rowid: Option<i64>,
     limit: u32,
 ) -> Result<Vec<(i64, OrderSummary)>, Error> {
+    select_orders(connection, user_id, before_rowid, limit, None)
+}
+
+pub fn summary_by_request(
+    connection: &Connection,
+    user_id: &[u8; 32],
+    client_request_id: &[u8],
+) -> Result<Option<OrderSummary>, Error> {
+    Ok(
+        select_orders(connection, user_id, None, 1, Some(client_request_id))?
+            .into_iter()
+            .next()
+            .map(|(_, order)| order),
+    )
+}
+
+fn select_orders(
+    connection: &Connection,
+    user_id: &[u8; 32],
+    before_rowid: Option<i64>,
+    limit: u32,
+    client_request_id: Option<&[u8]>,
+) -> Result<Vec<(i64, OrderSummary)>, Error> {
     let rows = connection
         .query_all(
             "SELECT rowid, order_id, cloid, market, asset_index, side, kind, price, quantity,
@@ -278,6 +301,7 @@ pub fn list_orders(
                     last_error
                FROM orders
               WHERE user_id = ?1 AND (?2 IS NULL OR rowid < ?2)
+                AND (?4 IS NULL OR client_request_id = ?4)
               ORDER BY rowid DESC
               LIMIT ?3",
             params![
@@ -286,7 +310,11 @@ pub fn list_orders(
                     Some(value) => ic_sqlite_vfs::db::Value::Integer(value),
                     None => ic_sqlite_vfs::db::Value::Null,
                 },
-                limit as i64
+                limit as i64,
+                match client_request_id {
+                    Some(value) => ic_sqlite_vfs::db::Value::Blob(value),
+                    None => ic_sqlite_vfs::db::Value::Null,
+                }
             ],
             |row| {
                 Ok((

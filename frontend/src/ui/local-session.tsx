@@ -1,67 +1,58 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
-import { LocalGateway, type LiveData } from '../client/gateway'
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react'
+import { LocalGateway } from '../client/gateway'
+import { SessionStore, effectiveAge, orderBlockReason } from '../client/session-store'
 
-type SessionContext = {
-  gateway: LocalGateway
-  address?: string
-  data?: LiveData
-  busy: boolean
-  error?: string
-  login: () => Promise<void>
-  logout: () => Promise<void>
-  refresh: () => Promise<void>
-  run: (action: () => Promise<unknown>) => Promise<void>
-}
-const Context = createContext<SessionContext | undefined>(undefined)
-
-export function LocalSessionProvider({ children }: { children: ReactNode }) {
+function useSessionValue() {
   const gateway = useMemo(() => new LocalGateway(), [])
-  const [address, setAddress] = useState<string>()
-  const [data, setData] = useState<LiveData>()
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string>()
-  const execute = async (action: () => Promise<void>) => {
-    setBusy(true)
-    setError(undefined)
-    try {
-      await action()
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setBusy(false)
+  const store = useMemo(() => new SessionStore(gateway), [gateway])
+  const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  const [now, setNow] = useState(0)
+  useEffect(() => {
+    let last = -Infinity
+    const tick = () => {
+      const current = performance.now()
+      setNow(current)
+      const interval = document.visibilityState === 'visible' ? 2_000 : 30_000
+      if (current - last >= interval) {
+        last = current
+        void store.refresh()
+      }
     }
-  }
-  const refresh = () => execute(async () => setData(await gateway.refresh()))
-  const value: SessionContext = {
+    tick()
+    const timer = window.setInterval(tick, 1_000)
+    document.addEventListener('visibilitychange', tick)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', tick)
+    }
+  }, [store, state.generation, state.address])
+  return {
+    ...state,
     gateway,
-    address,
-    data,
-    busy,
-    error,
-    login: () =>
-      execute(async () => {
-        const session = await gateway.login()
-        setAddress(session.address)
-        await gateway.fundingInstructions()
-        setData(await gateway.refresh())
-      }),
-    logout: () =>
-      execute(async () => {
-        await gateway.logout()
-        setAddress(undefined)
-        setData(undefined)
-      }),
-    refresh,
-    run: (action) =>
-      execute(async () => {
-        await action()
-        setData(await gateway.refresh())
-      }),
+    store,
+    fresh: effectiveAge(state, now) <= 10_000 && !state.refreshError,
+    age: effectiveAge(state, now),
+    orderBlockReason: orderBlockReason(state, now),
+    login: store.login,
+    logout: store.logout,
+    refresh: store.refresh,
+    run: store.run,
+    submit: store.submit,
   }
-  return <Context.Provider value={value}>{children}</Context.Provider>
 }
-
-export function useLocalSession(): SessionContext {
+const Context = createContext<ReturnType<typeof useSessionValue> | undefined>(undefined)
+export function LocalSessionProvider({ children }: { children: ReactNode }) {
+  return <Context.Provider value={useSessionValue()}>{children}</Context.Provider>
+}
+export function useLocalSession() {
   const value = useContext(Context)
   if (!value) throw new Error('LocalSessionProviderがありません')
   return value

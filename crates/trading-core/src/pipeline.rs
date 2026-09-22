@@ -513,6 +513,36 @@ pub fn ingest_positions_json(
     }
     let count = u32::try_from(observed.len()).unwrap_or(u32::MAX);
     db::repo::positions::replace_all(connection, account_id, &observed, now)?;
+    let decimal_to_micros = |text: Option<&str>| -> u64 {
+        text.and_then(|value| value.parse::<f64>().ok())
+            .map(|value| (value.max(0.0) * 1_000_000.0).round() as u64)
+            .unwrap_or(0)
+    };
+    let margin_used = decimal_to_micros(
+        value
+            .get("marginSummary")
+            .and_then(|summary| summary.get("totalMarginUsed"))
+            .and_then(|value| value.as_str()),
+    );
+    let total_unrealized = observed
+        .iter()
+        .try_fold(0i64, |total, position| {
+            total.checked_add(position.unrealized_pnl)
+        })
+        .unwrap_or(
+            if observed.iter().any(|position| position.unrealized_pnl < 0) {
+                i64::MIN
+            } else {
+                i64::MAX
+            },
+        );
+    db::repo::positions::set_account_metrics(
+        connection,
+        account_id,
+        margin_used,
+        total_unrealized,
+        now,
+    )?;
     Ok(count)
 }
 

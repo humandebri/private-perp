@@ -341,7 +341,10 @@ fn the_pipeline_dispatches_and_reconciles_orders() {
     // 建玉は観測の全量で反映され、約定した注文のリスク予約は残らない
     // （残すとequityに対する新規注文の枠を永久に食い潰す）。
     let snapshot = account_snapshot(&pic, core, user.caller, &user.session);
-    assert_eq!(snapshot.margin_used, 0, "約定した注文の予約を解放する");
+    assert_eq!(
+        snapshot.open_order_risk_reserved, 0,
+        "約定した注文の予約を解放する"
+    );
     assert_eq!(snapshot.positions.len(), 1);
     assert_eq!(snapshot.positions[0].market, "ETH");
     assert_eq!(snapshot.positions[0].size, "0.05");
@@ -392,7 +395,10 @@ fn rejected_orders_release_risk_and_unknown_sends_are_not_resent() {
         .expect("order is listed");
     assert_eq!(order.state, OrderState::Rejected);
     let snapshot = account_snapshot(&pic, core, user.caller, &user.session);
-    assert_eq!(snapshot.margin_used, 0, "拒否でリスク予約を解放する");
+    assert_eq!(
+        snapshot.open_order_risk_reserved, 0,
+        "拒否でリスク予約を解放する"
+    );
 
     // 送信結果が不明な注文は`unknown`にし、再送しない。
     let uncertain = submit(&pic, core, &user, b"pipeline-uncertain", "0.05").expect("accepted");
@@ -423,7 +429,7 @@ fn rejected_orders_release_risk_and_unknown_sends_are_not_resent() {
     assert_eq!(order.state, OrderState::Unknown);
     assert_eq!(order.hl_oid, None, "oidは分からないまま");
     assert_ne!(
-        account_snapshot(&pic, core, user.caller, &user.session).margin_used,
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved,
         0,
         "不明な送信の予約は解放しない（二重エクスポージャを防ぐ）"
     );
@@ -468,7 +474,7 @@ fn rejected_orders_release_risk_and_unknown_sends_are_not_resent() {
         .expect("order is listed");
     assert_eq!(order.state, OrderState::Rejected);
     assert_eq!(
-        account_snapshot(&pic, core, user.caller, &user.session).margin_used,
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved,
         0,
         "外部確認済みの拒否で予約を解放する"
     );

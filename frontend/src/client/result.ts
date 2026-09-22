@@ -1,3 +1,5 @@
+export class SubmissionNotSentError extends Error {}
+
 export class CanisterError extends Error {
   constructor(
     readonly code: string,

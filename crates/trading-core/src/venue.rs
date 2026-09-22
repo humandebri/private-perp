@@ -271,7 +271,17 @@ fn canonical_state(fields: &serde_json::Map<String, serde_json::Value>) -> serde
                 .collect()
         })
         .unwrap_or_default();
-    serde_json::json!({ "assetPositions": positions })
+    let margin_summary = fields
+        .get("marginSummary")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    serde_json::json!({
+        "assetPositions": positions,
+        "marginSummary": {
+            "totalMarginUsed": margin_summary.get("totalMarginUsed").cloned().unwrap_or(serde_json::Value::Null),
+            "totalNtlPos": margin_summary.get("totalNtlPos").cloned().unwrap_or(serde_json::Value::Null),
+        }
+    })
 }
 
 /// `orderStatus`から状態とoidだけを残す。

@@ -73,6 +73,7 @@ const Snapshot = IDL.Record({
   account_id: Blob,
   equity: IDL.Nat64,
   margin_used: IDL.Nat64,
+  open_order_risk_reserved: IDL.Nat64,
   withdrawable: IDL.Nat64,
   unrealized_pnl: IDL.Int64,
   positions: IDL.Vec(Position),
@@ -127,14 +128,26 @@ export type Snapshot = {
   account_id: Uint8Array
   equity: bigint
   margin_used: bigint
+  open_order_risk_reserved: bigint
   withdrawable: bigint
   unrealized_pnl: bigint
-  positions: Array<Record<string, unknown>>
+  positions: Position[]
   open_orders: OrderView[]
   pending_orders: PendingOrder[]
   observed_at: bigint
   revision: bigint
   data_age_ms: bigint
+}
+export type Position = {
+  market: string
+  size: string
+  entry_price: string
+  liquidation_price: [] | [string]
+  unrealized_pnl: bigint
+  leverage: number
+  margin_mode: string
+  stop_loss: [] | [string]
+  take_profit: [] | [string]
 }
 export type OrderView = {
   order_id: Uint8Array
@@ -153,6 +166,7 @@ export type PendingOrder = {
   last_error: [] | [string]
 }
 export type OrderSummary = {
+  created_at: bigint
   order_id: Uint8Array
   market: string
   is_buy: boolean
@@ -166,6 +180,9 @@ export type OrderSummary = {
   cancel_requested: boolean
   last_error: [] | [string]
   updated_at: bigint
+  trigger: [] | [{ kind: Record<string, null>; is_market: boolean; trigger_price: string }]
+  effective_leverage: number
+  effective_slippage_bps: [] | [number]
 }
 export type Fill = { market: string; price: string; quantity: string; fee: bigint; at: bigint }
 export type Page<T> = {
@@ -182,11 +199,21 @@ function decode<T>(type: IDL.Type<unknown>, value: Uint8Array): T {
   return IDL.decode([type], value)[0] as T
 }
 export const codec = {
+  orderRequestQuery: (session: SessionHandle, client_request_id: Uint8Array) =>
+    encode(IDL.Record({ session: Session, client_request_id: Blob }), {
+      session,
+      client_request_id,
+    }),
+  orderRequestStatus: (value: Uint8Array) =>
+    decode<{ order: [] | [OrderSummary]; observed_at: bigint }>(
+      IDL.Record({ order: opt(OrderSummary), observed_at: IDL.Nat64 }),
+      value,
+    ),
   snapshotQuery: (session: SessionHandle) => encode(IDL.Record({ session: Session }), { session }),
-  listQuery: (session: SessionHandle) =>
+  listQuery: (session: SessionHandle, cursor?: Uint8Array) =>
     encode(IDL.Record({ session: Session, cursor: opt(Blob), limit: IDL.Nat32 }), {
       session,
-      cursor: [],
+      cursor: cursor ? [cursor] : [],
       limit: 100,
     }),
   cancelQuery: (session: SessionHandle, orderId: Uint8Array | number[]) =>

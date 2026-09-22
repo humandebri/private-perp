@@ -180,7 +180,7 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
     let snapshot: Result<AccountSnapshot, ErrorCode> =
         envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
     assert_eq!(
-        snapshot.expect("snapshot").margin_used,
+        snapshot.expect("snapshot").open_order_risk_reserved,
         125_000_000,
         "価格×数量の想定元本を予約する"
     );
@@ -194,7 +194,7 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
     let snapshot: Result<AccountSnapshot, ErrorCode> =
         envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
     assert_eq!(
-        snapshot.expect("snapshot").margin_used,
+        snapshot.expect("snapshot").open_order_risk_reserved,
         0,
         "拒否されたら予約を解放する"
     );

@@ -179,6 +179,22 @@ fn orders_are_accepted_idempotently_after_authorization() {
     .expect("call");
     context.expect("set_market_context");
 
+    let account: Result<Option<Blob>, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_account", session.clone()).expect("account call");
+    let account = account.expect("account").expect("provisioned");
+    let observed: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_positions",
+        (
+            session.clone(),
+            r#"{"assetPositions":[],"marginSummary":{"totalMarginUsed":"0"}}"#.to_string(),
+        ),
+    )
+    .expect("observation call");
+    observed.expect("observed account");
+
     // 受付できる（ETHはmetaの添字1）。
     let accepted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
@@ -187,7 +203,10 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"order-1", "ETH", "0.05", "2500"),
+            SubmitOrderArgs {
+                account_id: account.clone(),
+                ..order_args(&session, &[71u8; 32], "ETH", "0.05", "2500")
+            },
         ),
     )
     .expect("call");
@@ -203,7 +222,10 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"order-1", "ETH", "0.05", "2500"),
+            SubmitOrderArgs {
+                account_id: account.clone(),
+                ..order_args(&session, &[71u8; 32], "ETH", "0.05", "2500")
+            },
         ),
     )
     .expect("call");
@@ -219,7 +241,10 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"order-1", "ETH", "0.06", "2500"),
+            SubmitOrderArgs {
+                account_id: account.clone(),
+                ..order_args(&session, &[71u8; 32], "ETH", "0.06", "2500")
+            },
         ),
     )
     .expect("call");
@@ -246,6 +271,87 @@ fn orders_are_accepted_idempotently_after_authorization() {
             code: NotAllowedCode::AssetNotAllowed
         }
     );
+
+    // 再送せず照合する。不存在と他人の要求を区別しない。
+    let lookup = envelope::EnvelopeClient::new(199, "local");
+    let request = api_types::envelope::OrderRequestQuery {
+        session: session.clone(),
+        client_request_id: blob(&[71u8; 32]),
+    };
+    let status: api_types::envelope::OrderRequestStatus = lookup
+        .call(&pic, core, caller, "get_order_by_request", &request)
+        .expect("call")
+        .expect("lookup");
+    assert_eq!(status.order.expect("found").order_id, accepted.order_id);
+    let absent: api_types::envelope::OrderRequestStatus = lookup
+        .call(
+            &pic,
+            core,
+            caller,
+            "get_order_by_request",
+            &api_types::envelope::OrderRequestQuery {
+                client_request_id: blob(&[72u8; 32]),
+                ..request.clone()
+            },
+        )
+        .expect("call")
+        .expect("lookup absent");
+    assert!(absent.order.is_none());
+    let malformed: Result<api_types::envelope::OrderRequestStatus, ErrorCode> = lookup
+        .call(
+            &pic,
+            core,
+            caller,
+            "get_order_by_request",
+            &api_types::envelope::OrderRequestQuery {
+                client_request_id: blob(&[1]),
+                ..request.clone()
+            },
+        )
+        .expect("call");
+    assert!(matches!(malformed, Err(ErrorCode::BadRequest { .. })));
+    let caller_b = principal(199);
+    let session_b = open_session(&pic, vault, caller_b, &secret(199));
+    let foreign: api_types::envelope::OrderRequestStatus = lookup
+        .call(
+            &pic,
+            core,
+            caller_b,
+            "get_order_by_request",
+            &api_types::envelope::OrderRequestQuery {
+                session: session_b,
+                ..request.clone()
+            },
+        )
+        .expect("call")
+        .expect("foreign absent");
+    assert!(foreign.order.is_none());
+    let spoofed: Result<api_types::envelope::OrderRequestStatus, ErrorCode> = lookup
+        .call(&pic, core, caller_b, "get_order_by_request", &request)
+        .expect("call");
+    assert!(matches!(spoofed, Err(ErrorCode::Unauthenticated { .. })));
+    for (id, tamper_method) in [(201u8, true), (202, false)] {
+        let (mut sealed, aad) = lookup
+            .build_request(
+                &pic,
+                core,
+                caller,
+                "get_order_by_request",
+                &request,
+                [id; 32],
+                envelope::now_ms(&pic) + 60_000,
+            )
+            .expect("build");
+        if tamper_method {
+            sealed.method = "list_orders".to_string();
+        } else {
+            sealed.aad = blob(&[0; 32]);
+        }
+        let wrong: Result<api_types::envelope::OrderRequestStatus, ErrorCode> = lookup
+            .call_request(&pic, core, caller, "get_order_by_request", &sealed, &aad)
+            .expect("call");
+        assert!(wrong.is_err());
+    }
 
     // 一覧は新しい順に返り、別principalのセッションでは取得できない。
     let listed: Result<api_types::Paged<OrderSummary>, ErrorCode> =
@@ -340,6 +446,13 @@ fn orders_are_accepted_idempotently_after_authorization() {
         matches!(other, Err(ErrorCode::Unauthenticated { .. })),
         "{other:?}"
     );
+    let revoked: Result<(), ErrorCode> =
+        update(&pic, vault, caller, "revoke_session", session.clone()).expect("revoke call");
+    revoked.expect("revoke");
+    let denied: Result<api_types::envelope::OrderRequestStatus, ErrorCode> = lookup
+        .call(&pic, core, caller, "get_order_by_request", &request)
+        .expect("lookup revoked");
+    assert!(matches!(denied, Err(ErrorCode::SessionRevoked)));
 }
 
 /// Agent鍵はcoreが導出・保管する（`Implementation.md` 7章）。

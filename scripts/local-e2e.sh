@@ -36,7 +36,8 @@ printf '%s\n' \
   'VITE_IC_HOST=http://127.0.0.1:18100' \
   "VITE_FUNDS_VAULT_CANISTER_ID=$funds_id" \
   "VITE_TRADING_CORE_CANISTER_ID=$core_id" \
-  'VITE_MOCK_HL_URL=http://127.0.0.1:8080' > frontend/.env.local
+  'VITE_MOCK_HL_URL=http://127.0.0.1:8080' \
+  'VITE_MARKET_WS_URL=ws://127.0.0.1:8080/ws' > frontend/.env.local
 
 pnpm --dir frontend build
 if ! LOCAL_E2E=1 PLAYWRIGHT_HTML_OPEN=never pnpm --dir frontend test:e2e; then

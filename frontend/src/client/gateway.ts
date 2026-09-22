@@ -1,10 +1,17 @@
 import { Principal } from '@icp-sdk/core/principal'
 import type { FundStatus, Paged as FundEvents, SessionHandle } from './candid/funds_vault.did.js'
 import type { AgentStatus, SubmitOrderResult } from './candid/trading_core.did.js'
-import { codec, type Fill, type OrderSummary, type Page, type Snapshot } from './candid-codec'
+import {
+  codec,
+  type Fill,
+  type OrderSummary,
+  type Page,
+  type Position,
+  type Snapshot,
+} from './candid-codec'
 import { EnvelopeClient, envelopeAad, newRequestId } from './envelope'
 import { createClients, type CanisterClients } from './ic'
-import { CanisterError, unwrap } from './result'
+import { CanisterError, SubmissionNotSentError, unwrap } from './result'
 import { connectWallet, hexToBytes, signTypedData, withdrawalTypedData } from './wallet'
 
 const nowMs = () => BigInt(Date.now())
@@ -54,12 +61,14 @@ export function optionalValue<T>(
 
 export class LocalGateway {
   private active?: SessionData
+  private generation = 0
 
   get session(): SessionData | undefined {
     return this.active
   }
 
   async login(): Promise<SessionData> {
+    const generation = ++this.generation
     const clients = await createClients()
     const address = await connectWallet()
     const challenge = unwrap(
@@ -78,11 +87,17 @@ export class LocalGateway {
         eoa_signature: signature,
       }),
     )
-    this.active = { address, session, clients, envelope: await EnvelopeClient.create() }
+    const envelope = await EnvelopeClient.create()
+    if (generation !== this.generation) {
+      await clients.vault.revoke_session(session).catch(() => undefined)
+      throw new Error('セッションは破棄されました')
+    }
+    this.active = { address, session, clients, envelope }
     return this.active
   }
 
   async logout(): Promise<void> {
+    this.generation++
     const active = this.active
     this.active = undefined
     if (active) await active.clients.vault.revoke_session(active.session).catch(() => undefined)
@@ -94,7 +109,12 @@ export class LocalGateway {
   }
 
   private async sealed<T>(
-    method: 'get_account_snapshot' | 'list_orders' | 'list_fills' | 'cancel_order',
+    method:
+      | 'get_account_snapshot'
+      | 'list_orders'
+      | 'list_fills'
+      | 'cancel_order'
+      | 'get_order_by_request',
     plaintext: Uint8Array,
     decode: (bytes: Uint8Array) => T,
   ): Promise<T> {
@@ -130,16 +150,27 @@ export class LocalGateway {
   }
 
   async refresh(): Promise<LiveData> {
-    const { session, clients } = this.require()
+    const active = this.require()
+    const { session, clients } = active
     const funds = unwrap(await clients.vault.get_fund_status(session))
-    const fundEvents = unwrap(await clients.vault.list_fund_events(session, [], 100))
+    if (active !== this.active) throw new Error('セッションは破棄されました')
+    const fundEvents = await this.listFundEvents()
+    if (active !== this.active) throw new Error('セッションは破棄されました')
     const optional = await Promise.allSettled([
       clients.core.get_agent_status(session).then(unwrap),
       this.sealed('get_account_snapshot', codec.snapshotQuery(session), codec.snapshot),
-      this.sealed('list_orders', codec.listQuery(session), codec.orders),
-      this.sealed('list_fills', codec.listQuery(session), codec.fills),
+      this.listOrders(),
+      this.listFills(),
     ])
     const issues: LiveDataIssue[] = []
+    for (const result of optional) {
+      if (
+        result.status === 'rejected' &&
+        result.reason instanceof CanisterError &&
+        ['SessionExpired', 'SessionRevoked', 'Unauthenticated'].includes(result.reason.code)
+      )
+        throw result.reason
+    }
     return {
       funds,
       fundEvents,
@@ -149,6 +180,32 @@ export class LocalGateway {
       fills: optionalValue(optional[3], 'fills', issues),
       issues,
     }
+  }
+
+  async listOrders(cursor?: Uint8Array): Promise<Page<OrderSummary>> {
+    const { session } = this.require()
+    return this.sealed('list_orders', codec.listQuery(session, cursor), codec.orders)
+  }
+
+  async lookupOrder(id: Uint8Array): Promise<OrderSummary | undefined> {
+    const { session } = this.require()
+    return (
+      await this.sealed(
+        'get_order_by_request',
+        codec.orderRequestQuery(session, id),
+        codec.orderRequestStatus,
+      )
+    ).order[0]
+  }
+
+  async listFills(cursor?: Uint8Array): Promise<Page<Fill>> {
+    const { session } = this.require()
+    return this.sealed('list_fills', codec.listQuery(session, cursor), codec.fills)
+  }
+
+  async listFundEvents(cursor?: Uint8Array | number[]): Promise<FundEvents> {
+    const { session, clients } = this.require()
+    return unwrap(await clients.vault.list_fund_events(session, cursor ? [cursor] : [], 100))
   }
 
   async fundingInstructions() {
@@ -212,24 +269,49 @@ export class LocalGateway {
     kind: 'market' | 'limit'
     quantity: string
     price: string
+    leverage?: number
+    slippageBps?: number
+    reduceOnly?: boolean
+    trigger?: { kind: 'stopLoss' | 'takeProfit'; price: string; isMarket: boolean }
+    clientRequestId?: Uint8Array
   }): Promise<SubmitOrderResult> {
-    const { session, clients } = this.require()
-    const account = unwrap(await clients.vault.get_trading_account(session))[0]
-    if (!account) throw new Error('取引口座がありません。先に配分してください')
+    const active = this.require()
+    const { session, clients } = active
+    let account: Uint8Array | number[] | undefined
+    try {
+      account = unwrap(await clients.vault.get_trading_account(session))[0]
+      if (!account) throw new Error('取引口座がありません。先に配分してください')
+      if (active !== this.active) throw new Error('セッションは破棄されました')
+    } catch (cause) {
+      if (
+        cause instanceof CanisterError &&
+        ['SessionExpired', 'SessionRevoked', 'Unauthenticated'].includes(cause.code)
+      )
+        throw cause
+      throw new SubmissionNotSentError(errorMessage(cause))
+    }
     return unwrap(
       await clients.core.submit_order(session, {
         session,
         account_id: account,
-        client_request_id: requestId(),
+        client_request_id: args.clientRequestId ?? requestId(),
         market: args.market,
         side: args.side === 'buy' ? { Buy: null } : { Sell: null },
         kind: args.kind === 'market' ? { MarketIoc: null } : { LimitGtc: null },
         quantity: args.quantity,
         limit_price: [args.price],
-        leverage: [3],
-        slippage_tolerance_bps: args.kind === 'market' ? [50] : [],
-        reduce_only: false,
-        trigger: [],
+        leverage: [args.leverage ?? 3],
+        slippage_tolerance_bps: args.kind === 'market' ? [args.slippageBps ?? 50] : [],
+        reduce_only: args.reduceOnly ?? false,
+        trigger: args.trigger
+          ? [
+              {
+                kind: args.trigger.kind === 'stopLoss' ? { StopLoss: null } : { TakeProfit: null },
+                is_market: args.trigger.isMarket,
+                trigger_price: args.trigger.price,
+              },
+            ]
+          : [],
         expires_after: [nowMs() + 60_000n],
       }),
     )
@@ -238,6 +320,40 @@ export class LocalGateway {
   async cancel(orderId: Uint8Array | number[]): Promise<void> {
     const { session } = this.require()
     await this.sealed('cancel_order', codec.cancelQuery(session, orderId), codec.empty)
+  }
+
+  async cancelAll(): Promise<bigint> {
+    const { session, clients } = this.require()
+    return unwrap(await clients.core.cancel_all(session))
+  }
+
+  async closePosition(position: Position, ratioBps: number): Promise<SubmitOrderResult> {
+    const { session, clients } = this.require()
+    return unwrap(
+      await clients.core.close_position(session, requestId(), position.market, ratioBps, []),
+    )
+  }
+
+  async closeAll() {
+    const { session, clients } = this.require()
+    return unwrap(await clients.core.close_all(session, requestId()))
+  }
+
+  async protectPosition(
+    position: Position,
+    kind: 'stopLoss' | 'takeProfit',
+    price: string,
+  ): Promise<SubmitOrderResult> {
+    const isLong = !position.size.startsWith('-')
+    return this.submitOrder({
+      market: position.market,
+      side: isLong ? 'sell' : 'buy',
+      kind: 'limit',
+      quantity: position.size.replace('-', ''),
+      price,
+      reduceOnly: true,
+      trigger: { kind, price, isMarket: true },
+    })
   }
 
   async withdraw(amount: bigint) {

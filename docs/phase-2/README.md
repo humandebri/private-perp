@@ -19,8 +19,8 @@
 | M2 | 2A 環境設定の一般化／2B HPKE封筒の個人API適用 | PocketIC＋E-1/E-2 |
 | M3 | 2C 建玉・PnL・SL/TP照合／2D 取消・Cancel All・決済／2E 鮮度ゲート | PocketIC、ローカルで代替フロー |
 | M4 | 3A ウォレット認証／3B IC接続＋封筒クライアント／資金フロー | testnetで預入→配分→回収→出金 |
-| M5 | 3C 取引画面／3D 非正常状態 | 受け入れシナリオ3〜5 |
-| M6 | 3E 最小代替クライアント／Playwright／計測レポート／終了レビュー | §6の完了条件 |
+| M5 | 3C 取引画面／3D 非正常状態 | **ローカル実装済み**。testnet受け入れはGATE 0後 |
+| M6 | 3E 最小代替クライアント／Playwright／計測レポート／終了レビュー | **ローカル実装済み**。実測レポートはtestnet後に追記 |
 
 ## Phase 2で扱わないもの
 Phase 3以降（複数ユーザー分離・負荷・backup復元・cycles通知・eligibility/監査/保持削除）、実資金・mainnet（E-2で**拒否**を試験）、Phase 1の細部（UIの磨き込み等）。ただし `reconcile_all` の固定窓（入金先が3件以上で古い口座が対象外）は実バグのためM3までに修正する。
@@ -88,7 +88,14 @@ bash scripts/bootstrap-local.sh
 - `ICP_HOME`をプロジェクト内へ向けることで、**他のプロジェクトのidentityと既定を変更しない**。`.icp-home/`と`.icp/`は`.gitignore`対象（鍵とCanister IDをコミットしない）。
 - Canister IDは`icp canister status <name> --json`で引く（デプロイごとに変わり得るため、スクリプト・画面へハードコードしない）。canisterへは`PUBLIC_CANISTER_ID:<name>`が注入される。
 - `candid/*.did`は`scripts/extract-candid.sh`の生成物。Rustの契約（`api-types`）とCandidのずれはこのスクリプトの再実行で検出する。
-- 画面（`frontend/`）は次の段階でこのローカルcanisterへ接続する（3B）。ローカルのendpointは`get_environment`で確認できる。
+- 画面（`frontend/`）はローカルcanisterへ接続済み。M5/M6として公開市況WS、建玉、SL/TP、取消、部分・全決済、異常状態、最小クライアントまでローカルmockで検証する。ローカルのendpointは`get_environment`で確認できる。
+
+### ローカルM5/M6（2026-09-22）
+
+- 公開市況はmock HLのWebSocketへ直結し、`BroadcastChannel`とWeb Locksで複数タブの接続を1本へ集約する。購読にはEOA・取引口座を含めない。
+- clearinghouse照合の`totalMarginUsed`・未実現PnLと、coreの未約定注文リスク予約を分離した。鮮度は最終約定ではなく口座観測時刻から算出する。
+- `/trade`でSL/TP、Cancel All、25/50/100%決済、全決済、pending・unknown・staleを扱う。`/fallback`は認証・取消・出金だけを提供する。
+- これらはローカル合成資金の検証であり、GATE 0やtestnet資金往復の完了を意味しない。
 
 ## 実行上の注意（並行作業対策）
 - PocketICは必ずスクリプト経由：`POCKET_IC_TEST_DIR=$PWD/target/test-venue-mine bash scripts/pocket-ic-test.sh --test <name>`。

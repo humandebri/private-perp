@@ -10,6 +10,8 @@ export type ClientConfig = {
   tradingCore: string
   /** ローカル専用Hyperliquid mock。 */
   mockHl: string
+  /** 公開市況専用のローカルWebSocket。本人識別子は送らない。 */
+  marketWs: string
   /** ローカルネットワークではroot keyを取得する（検証済みqueryのため）。 */
   fetchRootKey: boolean
 }
@@ -31,20 +33,26 @@ export function resolveConfig(env: Env = import.meta.env as unknown as Env): Cli
   if (env.VITE_APP_STAGE !== 'local') throw new Error('VITE_APP_STAGE=local が必要です')
   const host = required(env, 'VITE_IC_HOST')
   const mockHl = required(env, 'VITE_MOCK_HL_URL')
+  const marketWs = required(env, 'VITE_MARKET_WS_URL')
   for (const [name, value] of [
     ['VITE_IC_HOST', host],
     ['VITE_MOCK_HL_URL', mockHl],
+    ['VITE_MARKET_WS_URL', marketWs],
   ]) {
     const hostname = new URL(value).hostname
     if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) {
       throw new Error(`${name} はloopbackのみ指定できます`)
     }
   }
+  if (!['ws:', 'wss:'].includes(new URL(marketWs).protocol)) {
+    throw new Error('VITE_MARKET_WS_URL はWebSocket URLである必要があります')
+  }
   return {
     host,
     fundsVault: required(env, 'VITE_FUNDS_VAULT_CANISTER_ID'),
     tradingCore: required(env, 'VITE_TRADING_CORE_CANISTER_ID'),
     mockHl,
+    marketWs,
     // ローカル（httpsでない）ホストではroot keyを取得する。
     fetchRootKey: host.startsWith('http://'),
   }

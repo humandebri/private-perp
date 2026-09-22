@@ -23,10 +23,14 @@ fn u64_value(value: &Value) -> u64 {
 }
 
 fn main() {
+    let mut secret = SECRET;
+    if std::env::args().any(|arg| arg == "--secondary") {
+        secret[31] = 43;
+    }
     if std::env::args().nth(1).as_deref() == Some("address") {
         println!(
             "0x{}",
-            hex::encode(address_from_secret(&SECRET).expect("address"))
+            hex::encode(address_from_secret(&secret).expect("address"))
         );
         return;
     }
@@ -45,7 +49,7 @@ fn main() {
             nonce: bytes(&message["nonce"]).try_into().expect("32-byte nonce"),
             expires_at: u64_value(&message["expiresAt"]),
         }
-        .sign_for_tests(&SECRET)
+        .sign_for_tests(&secret)
         .expect("sign challenge"),
         "PrivatePerpWithdrawal" => Withdrawal {
             eoa: address(&message["eoa"]),
@@ -57,7 +61,7 @@ fn main() {
             expires_at: u64_value(&message["expiresAt"]),
             canister: bytes(&message["canister"]),
         }
-        .sign_for_tests(&SECRET)
+        .sign_for_tests(&secret)
         .expect("sign withdrawal"),
         other => panic!("unsupported primary type: {other}"),
     };

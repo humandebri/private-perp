@@ -169,6 +169,8 @@ pub struct AccountSnapshot {
     pub account_id: Blob,
     pub equity: Micros,
     pub margin_used: Micros,
+    /// 未約定の新規注文に対してcoreが保持している想定元本の予約額。
+    pub open_order_risk_reserved: Micros,
     pub withdrawable: Micros,
     pub unrealized_pnl: i64,
     pub positions: Vec<PositionView>,

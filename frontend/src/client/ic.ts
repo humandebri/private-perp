@@ -25,7 +25,8 @@ export async function createAgent(
   identity: Ed25519KeyIdentity,
   config: ClientConfig = resolveConfig(),
 ): Promise<HttpAgent> {
-  const agent = HttpAgent.createSync({ host: config.host, identity })
+  // 書込結果が不明なときは照合する。transportによる自動再送も行わない。
+  const agent = HttpAgent.createSync({ host: config.host, identity, retryTimes: 0 })
   if (config.fetchRootKey) await agent.fetchRootKey()
   return agent
 }

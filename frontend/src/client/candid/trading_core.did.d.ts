@@ -355,6 +355,10 @@ export interface _SERVICE {
    */
   get_hpke_public_key: ActorMethod<[], Result_6>
   /**
+   * 受付結果を再送せずに照合する。不存在と他人の要求は区別しない。
+   */
+  get_order_by_request: ActorMethod<[HpkeRequest], Result_1>
+  /**
    * 政策Canisterのprincipal（診断用）。
    */
   get_policy_principal: ActorMethod<[], [] | [Principal]>

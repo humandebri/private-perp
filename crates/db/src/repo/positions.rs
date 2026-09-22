@@ -7,6 +7,13 @@ use ic_sqlite_vfs::db::UpdateConnection;
 use ic_sqlite_vfs::db::connection::Connection;
 use ic_sqlite_vfs::params;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AccountMetrics {
+    pub margin_used: u64,
+    pub unrealized_pnl: i64,
+    pub observed_at: u64,
+}
+
 /// 建玉を登録・更新する（口座と銘柄で一意）。
 pub fn upsert(
     connection: &mut UpdateConnection<'_>,
@@ -119,6 +126,53 @@ pub fn replace_all(
         )
         .map_err(sql)?;
     u32::try_from(removed).map_err(|_| Error::Invariant("negative change count"))
+}
+
+/// clearinghouseStateと同時に得た口座サマリを保存する。
+pub fn set_account_metrics(
+    connection: &mut UpdateConnection<'_>,
+    account_id: &[u8; 32],
+    margin_used: u64,
+    unrealized_pnl: i64,
+    observed_at: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "INSERT INTO account_metrics (account_id, margin_used, unrealized_pnl, observed_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id) DO UPDATE SET
+               margin_used = excluded.margin_used,
+               unrealized_pnl = excluded.unrealized_pnl,
+               observed_at = excluded.observed_at",
+            params![
+                account_id.as_slice(),
+                margin_used as i64,
+                unrealized_pnl,
+                observed_at as i64
+            ],
+        )
+        .map_err(sql)?;
+    Ok(())
+}
+
+pub fn account_metrics(
+    connection: &Connection,
+    account_id: &[u8; 32],
+) -> Result<Option<AccountMetrics>, Error> {
+    connection
+        .query_optional(
+            "SELECT margin_used, unrealized_pnl, observed_at
+               FROM account_metrics WHERE account_id = ?1",
+            params![account_id.as_slice()],
+            |row| {
+                Ok(AccountMetrics {
+                    margin_used: u64::try_from(row.get::<i64>(0)?).unwrap_or(0),
+                    unrealized_pnl: row.get::<i64>(1)?,
+                    observed_at: u64::try_from(row.get::<i64>(2)?).unwrap_or(0),
+                })
+            },
+        )
+        .map_err(sql)
 }
 
 fn position_from_row(

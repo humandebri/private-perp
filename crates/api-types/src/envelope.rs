@@ -44,6 +44,18 @@ pub struct SnapshotQuery {
     pub session: SessionHandle,
 }
 
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OrderRequestQuery {
+    pub session: SessionHandle,
+    pub client_request_id: Blob,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OrderRequestStatus {
+    pub order: Option<crate::order::OrderSummary>,
+    pub observed_at: Timestamp,
+}
+
 /// `list_orders`・`list_fills` の平文。
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ListQuery {

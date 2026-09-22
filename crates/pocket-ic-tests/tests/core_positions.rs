@@ -19,8 +19,8 @@ use pocket_ic_tests::{
 
 const ORIGIN: &str = "https://app.example.test";
 const UNIVERSE: &str = r#"[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]"#;
-const STATE: &str = r#"{"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","liquidationPx":"2000","unrealizedPnl":"12.5","leverage":{"value":3},"marginMode":"cross"}}]}"#;
-const STATE_UPDATED: &str = r#"{"assetPositions":[{"position":{"coin":"ETH","szi":"0.02","entryPx":"2500","unrealizedPnl":"-3.25","leverage":{"value":3},"marginMode":"cross"}}]}"#;
+const STATE: &str = r#"{"marginSummary":{"totalMarginUsed":"41.666667"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","liquidationPx":"2000","unrealizedPnl":"12.5","leverage":{"value":3},"marginMode":"cross"}}]}"#;
+const STATE_UPDATED: &str = r#"{"marginSummary":{"totalMarginUsed":"16.666667"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.02","entryPx":"2500","unrealizedPnl":"-3.25","leverage":{"value":3},"marginMode":"cross"}}]}"#;
 
 fn secret(seed: u8) -> [u8; 32] {
     let mut bytes = [0u8; 32];
@@ -174,6 +174,8 @@ fn positions_are_ingested_and_exposed_in_the_snapshot() {
     assert_eq!(position.liquidation_price.as_deref(), Some("2000"));
     assert_eq!(position.leverage, 3);
     assert_eq!(position.unrealized_pnl, 12_500_000);
+    assert_eq!(snapshot.margin_used, 41_666_667);
+    assert_eq!(snapshot.unrealized_pnl, 12_500_000);
     assert_eq!(snapshot.data_age_ms, 0, "取り込んだ直後は新しい");
 
     // 同じ銘柄の再取り込みは更新（増えない）。
@@ -192,4 +194,6 @@ fn positions_are_ingested_and_exposed_in_the_snapshot() {
     assert_eq!(snapshot.positions.len(), 1, "銘柄ごとに1件");
     assert_eq!(snapshot.positions[0].size, "0.02");
     assert_eq!(snapshot.positions[0].unrealized_pnl, -3_250_000);
+    assert_eq!(snapshot.margin_used, 16_666_667);
+    assert_eq!(snapshot.unrealized_pnl, -3_250_000);
 }

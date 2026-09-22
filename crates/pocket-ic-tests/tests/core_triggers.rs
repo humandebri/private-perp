@@ -6,8 +6,8 @@ use api_types::auth::{
 use api_types::error::{BadRequestCode, ErrorCode};
 use api_types::fund::{AgentGeneration, AllocationRequest, FundRequestAccepted};
 use api_types::order::{
-    OrderKind, OrderState, OrderSummary, Side, SubmitOrderArgs, SubmitOrderResult, Trigger,
-    TriggerKind,
+    AccountSnapshot, OrderKind, OrderState, OrderSummary, Side, SubmitOrderArgs, SubmitOrderResult,
+    Trigger, TriggerKind,
 };
 use api_types::{AccountKind, Blob, Network};
 use candid::Principal;
@@ -552,6 +552,19 @@ fn trigger_orders_are_dispatched_with_the_position_tpsl_action() {
     assert_eq!(action["orders"][0]["t"]["trigger"]["triggerPx"], "2700");
     assert_eq!(action["orders"][0]["t"]["trigger"]["isMarket"], false);
     assert!(action["orders"][0]["t"].get("limit").is_none());
+
+    let snapshot: Result<AccountSnapshot, ErrorCode> =
+        envelope::get_account_snapshot(&pic, core, caller, &session).expect("snapshot call");
+    let snapshot = snapshot.expect("snapshot");
+    assert_eq!(
+        snapshot
+            .positions
+            .iter()
+            .find(|position| position.market == "ETH")
+            .and_then(|position| position.take_profit.as_deref()),
+        Some("2700"),
+        "open positionTpsl is projected onto the position"
+    );
 
     // 取引所の状態が届くと注文の状態が進む。
     let applied: Result<bool, ErrorCode> = update_args(

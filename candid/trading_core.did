@@ -250,6 +250,8 @@ service : () -> {
   get_environment : () -> (Result_5) query;
   // 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
   get_hpke_public_key : () -> (Result_6) query;
+  // 受付結果を再送せずに照合する。不存在と他人の要求は区別しない。
+  get_order_by_request : (HpkeRequest) -> (Result_1);
   // 政策Canisterのprincipal（診断用）。
   get_policy_principal : () -> (opt principal) query;
   // vaultのprincipal（診断用）。

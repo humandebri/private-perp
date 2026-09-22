@@ -34,6 +34,7 @@
     "@types/node": "26.6.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "6.1.1",
     "oxfmt": "0.68.0",
     "oxlint": "1.83.0",
@@ -42,7 +43,8 @@
     "typescript": "7.0.2",
     "vite": "8.3.0",
     "vitest": "5.0.1",
-    "wrangler": "4.133.0"
+    "wrangler": "4.133.0",
+    "ws": "8.21.3"
   },
   "packageManager": "pnpm@12.4.2"
 }

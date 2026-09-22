@@ -1344,8 +1344,8 @@ async fn account_snapshot(
     let revision =
         db::tx::query(|connection| db::repo::orders::account_revision(connection, &user_id))
             .map_err(map_db)?;
-    let latest_fill =
-        db::tx::query(|connection| db::repo::orders::latest_fill_at(connection, &user_id))
+    let metrics =
+        db::tx::query(|connection| db::repo::positions::account_metrics(connection, &account_id))
             .map_err(map_db)?;
 
     let mut open_orders = Vec::new();
@@ -1392,23 +1392,47 @@ async fn account_snapshot(
         }
     }
 
+    let mut positions =
+        db::tx::query(|connection| db::repo::positions::list(connection, &account_id))
+            .map_err(map_db)?;
+    // HLのclearinghouseStateは保護注文を建玉へ埋め込まないため、照合済みの
+    // positionTpsl注文から現在のSL/TP表示を導出する。
+    for order in &open_orders {
+        let Some(trigger) = &order.trigger else {
+            continue;
+        };
+        let Some(position) = positions
+            .iter_mut()
+            .find(|position| position.market == order.market)
+        else {
+            continue;
+        };
+        match trigger.kind {
+            api_types::order::TriggerKind::StopLoss => {
+                position.stop_loss = Some(trigger.trigger_price.clone());
+            }
+            api_types::order::TriggerKind::TakeProfit => {
+                position.take_profit = Some(trigger.trigger_price.clone());
+            }
+        }
+    }
+
     Ok(api_types::order::AccountSnapshot {
         account_id: account_id.to_vec().into(),
         equity: trading,
-        margin_used: db::tx::query(|connection| {
+        margin_used: metrics.map_or(0, |value| value.margin_used),
+        open_order_risk_reserved: db::tx::query(|connection| {
             db::repo::orders::held_risk(connection, &account_id)
         })
         .map_err(map_db)?,
         withdrawable,
-        unrealized_pnl: 0,
-        positions: db::tx::query(|connection| db::repo::positions::list(connection, &account_id))
-            .map_err(map_db)?,
+        unrealized_pnl: metrics.map_or(0, |value| value.unrealized_pnl),
+        positions,
         open_orders,
         pending_orders,
         observed_at: now,
         revision,
-        // 取引所由来のデータ（約定）の最終観測からの経過。約定が無い間は0とする。
-        data_age_ms: latest_fill.map_or(0, |filled_at| now.saturating_sub(filled_at)),
+        data_age_ms: metrics.map_or(u64::MAX, |value| now.saturating_sub(value.observed_at)),
     })
 }
 
@@ -1426,6 +1450,39 @@ async fn list_orders(
         open_envelope::<api_types::envelope::ListQuery>(&envelope, "list_orders").await?;
     let page = orders_page(&query.session, query.cursor, query.limit).await?;
     seal_envelope(&envelope, "list_orders", &request_id, caller, &page).await
+}
+
+/// 受付結果を再送せずに照合する。不存在と他人の要求は区別しない。
+#[ic_cdk::update]
+async fn get_order_by_request(
+    envelope: api_types::envelope::HpkeRequest,
+) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
+    let (query, request_id, caller) =
+        open_envelope::<api_types::envelope::OrderRequestQuery>(&envelope, "get_order_by_request")
+            .await?;
+    let user_id = authorize(&query.session).await?;
+    if query.client_request_id.len() != 32 {
+        return Err(bad(
+            BadRequestCode::MalformedPayload,
+            "expected 32-byte request id",
+        ));
+    }
+    let order = db::tx::query(|connection| {
+        db::repo::orders::summary_by_request(connection, &user_id, query.client_request_id.as_ref())
+    })
+    .map_err(map_db)?;
+    let status = api_types::envelope::OrderRequestStatus {
+        order,
+        observed_at: ic_cdk::api::time() / 1_000_000,
+    };
+    seal_envelope(
+        &envelope,
+        "get_order_by_request",
+        &request_id,
+        caller,
+        &status,
+    )
+    .await
 }
 
 async fn orders_page(

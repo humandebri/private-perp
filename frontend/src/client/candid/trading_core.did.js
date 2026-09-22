@@ -201,6 +201,7 @@ export const idlFactory = ({ IDL }) => {
     get_agent_status: IDL.Func([SessionHandle], [Result_4], []),
     get_environment: IDL.Func([], [Result_5], ['query']),
     get_hpke_public_key: IDL.Func([], [Result_6], ['query']),
+    get_order_by_request: IDL.Func([HpkeRequest], [Result_1], []),
     get_policy_principal: IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
     get_vault_principal: IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
     list_fills: IDL.Func([HpkeRequest], [Result_1], []),

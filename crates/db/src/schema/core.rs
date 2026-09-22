@@ -322,6 +322,16 @@ CREATE TABLE order_resolution_events (
 CREATE INDEX order_resolution_events_by_order ON order_resolution_events (order_id, event_id);
 ";
 
+/// v14: 取引所が返す口座サマリを注文リスク予約と分離して保存する。
+const ACCOUNT_METRICS: &str = "
+CREATE TABLE account_metrics (
+    account_id BLOB PRIMARY KEY NOT NULL CHECK (length(account_id) = 32),
+    margin_used INTEGER NOT NULL CHECK (margin_used >= 0),
+    unrealized_pnl INTEGER NOT NULL,
+    observed_at INTEGER NOT NULL
+);
+";
+
 /// 照合の巡回カーソル（有効な口座を順に巡回する）。
 const RECONCILE_CURSOR: &str = "
 CREATE TABLE reconcile_cursor (
@@ -384,5 +394,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 13,
         sql: ORDER_RESOLUTION_EVENTS,
+    },
+    Migration {
+        version: 14,
+        sql: ACCOUNT_METRICS,
     },
 ];

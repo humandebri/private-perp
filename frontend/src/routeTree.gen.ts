@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as FallbackRouteImport } from './routes/fallback'
 import { Route as FundsRouteImport } from './routes/funds'
 import { Route as HistoryRouteImport } from './routes/history'
 import { Route as TradeRouteImport } from './routes/trade'
@@ -17,6 +18,11 @@ import { Route as TradeRouteImport } from './routes/trade'
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FallbackRoute = FallbackRouteImport.update({
+  id: '/fallback',
+  path: '/fallback',
   getParentRoute: () => rootRouteImport,
 } as any)
 const FundsRoute = FundsRouteImport.update({
@@ -37,12 +43,14 @@ const TradeRoute = TradeRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/fallback': typeof FallbackRoute
   '/funds': typeof FundsRoute
   '/history': typeof HistoryRoute
   '/trade': typeof TradeRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/fallback': typeof FallbackRoute
   '/funds': typeof FundsRoute
   '/history': typeof HistoryRoute
   '/trade': typeof TradeRoute
@@ -50,20 +58,22 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/fallback': typeof FallbackRoute
   '/funds': typeof FundsRoute
   '/history': typeof HistoryRoute
   '/trade': typeof TradeRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/funds' | '/history' | '/trade'
+  fullPaths: '/' | '/fallback' | '/funds' | '/history' | '/trade'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/funds' | '/history' | '/trade'
-  id: '__root__' | '/' | '/funds' | '/history' | '/trade'
+  to: '/' | '/fallback' | '/funds' | '/history' | '/trade'
+  id: '__root__' | '/' | '/fallback' | '/funds' | '/history' | '/trade'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  FallbackRoute: typeof FallbackRoute
   FundsRoute: typeof FundsRoute
   HistoryRoute: typeof HistoryRoute
   TradeRoute: typeof TradeRoute
@@ -76,6 +86,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fallback': {
+      id: '/fallback'
+      path: '/fallback'
+      fullPath: '/fallback'
+      preLoaderRoute: typeof FallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/funds': {
@@ -104,6 +121,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  FallbackRoute: FallbackRoute,
   FundsRoute: FundsRoute,
   HistoryRoute: HistoryRoute,
   TradeRoute: TradeRoute,

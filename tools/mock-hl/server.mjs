@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
+import { createRequire } from 'node:module'
+
+// mockはfrontendの開発依存として管理し、リポジトリ直下に別のJS workspaceを増やさない。
+const require = createRequire(new URL('../../frontend/package.json', import.meta.url))
+const { WebSocketServer } = require('ws')
 
 const host = process.env.MOCK_HL_HOST ?? '127.0.0.1'
 const port = Number(process.env.MOCK_HL_PORT ?? '8080')
@@ -14,7 +19,19 @@ if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
   throw new Error('mock-hl refuses non-loopback hosts')
 }
 
-const state = { nextOid: 1, nextTid: 1, deposits: new Map(), orders: new Map(), fills: [] }
+const marketState = {
+  BTC: { mid: 60000, decimals: 5 },
+  ETH: { mid: 3000, decimals: 5 },
+}
+const state = {
+  nextOid: 1,
+  nextTid: 1,
+  deposits: new Map(),
+  orders: new Map(),
+  fills: [],
+  positions: new Map(),
+  scenario: { nextOrder: 'normal', infoUnavailable: false },
+}
 class HttpError extends Error {
   constructor(status, message) {
     super(message)
@@ -60,6 +77,37 @@ export const reset = () => {
   state.deposits.clear()
   state.orders.clear()
   state.fills.length = 0
+  state.positions.clear()
+  state.scenario = { nextOrder: 'normal', infoUnavailable: false }
+}
+
+const marketForAsset = (asset) => (Number(asset) === 2 ? 'BTC' : Number(asset) === 1 ? 'ETH' : 'UNKNOWN')
+const positionRows = () =>
+  [...state.positions.entries()]
+    .filter(([, position]) => Math.abs(position.size) > 1e-12)
+    .map(([coin, position]) => ({
+      position: {
+        coin,
+        szi: String(position.size),
+        entryPx: String(position.entry),
+        liquidationPx: String(position.entry * (position.size > 0 ? 0.8 : 1.2)),
+        unrealizedPnl: '0',
+        leverage: { type: 'cross', value: 3 },
+        marginMode: 'cross',
+      },
+    }))
+
+const applyFill = (market, order, size) => {
+  const signed = (order.b ? 1 : -1) * Number(size)
+  const current = state.positions.get(market) ?? { size: 0, entry: Number(order.p) }
+  let nextSize = current.size + signed
+  if (order.r) {
+    if (current.size === 0 || Math.sign(current.size) === Math.sign(signed)) nextSize = current.size
+    else if (Math.abs(signed) >= Math.abs(current.size)) nextSize = 0
+  }
+  nextSize = Number(nextSize.toFixed(8))
+  if (nextSize === 0) state.positions.delete(market)
+  else state.positions.set(market, { size: nextSize, entry: current.size === 0 ? Number(order.p) : current.entry })
 }
 
 export function exchange(body) {
@@ -84,19 +132,29 @@ export function exchange(body) {
   if (action.type === 'order') {
     const order = action.orders?.[0] ?? {}
     const oid = state.nextOid++
-    const market = Number(order.a) === 2 ? 'BTC' : Number(order.a) === 1 ? 'ETH' : 'UNKNOWN'
+    const market = marketForAsset(order.a)
     const isMarket = order.t?.limit?.tif === 'Ioc'
-    const record = { oid, status: isMarket ? 'filled' : 'open', market, order }
+    const scenario = state.scenario.nextOrder
+    state.scenario.nextOrder = 'normal'
+    if (scenario === 'reject') return { status: 'err', response: 'LOCAL MOCK rejected next order' }
+    if (scenario === 'unknown') throw new HttpError(503, 'LOCAL MOCK unknown next order result')
+    const partial = isMarket && scenario === 'partial'
+    const status = isMarket && !partial ? 'filled' : 'open'
+    const record = { oid, status, market, order }
     state.orders.set(oid, record)
     if (isMarket) {
+      const filledSize = partial ? String(Number(order.s ?? 0) / 2) : String(order.s ?? '0')
+      applyFill(market, order, filledSize)
       state.fills.push({
         tid: state.nextTid++, oid, coin: market, px: String(order.p ?? '0'),
-        sz: String(order.s ?? '0'), fee: 0, time: Number(body.nonce ?? Date.now()),
+        sz: filledSize, fee: 0, time: Number(body.nonce ?? Date.now()),
       })
     }
     return {
       status: 'ok', response: { type: 'order', data: { statuses: [
-        isMarket ? { filled: { oid, totalSz: String(order.s ?? '0'), avgPx: String(order.p ?? '0') } } : { resting: { oid } },
+        isMarket && !partial
+          ? { filled: { oid, totalSz: String(order.s ?? '0'), avgPx: String(order.p ?? '0') } }
+          : { resting: { oid } },
       ] } },
     }
   }
@@ -111,11 +169,21 @@ export function exchange(body) {
 }
 
 export function info(body) {
+  if (state.scenario.infoUnavailable) throw new HttpError(503, 'LOCAL MOCK info unavailable')
   if (body.type === 'userNonFundingLedgerUpdates') {
     return state.deposits.get(normalizeAddress(body.user)) ?? []
   }
   if (body.type === 'userFills') return state.fills
-  if (body.type === 'clearinghouseState') return { assetPositions: [] }
+  if (body.type === 'clearinghouseState') {
+    const margin = [...state.positions.entries()].reduce(
+      (total, [coin, position]) => total + Math.abs(position.size) * marketState[coin].mid / 3,
+      0,
+    )
+    return {
+      marginSummary: { totalMarginUsed: margin.toFixed(6), totalNtlPos: (margin * 3).toFixed(6) },
+      assetPositions: positionRows(),
+    }
+  }
   if (body.type === 'orderStatus') {
     const order = state.orders.get(Number(body.oid))
     return { status: order?.status ?? 'unknown', order: { oid: Number(body.oid) } }
@@ -140,10 +208,55 @@ export function seedDeposit(body) {
   return { ok: true, event, mode: 'LOCAL MOCK' }
 }
 
+export function setScenario(body) {
+  const nextOrder = body.nextOrder ?? state.scenario.nextOrder
+  if (!['normal', 'partial', 'reject', 'unknown'].includes(nextOrder)) {
+    throw new Error('invalid nextOrder scenario')
+  }
+  state.scenario = { nextOrder, infoUnavailable: Boolean(body.infoUnavailable) }
+  return { ok: true, mode: 'LOCAL MOCK', scenario: state.scenario }
+}
+
+const marketMessage = (subscription) => {
+  const coin = subscription.coin && marketState[subscription.coin] ? subscription.coin : 'BTC'
+  const { mid } = marketState[coin]
+  const now = Date.now()
+  if (subscription.type === 'allMids')
+    return { channel: 'allMids', data: { mids: { BTC: '60000', ETH: '3000' } } }
+  if (subscription.type === 'l2Book')
+    return { channel: 'l2Book', data: { coin, isSnapshot: true, levels: [
+      [{ px: String(mid - 1), sz: '1.25', n: 2 }],
+      [{ px: String(mid + 1), sz: '1.10', n: 2 }],
+    ] } }
+  if (subscription.type === 'trades')
+    return { channel: 'trades', data: [{ coin, px: String(mid), sz: '0.01', side: 'B', time: now, tid: now }] }
+  if (subscription.type === 'candle')
+    return { channel: 'candle', data: { s: coin, i: subscription.interval ?? '1m', t: now - 60_000, T: now, o: String(mid - 10), h: String(mid + 20), l: String(mid - 20), c: String(mid), v: '12.5', n: 10 } }
+  if (subscription.type === 'bbo')
+    return { channel: 'bbo', data: { coin, time: now, bbo: [{ px: String(mid - 1), sz: '1.25' }, { px: String(mid + 1), sz: '1.10' }] } }
+  if (subscription.type === 'activeAssetCtx')
+    return { channel: 'activeAssetCtx', data: { coin, ctx: { markPx: String(mid), oraclePx: String(mid), funding: '0.00001', openInterest: '100' } } }
+  return null
+}
+
+const sockets = new WebSocketServer({ noServer: true })
+sockets.on('connection', (socket) => {
+  socket.on('message', (raw) => {
+    let message
+    try { message = JSON.parse(raw.toString()) } catch { return }
+    if (message.method === 'ping') return socket.send(JSON.stringify({ channel: 'pong' }))
+    if (message.method === 'subscribe') {
+      const payload = marketMessage(message.subscription ?? {})
+      if (payload) socket.send(JSON.stringify(payload))
+      socket.send(JSON.stringify({ channel: 'subscriptionResponse', data: message }))
+    }
+  })
+})
+
 export const server = createServer(async (request, response) => {
   let allowedOrigin
   try {
-    const isAdmin = request.url === '/admin/reset' || request.url === '/admin/deposits'
+    const isAdmin = ['/admin/reset', '/admin/deposits', '/admin/scenarios'].includes(request.url)
     allowedOrigin = isAdmin
       ? validateAdminAccess(request.socket.remoteAddress, request.headers.origin)
       : undefined
@@ -161,6 +274,8 @@ export const server = createServer(async (request, response) => {
       const seeded = seedDeposit(body)
       return json(response, 200, seeded, allowedOrigin)
     }
+    if (request.url === '/admin/scenarios')
+      return json(response, 200, setScenario(body), allowedOrigin)
     return json(response, 404, { error: 'not found' })
   } catch (error) {
     const status = error instanceof HttpError ? error.status : 400
@@ -171,6 +286,14 @@ export const server = createServer(async (request, response) => {
       allowedOrigin,
     )
   }
+})
+
+server.on('upgrade', (request, socket, head) => {
+  if (request.url !== '/ws' || !isLoopbackAddress(request.socket.remoteAddress)) {
+    socket.destroy()
+    return
+  }
+  sockets.handleUpgrade(request, socket, head, (client) => sockets.emit('connection', client, request))
 })
 
 if (process.argv[1]?.endsWith('/tools/mock-hl/server.mjs') && process.env.MOCK_HL_IMPORT_ONLY !== '1') {
