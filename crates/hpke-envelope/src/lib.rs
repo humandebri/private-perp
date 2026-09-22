@@ -135,3 +135,28 @@ pub fn derive_keypair(ikm: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let (secret, public) = X25519HkdfSha256::derive_keypair(ikm);
     (secret.to_bytes().to_vec(), public.to_bytes().to_vec())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::envelope_aad;
+
+    /// `aad`のエンコードを固定する（画面のJS実装と同じ値であることを相互に確認する）。
+    ///
+    /// 形式：各部分を `(len as u32 BE) || bytes` で連結し、末尾に `expires_at` の
+    /// `u64 BE` を足す。`frontend/src/client/envelope.test.ts` が同じ値を検査する。
+    #[test]
+    fn aad_encoding_is_fixed() {
+        let aad = envelope_aad(
+            "local",
+            &[1, 2, 3],
+            "list_orders",
+            &[4, 5],
+            &[6u8; 32],
+            1_700_000_000_000,
+        );
+        assert_eq!(
+            hex::encode(&aad),
+            "000000056c6f63616c000000030102030000000b6c6973745f6f72646572730000000204050000002006060606060606060606060606060606060606060606060606060606060606060000018bcfe56800"
+        );
+    }
+}

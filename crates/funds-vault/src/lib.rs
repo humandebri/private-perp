@@ -488,7 +488,9 @@ fn schedule_sweep() {
         || async {
             let now = clock::now_ms();
             // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
-            let _ = outbox::sweep(now).await;
+            if let Err(error) = outbox::sweep(now).await {
+                ic_cdk::println!("fund outbox sweep failed: {error:?}");
+            }
 
             // 入金の定期照合（60秒間隔・1回あたり2件まで。outcallの回数を抑える）。
             let due_deposits = LAST_DEPOSIT_RECONCILE.with(|cell| {
@@ -499,8 +501,8 @@ fn schedule_sweep() {
                     true
                 }
             });
-            if due_deposits {
-                let _ = deposits::reconcile_all(2).await;
+            if due_deposits && let Err(error) = deposits::reconcile_all(2).await {
+                ic_cdk::println!("deposit reconciliation failed: {error:?}");
             }
         },
     );

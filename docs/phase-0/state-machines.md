@@ -58,6 +58,7 @@ queued ──▶ signing ──▶ signed ──▶ dispatching ──▶ reconc
 epoch・lease・CAS（`Implementation.md` 4.6）:
 
 - action取得時に永続`worker_epoch`を増やす。
+- 注文・取消workerのリースは30秒。POST前に失敗した処理だけを5秒後に再取得でき、nonceは再取得後も変えない。
 - `await`後の書き込みは `WHERE action_id = ? AND worker_epoch = ? AND dispatch_state = ?` で守り、更新0件なら結果を破棄する。
 - リース期限だけでは、遅延した旧署名callbackの競合を防げない。
 - 署名前の回収は世代更新で可能。`dispatching`/`unknown`の回収は照合workerの再開であり、送信権の再取得ではない。
@@ -108,11 +109,11 @@ accepted ──▶ reserved ──▶ executing ──▶ settled
 | `rejected` | HLが拒否 | 理由コードを保持 |
 | `unknown` | 結果不明 | 再発注を促さない |
 
-- バッチ全体のHTTP成功を子注文すべての成功と解釈しない。`action_orders`で子注文ごとに関連付ける。
+- HTTP成功を注文成功と解釈せず、応答内の注文statusを個別に分類する。現在の実装は1 action = 1注文で、未使用だった`action_orders`はMigrationで除去する。
 - `cancel_requested`は状態と別に保持する。取消要求中の約定は`partially_filled`／`filled`として反映し、`cancelled`にしない（取消と約定の競合）。
 - Cancel Allも件数上限次第で複数actionになる。取消を新規注文より優先する。
-- `expires_after`はactionの受付期限である。ローカルdeadline超過で`cancelled`／`expired`にしない。
-- 未約定・部分約定・`unknown`を掃除しない。注文の終端とactionの照合完了を別々に確認してから、定めた保持期間後にpayloadを削除する。
+- `expires_after`はactionの受付・送信期限である。期限超過を受付時とPOST直前に検査し、未送信なら`rejected`として予約を解放する。板に残った注文の取消期限には使わない。
+- 未約定・部分約定・`unknown`を掃除しない。解決済み終端注文のpayload・署名は24時間後、約定明細は30日後に、1 sweepあたり各100件まで削除する。
 
 ## 5. 照合規則
 
@@ -128,7 +129,7 @@ accepted ──▶ reserved ──▶ executing ──▶ settled
 | 照合で取消済みと判明 | `cancelled`へ遷移し、取消actionの照合根拠を残す |
 | 照合で部分約定と判明 | `partially_filled`。リスク予約は約定分だけ消費する |
 
-- sweepの起動はグローバルtimer（5秒間隔。`init`／`post_upgrade`で再armする）で行い、件数・cycles・API予算を制限する。永続状態が正本であり、timer・spawnの継続を正しさの前提にしない（停止時は手動`sweep`で再開する）。
+- sweepの起動はグローバルtimer（5秒間隔。`init`／`post_upgrade`で再armする）で行い、件数・cycles・API予算を制限する。失敗はCanisterログへ記録する。永続状態が正本であり、timer・spawnの継続を正しさの前提にしない（停止時は手動`sweep`で再開する）。
 - 結果不明が解消できなければ自動再送せず、予約を保持して安全側に停止する。
 - 障害時は新規リスク増加停止、照合継続、可能な取消・reduce-only・確認済み出金を優先する。
 

@@ -8,6 +8,7 @@
   },
   "ignorePatterns": [
     "src/routeTree.gen.ts",
+    "src/client/candid/*.did.js",
     "worker-configuration.d.ts",
     "dist/**",
     ".wrangler/**",

@@ -941,6 +941,7 @@ dependencies = [
 name = "hpke-envelope"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "hl-sign",
  "hpke",
 ]

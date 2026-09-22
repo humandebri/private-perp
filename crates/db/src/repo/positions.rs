@@ -109,6 +109,15 @@ pub fn replace_all(
         )
         .map_err(sql)?;
     let removed = crate::cas::changes(connection)?;
+    // 空の建玉一覧も取引所から得た有効な観測である。positionsのMAXだけに頼ると、
+    // 建玉を持たない口座が永遠に「未観測」となり新規注文を受け付けられない。
+    connection
+        .execute(
+            "INSERT INTO account_observations (account_id, observed_at) VALUES (?1, ?2)
+             ON CONFLICT(account_id) DO UPDATE SET observed_at = excluded.observed_at",
+            params![account_id.as_slice(), stamp as i64],
+        )
+        .map_err(sql)?;
     u32::try_from(removed).map_err(|_| Error::Invariant("negative change count"))
 }
 
@@ -133,15 +142,13 @@ pub fn latest_observed(
     connection: &Connection,
     account_id: &[u8; 32],
 ) -> Result<Option<u64>, Error> {
-    // NULLを取り得る集約は`Option<i64>`で読む（固定型だとNULLで型エラーになる）。
     let row = connection
-        .query_optional(
-            "SELECT MAX(observed_at) FROM positions WHERE account_id = ?1 AND observed_at > 0",
+        .query_optional_scalar::<i64>(
+            "SELECT observed_at FROM account_observations WHERE account_id = ?1",
             params![account_id.as_slice()],
-            |row| row.get::<Option<i64>>(0),
         )
         .map_err(sql)?;
-    match row.flatten() {
+    match row {
         Some(value) if value > 0 => {
             Some(u64::try_from(value).map_err(|_| Error::Invariant("negative time")))
         }

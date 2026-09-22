@@ -1,8 +1,8 @@
-//! 資金・Agent・HPKE封筒。`docs/phase-0/api-contract.md` 2節、`state-machines.md` 2〜3節。
+//! 資金・Agent。`docs/phase-0/api-contract.md` 2節、`state-machines.md` 2〜3節。
 
 use crate::auth::SessionHandle;
 use crate::{AccountKind, AssetId, Blob, Micros, Network, Timestamp};
-use candid::{CandidType, Principal};
+use candid::CandidType;
 use serde::{Deserialize, Serialize};
 
 /// action状態（`docs/phase-0/state-machines.md` 2節）。
@@ -192,26 +192,4 @@ pub struct AgentStatusQuery {
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FundStatusQuery {
     pub session: SessionHandle,
-}
-
-/// HPKE要求封筒（`docs/phase-0/api-contract.md` 6節）。
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct HpkeRequest {
-    pub key_id: Blob,
-    pub network: Network,
-    pub canister: Principal,
-    pub method: String,
-    pub request_id: Blob,
-    pub expires_at: Timestamp,
-    pub client_public_key: Blob,
-    pub aad: Blob,
-    pub ciphertext: Blob,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct HpkeResponse {
-    pub request_id: Blob,
-    pub key_id: Blob,
-    pub observed_at: Timestamp,
-    pub ciphertext: Blob,
 }

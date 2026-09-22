@@ -16,6 +16,9 @@
     "check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test && pnpm build && pnpm test:e2e"
   },
   "dependencies": {
+    "@hpke/chacha20poly1305": "1.8.0",
+    "@hpke/core": "1.8.0",
+    "@icp-sdk/core": "6.1.0",
     "@tanstack/react-query": "5.103.1",
     "@tanstack/react-router": "1.170.38",
     "@tanstack/react-start": "1.168.56",

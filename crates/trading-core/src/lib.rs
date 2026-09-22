@@ -456,6 +456,38 @@ fn get_environment() -> Result<api_types::environment::EnvironmentView, ErrorCod
     environment::resolved()
 }
 
+/// 外部確認済みのleverage preflight不明状態をcontrollerが解決する。
+#[ic_cdk::update]
+fn resolve_unknown_order_preflight(
+    order_id: api_types::Blob,
+    resolution: api_types::order::PreflightResolution,
+) -> Result<(), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only a controller can resolve an unknown order preflight".to_string(),
+        });
+    }
+    let order_id: [u8; 32] = order_id.as_ref().try_into().map_err(|_| {
+        bad(
+            BadRequestCode::MalformedPayload,
+            "order_id must be 32 bytes",
+        )
+    })?;
+    let applied = matches!(resolution, api_types::order::PreflightResolution::Applied);
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| {
+        db::repo::orders::resolve_unknown_preflight(
+            connection,
+            &order_id,
+            applied,
+            caller.as_slice(),
+            now,
+        )
+    })
+    .map_err(map_db)
+}
+
 /// 受付を1件処理する（認可・検証・冪等性・pending注文の登録）。
 ///
 /// 署名・送信・照合はパイプライン（次段階）が行う。ここでは受付だけを確定させる。
@@ -526,10 +558,38 @@ async fn submit_inner(
             return Err(bad(BadRequestCode::MissingField, "limit price is required"));
         }
     };
-    if args.leverage.unwrap_or(3) > 5 {
+    let effective_leverage = args.leverage.unwrap_or(3);
+    if !(1..=5).contains(&effective_leverage) {
         return Err(bad(
             BadRequestCode::QuantityOutOfRange,
-            "leverage exceeds the UI limit",
+            "leverage must be between 1 and 5",
+        ));
+    }
+    let effective_slippage_bps = match args.kind {
+        api_types::order::OrderKind::MarketIoc => {
+            let value = args.slippage_tolerance_bps.unwrap_or(DEFAULT_SLIPPAGE_BPS);
+            if !(1..=10_000).contains(&value) {
+                return Err(bad(
+                    BadRequestCode::QuantityOutOfRange,
+                    "slippage tolerance must be between 1 and 10000 bps",
+                ));
+            }
+            Some(value)
+        }
+        api_types::order::OrderKind::LimitGtc => {
+            if args.slippage_tolerance_bps.is_some() {
+                return Err(bad(
+                    BadRequestCode::MalformedPayload,
+                    "slippage tolerance only applies to market IOC orders",
+                ));
+            }
+            None
+        }
+    };
+    if args.expires_after.is_some_and(|expires| expires <= now) {
+        return Err(bad(
+            BadRequestCode::MalformedPayload,
+            "expires_after must be in the future",
         ));
     }
 
@@ -570,7 +630,10 @@ async fn submit_inner(
         api_types::order::OrderKind::MarketIoc => 1,
         api_types::order::OrderKind::LimitGtc => 2,
     });
-    body.extend_from_slice(&args.leverage.unwrap_or(3).to_be_bytes());
+    body.extend_from_slice(&effective_leverage.to_be_bytes());
+    body.extend_from_slice(&effective_slippage_bps.unwrap_or(0).to_be_bytes());
+    body.extend_from_slice(&args.expires_after.unwrap_or(0).to_be_bytes());
+    body.extend_from_slice(args.account_id.as_ref());
     // トリガの有無と内容も本文に含める（SL/TPだけを差し替えた再送を別本文とする）。
     if let Some(trigger) = &args.trigger {
         body.push(u8::from(matches!(
@@ -583,21 +646,26 @@ async fn submit_inner(
     let fingerprint = body_fingerprint(&body);
 
     let account_id = trading_account(session).await?;
+    if args.account_id.as_ref() != account_id.as_slice() {
+        return Err(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::AccountNotOwned,
+        });
+    }
     // 照合（sweep）はセッションを持たないため、取引所アドレスをここで保存しておく。
-    let _ = cache_trading_address(session, &account_id, &user_id).await;
-    // 取引所データが古い場合は新規リスクを増やさない（観測が無い口座は対象外）。
+    cache_trading_address(session, &account_id, &user_id).await?;
+    // 取引所データが古い、または一度も観測できていない場合は新規リスクを増やさない。
     // reduce-onlyはリスクを減らす方向にしか作用しないため、鮮度に関わらず受け付ける
     // （建玉があるときに保護・決済を打てなくなる方が危険である）。
-    if !args.reduce_only
-        && let Some(observed) = db::tx::query(|connection| {
+    if !args.reduce_only {
+        let observed = db::tx::query(|connection| {
             db::repo::positions::latest_observed(connection, &account_id)
         })
-        .map_err(map_db)?
-        && now.saturating_sub(observed) > STALE_DATA_MS
-    {
-        return Err(ErrorCode::NotAllowed {
-            code: api_types::error::NotAllowedCode::OperationNotAvailable,
-        });
+        .map_err(map_db)?;
+        if observed.is_none_or(|observed| now.saturating_sub(observed) > STALE_DATA_MS) {
+            return Err(ErrorCode::NotAllowed {
+                code: api_types::error::NotAllowedCode::OperationNotAvailable,
+            });
+        }
     }
 
     // SL/TPは建玉単位（positionTpsl）のreduce-only注文としてのみ受け付ける。
@@ -630,6 +698,18 @@ async fn submit_inner(
         bytes.extend_from_slice(&user_id);
         body_fingerprint(&bytes)
     };
+
+    // 上の外部照会中にstopやallowlistが変わり得るため、永続化直前に再検証する。
+    require_not_stopped().await?;
+    if !policy_markets()
+        .await?
+        .iter()
+        .any(|allowed| allowed == &market)
+    {
+        return Err(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::AssetNotAllowed,
+        });
+    }
 
     let accepted = db::tx::update(|connection| {
         let accepted = db::repo::core_requests::accept_request(
@@ -678,6 +758,9 @@ async fn submit_inner(
                 price: args.limit_price.clone(),
                 quantity: quantity.as_str().to_string(),
                 reduce_only: args.reduce_only,
+                effective_leverage,
+                slippage_tolerance_bps: effective_slippage_bps,
+                expires_after: args.expires_after,
                 trigger: args
                     .trigger
                     .as_ref()
@@ -1233,7 +1316,7 @@ async fn account_snapshot(
 ) -> Result<api_types::order::AccountSnapshot, ErrorCode> {
     let user_id = authorize(session).await?;
     let account_id = trading_account(session).await?;
-    let _ = cache_trading_address(session, &account_id, &user_id).await;
+    cache_trading_address(session, &account_id, &user_id).await?;
     let now = ic_cdk::api::time() / 1_000_000;
 
     let vault = vault_principal()?;
@@ -1633,6 +1716,9 @@ async fn test_sign_order_action(
             "order_id must be 32 bytes",
         )
     })?;
+    let now = ic_cdk::api::time() / 1_000_000;
+    db::tx::update(|connection| db::repo::orders::ensure_action_nonces(connection, &order_id, now))
+        .map_err(map_db)?;
     let order = db::tx::query(|connection| db::repo::orders::signable(connection, &order_id))
         .map_err(map_db)?
         .ok_or_else(|| bad(BadRequestCode::MalformedPayload, "unknown order"))?;
@@ -1646,9 +1732,9 @@ async fn test_sign_order_action(
     let msgpack = action.to_value().encode();
     let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
         action_msgpack: &msgpack,
-        nonce: order.created_at,
+        nonce: order.order_nonce,
         vault_address: None,
-        expires_after: None,
+        expires_after: order.expires_after,
     });
     let digest = hl_sign::hash::signing_digest(action_hash, false);
     let signature = pipeline::sign_with_agent_key(&order.account_id, digest).await?;
@@ -1695,7 +1781,9 @@ fn schedule_sweep() {
         || async {
             // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
             let now = ic_cdk::api::time() / 1_000_000;
-            let _ = pipeline::sweep_once(now).await;
+            if let Err(error) = pipeline::sweep_once(now).await {
+                ic_cdk::println!("trading sweep failed: {error:?}");
+            }
         },
     );
 }

@@ -26,14 +26,27 @@ const MAX_STATUS_RESPONSE_BYTES: u64 = 8 * 1024;
 /// `/exchange`の応答の分類。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExchangeOutcome {
-    /// 受理された（`status: ok`）。
-    Accepted,
-    /// 取引所が拒否した（`status: err`）。
-    Rejected,
+    /// 受理された。即時約定では`filled`、restingでは`oid`が入る。
+    Accepted { oid: Option<u64>, filled: bool },
+    /// outer/innerいずれかで明示的に拒否された。
+    Rejected { message: String },
 }
 
 /// `/exchange`へ署名済みactionを送る（非replicated）。受理時は取引所のoidを返す。
-pub async fn post_exchange(body: &[u8]) -> Result<(ExchangeOutcome, Option<u64>), ErrorCode> {
+pub async fn post_exchange(body: &[u8]) -> Result<ExchangeOutcome, ErrorCode> {
+    let request: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| ErrorCode::UpstreamRejected {
+            code: "invalid exchange request".to_string(),
+            retryable: false,
+        })?;
+    let action_type = request
+        .get("action")
+        .and_then(|action| action.get("type"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| ErrorCode::UpstreamRejected {
+            code: "exchange request without action type".to_string(),
+            retryable: false,
+        })?;
     let exchange_url = crate::environment::resolved()?.exchange_url;
     let response = HttpRequest::new(&exchange_url)
         .with_method(HttpMethod::POST)
@@ -55,26 +68,72 @@ pub async fn post_exchange(body: &[u8]) -> Result<(ExchangeOutcome, Option<u64>)
             code: "unparseable exchange response".to_string(),
             retryable: false,
         })?;
-    match value.get("status").and_then(|status| status.as_str()) {
-        Some("ok") => Ok((ExchangeOutcome::Accepted, accepted_oid(&value))),
-        Some("err") => Ok((ExchangeOutcome::Rejected, None)),
-        _ => Err(ErrorCode::UpstreamRejected {
-            code: "unexpected exchange response".to_string(),
-            retryable: false,
+    classify_exchange_response(action_type, &value).ok_or_else(|| ErrorCode::UpstreamRejected {
+        code: "unexpected exchange response".to_string(),
+        retryable: false,
+    })
+}
+
+fn classify_exchange_response(
+    action_type: &str,
+    value: &serde_json::Value,
+) -> Option<ExchangeOutcome> {
+    match value.get("status")?.as_str()? {
+        "err" => Some(ExchangeOutcome::Rejected {
+            message: value
+                .get("response")
+                .and_then(|response| response.as_str())
+                .unwrap_or("exchange rejected the action")
+                .to_string(),
         }),
+        "ok" => classify_ok_response(action_type, value),
+        _ => None,
     }
 }
 
-/// 受理応答からresting注文のoidを取り出す（成行の即時約定など、oidが無い場合もある）。
-fn accepted_oid(value: &serde_json::Value) -> Option<u64> {
-    value
+fn classify_ok_response(action_type: &str, value: &serde_json::Value) -> Option<ExchangeOutcome> {
+    if action_type == "updateLeverage" {
+        return (value.get("response")?.get("type")?.as_str()? == "default").then_some(
+            ExchangeOutcome::Accepted {
+                oid: None,
+                filled: false,
+            },
+        );
+    }
+    let status = value
         .get("response")
         .and_then(|response| response.get("data"))
         .and_then(|data| data.get("statuses"))
-        .and_then(|statuses| statuses.get(0))
-        .and_then(|status| status.get("resting"))
-        .and_then(|resting| resting.get("oid"))
-        .and_then(|oid| oid.as_u64())
+        .and_then(|statuses| statuses.get(0))?;
+    if let Some(message) = status.get("error").and_then(|error| error.as_str()) {
+        return Some(ExchangeOutcome::Rejected {
+            message: message.to_string(),
+        });
+    }
+    if matches!(action_type, "cancel" | "cancelByCloid") {
+        return status
+            .get("success")
+            .is_some()
+            .then_some(ExchangeOutcome::Accepted {
+                oid: None,
+                filled: false,
+            });
+    }
+    if action_type != "order" {
+        return None;
+    }
+    if let Some(resting) = status.get("resting") {
+        return Some(ExchangeOutcome::Accepted {
+            oid: resting.get("oid").and_then(|oid| oid.as_u64()),
+            filled: false,
+        });
+    }
+    status
+        .get("filled")
+        .map(|filled| ExchangeOutcome::Accepted {
+            oid: filled.get("oid").and_then(|oid| oid.as_u64()),
+            filled: true,
+        })
 }
 
 /// 本人の約定を取得する（replicated＋変換）。

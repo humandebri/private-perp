@@ -146,6 +146,8 @@ type NotAllowedCode = variant {
 };
 // 注文種別。Marketはスリッページ上限付きIOC指値として構築する。
 type OrderKind = variant { LimitGtc; MarketIoc };
+// 送信結果が不明なleverage preflightを外部確認後に解決する。
+type PreflightResolution = variant { Applied; Rejected };
 type Result = variant { Ok : nat64; Err : ErrorCode };
 type Result_1 = variant { Ok : HpkeResponse; Err : ErrorCode };
 type Result_2 = variant { Ok : CloseAllOutcome; Err : ErrorCode };
@@ -265,6 +267,8 @@ service : () -> {
   // 
   // 未承認の世代があるうちは同じ世代を返す。注文はこの世代の鍵で署名する。
   request_agent_generation : (SessionHandle) -> (Result_7);
+  // 外部確認済みのleverage preflight不明状態をcontrollerが解決する。
+  resolve_unknown_order_preflight : (blob, PreflightResolution) -> (Result_8);
   // HPKEの鍵世代を更新する（controllerのみ）。
   // 
   // 秘密鍵はcanister内のDBに留め、公開鍵のみを配布する（`Plan.md` 16.5、

@@ -101,6 +101,13 @@ pub struct CancelAllArgs {
     pub include_protective_orders: bool,
 }
 
+/// 送信結果が不明なleverage preflightを外部確認後に解決する。
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreflightResolution {
+    Applied,
+    Rejected,
+}
+
 /// 注文ライフサイクル（`state-machines.md` 4節）。
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrderState {
@@ -213,6 +220,16 @@ pub struct OrderSummary {
     pub state: OrderState,
     /// outboxの送信状態（受付から照合までの進み具合）。
     pub dispatch_state: ActionState,
+    /// 注文前のleverage更新状態。
+    pub preflight_state: ActionState,
+    /// 受付時に確定したleverage。
+    pub effective_leverage: u32,
+    /// Market IOCのスリッページ許容値。Limit GTCでは`None`。
+    pub effective_slippage_bps: Option<u32>,
+    /// 取引所がactionを受け付けられる期限。
+    pub expires_after: Option<Timestamp>,
+    /// 最後の送信前エラー。wire payloadや署名は含めない。
+    pub last_error: Option<String>,
     pub cancel_requested: bool,
     pub hl_oid: Option<u64>,
     /// SL/TPトリガ（`None`は通常注文）。

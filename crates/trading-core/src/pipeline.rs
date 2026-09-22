@@ -1,7 +1,7 @@
 //! 注文・取消の送信と取引所状態の照合（sweep）。
 //!
 //! `docs/phase-0/state-machines.md` 4節のとおり、受付（`submit_order`）は
-//! `pending`を書くだけで、署名・送信・照合はここが担う。`heartbeat`（本番）と
+//! `pending`を書くだけで、署名・送信・照合はここが担う。グローバルtimer（本番）と
 //! 明示的なsweep（`sweep`・`test_sweep_now`）が同じ経路を通る。
 //!
 //! 送信結果の分類を守る：
@@ -25,6 +25,11 @@ const MAX_CANCEL_PER_SWEEP: u32 = 4;
 pub const MAX_RECONCILE_PER_SWEEP: u32 = 2;
 /// 1口座あたり1回のsweepで問い合わせる注文状態の上限。
 const MAX_STATUS_CHECKS_PER_ACCOUNT: u32 = 4;
+const ACTION_LEASE_MS: u64 = 30_000;
+const RETRY_DELAY_MS: u64 = 5_000;
+const PAYLOAD_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
+const DETAIL_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+const PRUNE_PER_SWEEP: u32 = 100;
 /// 自動sweep（heartbeat）の間隔（ミリ秒）。建玉の鮮度（10秒）より短くし、
 /// 新規リスクの受付を止めない。試験ビルドは自動sweepを行わないため定数も持たない。
 #[cfg(not(feature = "test-venue"))]
@@ -32,52 +37,160 @@ pub const SWEEP_INTERVAL_MS: u64 = 5_000;
 
 /// 1回のsweep（送信・取消・照合）。件数の内訳を返す。
 pub async fn sweep_once(now: u64) -> Result<api_types::order::SweepOutcome, ErrorCode> {
-    Ok(api_types::order::SweepOutcome {
+    db::tx::update(|connection| db::repo::orders::recover_expired_dispatches(connection, now))
+        .map_err(map_db)?;
+    let outcome = api_types::order::SweepOutcome {
         dispatched: dispatch_queued(now).await?,
         cancels: dispatch_cancels(now).await?,
         reconciled: reconcile_accounts(now).await?,
+    };
+    db::tx::update(|connection| {
+        db::repo::orders::prune_terminal_history(
+            connection,
+            now.saturating_sub(PAYLOAD_RETENTION_MS),
+            now.saturating_sub(DETAIL_RETENTION_MS),
+            PRUNE_PER_SWEEP,
+        )
     })
+    .map_err(map_db)?;
+    Ok(outcome)
 }
 
 /// 受付済み（`queued`）の注文へ署名して送信する。
 async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
     let ids = db::tx::query(|connection| {
-        db::repo::orders::queued_orders(connection, MAX_DISPATCH_PER_SWEEP)
+        db::repo::orders::queued_orders(connection, now, MAX_DISPATCH_PER_SWEEP)
     })
     .map_err(map_db)?;
     let mut processed = 0;
     for order_id in ids {
         // 送信権を先に取る（同時実行でも二重送信しない）。
         let claimed = db::tx::update(|connection| {
-            db::repo::orders::claim_for_dispatch(connection, &order_id)
+            db::repo::orders::claim_for_dispatch(connection, &order_id, now, ACTION_LEASE_MS)
         })
         .map_err(map_db)?;
-        if !claimed {
+        let Some(worker_epoch) = claimed else {
             continue;
-        }
+        };
+        db::tx::update(|connection| {
+            db::repo::orders::ensure_action_nonces(connection, &order_id, now)
+        })
+        .map_err(map_db)?;
         let order = db::tx::query(|connection| db::repo::orders::signable(connection, &order_id))
             .map_err(map_db)?
             .ok_or_else(|| internal("missing order".to_string()))?;
-        let (_digest, signature, body) = sign_and_build(&order).await?;
+
+        if order.expires_after.is_some_and(|expiry| expiry <= now) {
+            db::tx::update(|connection| {
+                db::repo::orders::abort_before_dispatch(
+                    connection,
+                    &order_id,
+                    worker_epoch,
+                    "order expired before dispatch",
+                    now,
+                )
+            })
+            .map_err(map_db)?;
+            continue;
+        }
+
+        if order.preflight_state == api_types::fund::ActionState::Queued {
+            let preflight = match sign_and_build_leverage(&order).await {
+                Ok(value) => value,
+                Err(error) => {
+                    retry_order(&order_id, worker_epoch, &error, now)?;
+                    continue;
+                }
+            };
+            if !revalidate_before_post(&order, &order_id, worker_epoch, now).await? {
+                continue;
+            }
+            db::tx::update(|connection| {
+                db::repo::orders::mark_preflight_dispatching(
+                    connection,
+                    &order_id,
+                    worker_epoch,
+                    &preflight.1,
+                    &preflight.0.to_bytes65(),
+                    now,
+                )
+            })
+            .map_err(map_db)?;
+            match venue::post_exchange(&preflight.1).await {
+                Ok(ExchangeOutcome::Accepted { .. }) => {
+                    db::tx::update(|connection| {
+                        db::repo::orders::mark_preflight_applied(
+                            connection,
+                            &order_id,
+                            worker_epoch,
+                            now,
+                        )
+                    })
+                    .map_err(map_db)?;
+                }
+                Ok(ExchangeOutcome::Rejected { message }) => {
+                    db::tx::update(|connection| {
+                        db::repo::orders::stop_after_preflight(
+                            connection,
+                            &order_id,
+                            worker_epoch,
+                            true,
+                            &message,
+                            now,
+                        )
+                    })
+                    .map_err(map_db)?;
+                    processed += 1;
+                    continue;
+                }
+                Err(error) => {
+                    db::tx::update(|connection| {
+                        db::repo::orders::stop_after_preflight(
+                            connection,
+                            &order_id,
+                            worker_epoch,
+                            false,
+                            &format!("{error:?}"),
+                            now,
+                        )
+                    })
+                    .map_err(map_db)?;
+                    processed += 1;
+                    continue;
+                }
+            }
+        }
+
+        let (_digest, signature, body) = match sign_and_build(&order).await {
+            Ok(value) => value,
+            Err(error) => {
+                retry_order(&order_id, worker_epoch, &error, now)?;
+                continue;
+            }
+        };
+        if !revalidate_before_post(&order, &order_id, worker_epoch, now).await? {
+            continue;
+        }
         db::tx::update(|connection| {
             db::repo::orders::mark_dispatching(
                 connection,
                 &order_id,
                 &body,
                 &signature.to_bytes65(),
+                worker_epoch,
                 now,
             )
         })
         .map_err(map_db)?;
 
         match venue::post_exchange(&body).await {
-            Ok((ExchangeOutcome::Accepted, oid)) => {
+            Ok(ExchangeOutcome::Accepted { oid, filled }) => {
                 db::tx::update(|connection| {
-                    db::repo::orders::mark_venue_accepted(connection, &order_id, oid, now)
+                    db::repo::orders::mark_venue_accepted(connection, &order_id, oid, filled, now)
                 })
                 .map_err(map_db)?;
             }
-            Ok((ExchangeOutcome::Rejected, _)) => {
+            Ok(ExchangeOutcome::Rejected { .. }) => {
                 db::tx::update(|connection| {
                     db::repo::orders::mark_venue_rejected(connection, &order_id, now)?;
                     db::repo::orders::release_risk(
@@ -104,10 +217,73 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
     Ok(processed)
 }
 
+fn retry_order(
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    error: &ErrorCode,
+    now: u64,
+) -> Result<(), ErrorCode> {
+    db::tx::update(|connection| {
+        db::repo::orders::retry_before_dispatch(
+            connection,
+            order_id,
+            worker_epoch,
+            &format!("{error:?}"),
+            now.saturating_add(RETRY_DELAY_MS),
+            now,
+        )
+    })
+    .map_err(map_db)
+}
+
+async fn revalidate_before_post(
+    order: &db::repo::orders::SignableOrder,
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    now: u64,
+) -> Result<bool, ErrorCode> {
+    if let Err(error) = crate::require_not_stopped().await {
+        retry_order(order_id, worker_epoch, &error, now)?;
+        return Ok(false);
+    }
+    let allowed = match crate::policy_markets().await {
+        Ok(markets) => markets.iter().any(|market| market == &order.market),
+        Err(error) => {
+            retry_order(order_id, worker_epoch, &error, now)?;
+            return Ok(false);
+        }
+    };
+    if !allowed {
+        db::tx::update(|connection| {
+            db::repo::orders::abort_before_dispatch(
+                connection,
+                order_id,
+                worker_epoch,
+                "market is no longer allowed",
+                now,
+            )
+        })
+        .map_err(map_db)?;
+        return Ok(false);
+    }
+    let blocker = db::tx::query(|connection| {
+        db::repo::orders::dispatch_blocker(connection, order_id, worker_epoch, now)
+    })
+    .map_err(map_db)?;
+    if let Some(reason) = blocker {
+        db::tx::update(|connection| {
+            db::repo::orders::abort_before_dispatch(connection, order_id, worker_epoch, reason, now)
+        })
+        .map_err(map_db)?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// 取消要求済みの注文へ署名して送信する（受理で`cancelled`へ）。
 async fn dispatch_cancels(now: u64) -> Result<u32, ErrorCode> {
     let ids = db::tx::query(|connection| {
-        db::repo::orders::cancel_candidates(connection, MAX_CANCEL_PER_SWEEP)
+        db::repo::orders::cancel_candidates(connection, now, MAX_CANCEL_PER_SWEEP)
     })
     .map_err(map_db)?;
     let mut processed = 0;
@@ -121,11 +297,13 @@ async fn dispatch_cancels(now: u64) -> Result<u32, ErrorCode> {
 
 /// 取消actionをAgent鍵で署名して送信する。
 async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCode> {
-    let claimed = db::tx::update(|connection| db::repo::orders::claim_cancel(connection, order_id))
-        .map_err(map_db)?;
-    if !claimed {
+    let claimed = db::tx::update(|connection| {
+        db::repo::orders::claim_cancel(connection, order_id, now, ACTION_LEASE_MS)
+    })
+    .map_err(map_db)?;
+    let Some((worker_epoch, nonce)) = claimed else {
         return Ok(false);
-    }
+    };
     let (account_id, asset_index, oid) =
         db::tx::query(|connection| db::repo::orders::cancel_target(connection, order_id))
             .map_err(map_db)?
@@ -137,19 +315,34 @@ async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCod
     let msgpack = action.to_value().encode();
     let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
         action_msgpack: &msgpack,
-        nonce: now,
+        nonce,
         vault_address: None,
         expires_after: None,
     });
     let digest = hl_sign::hash::signing_digest(action_hash, false);
-    let signature = sign_with_agent_key(&account_id, digest).await?;
+    let signature = match sign_with_agent_key(&account_id, digest).await {
+        Ok(signature) => signature,
+        Err(error) => {
+            db::tx::update(|connection| {
+                db::repo::orders::retry_cancel_before_dispatch(
+                    connection,
+                    order_id,
+                    worker_epoch,
+                    &format!("{error:?}"),
+                    now,
+                )
+            })
+            .map_err(map_db)?;
+            return Ok(false);
+        }
+    };
 
     let body = serde_json::json!({
         "action": {
             "type": "cancel",
             "cancels": [{ "a": asset_index, "o": oid }],
         },
-        "nonce": now,
+        "nonce": nonce,
         "signature": {
             "r": format!("0x{}", hex::encode(signature.r)),
             "s": format!("0x{}", hex::encode(signature.s)),
@@ -157,18 +350,29 @@ async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCod
         },
     });
     let body = serde_json::to_vec(&body).map_err(|error| internal(error.to_string()))?;
+    db::tx::update(|connection| {
+        db::repo::orders::mark_cancel_dispatching(
+            connection,
+            order_id,
+            &body,
+            &signature.to_bytes65(),
+            worker_epoch,
+            now,
+        )
+    })
+    .map_err(map_db)?;
 
     match venue::post_exchange(&body).await {
-        Ok((ExchangeOutcome::Accepted, _)) => {
+        Ok(ExchangeOutcome::Accepted { .. }) => {
             db::tx::update(|connection| {
-                db::repo::orders::mark_cancel_sent(connection, order_id, &body, now)
+                db::repo::orders::mark_cancel_sent(connection, order_id, worker_epoch, now)
             })
             .map_err(map_db)?;
         }
-        Ok((ExchangeOutcome::Rejected, _)) | Err(_) => {
+        Ok(ExchangeOutcome::Rejected { .. }) | Err(_) => {
             // 拒否・不明のいずれも「送ったか不明」として保持する（再送しない）。
             db::tx::update(|connection| {
-                db::repo::orders::mark_cancel_unknown(connection, order_id, now)
+                db::repo::orders::mark_cancel_unknown(connection, order_id, worker_epoch, now)
             })
             .map_err(map_db)?;
         }
@@ -501,24 +705,69 @@ pub async fn sign_and_build(
     let msgpack = action.to_value().encode();
     let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
         action_msgpack: &msgpack,
-        nonce: order.created_at,
+        nonce: order.order_nonce,
         vault_address: None,
-        expires_after: None,
+        expires_after: order.expires_after,
     });
     let digest = hl_sign::hash::signing_digest(action_hash, false);
     let signature = sign_with_agent_key(&order.account_id, digest).await?;
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "action": order_action_json(order, &price),
-        "nonce": order.created_at,
+        "nonce": order.order_nonce,
         "signature": {
             "r": format!("0x{}", hex::encode(signature.r)),
             "s": format!("0x{}", hex::encode(signature.s)),
             "v": signature.v,
         },
     });
+    if let Some(expires_after) = order.expires_after {
+        body.as_object_mut()
+            .expect("exchange body is an object")
+            .insert("expiresAfter".to_string(), expires_after.into());
+    }
     let body = serde_json::to_vec(&body).map_err(|error| internal(error.to_string()))?;
     Ok((digest, signature, body))
+}
+
+/// 注文前にcross leverageを確定するactionへ署名する。
+async fn sign_and_build_leverage(
+    order: &db::repo::orders::SignableOrder,
+) -> Result<(hl_sign::Signature, Vec<u8>), ErrorCode> {
+    let action = hl_types::action::UpdateLeverageAction {
+        asset_index: order.asset_index,
+        is_cross: true,
+        leverage: order.effective_leverage,
+    };
+    let action_hash = hl_sign::hash::action_hash(&hl_sign::hash::ActionHashInput {
+        action_msgpack: &action.to_value().encode(),
+        nonce: order.preflight_nonce,
+        vault_address: None,
+        expires_after: order.expires_after,
+    });
+    let digest = hl_sign::hash::signing_digest(action_hash, false);
+    let signature = sign_with_agent_key(&order.account_id, digest).await?;
+    let mut body = serde_json::json!({
+        "action": {
+            "type": "updateLeverage",
+            "asset": order.asset_index,
+            "isCross": true,
+            "leverage": order.effective_leverage,
+        },
+        "nonce": order.preflight_nonce,
+        "signature": {
+            "r": format!("0x{}", hex::encode(signature.r)),
+            "s": format!("0x{}", hex::encode(signature.s)),
+            "v": signature.v,
+        },
+    });
+    if let Some(expires_after) = order.expires_after {
+        body.as_object_mut()
+            .expect("exchange body is an object")
+            .insert("expiresAfter".to_string(), expires_after.into());
+    }
+    let body = serde_json::to_vec(&body).map_err(|error| internal(error.to_string()))?;
+    Ok((signature, body))
 }
 
 /// 口座の現在世代のAgent鍵でdigestへ署名する（`v`は公開鍵から復元する）。

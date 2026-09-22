@@ -537,7 +537,11 @@ fn trigger_orders_are_dispatched_with_the_position_tpsl_action() {
     assert_eq!(swept.expect("sweep").dispatched, 1);
     let captured = captured
         .into_iter()
-        .find(|call| call.url.contains("/exchange"))
+        .find(|call| {
+            call.url.contains("/exchange")
+                && serde_json::from_slice::<serde_json::Value>(&call.body)
+                    .is_ok_and(|body| body["action"]["type"] == "order")
+        })
         .expect("exchange outcall");
 
     let body: serde_json::Value = serde_json::from_slice(&captured.body).expect("json body");

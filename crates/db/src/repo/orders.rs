@@ -36,6 +36,9 @@ pub struct NewOrder {
     pub price: Option<String>,
     pub quantity: String,
     pub reduce_only: bool,
+    pub effective_leverage: u32,
+    pub slippage_tolerance_bps: Option<u32>,
+    pub expires_after: Option<u64>,
     /// SL/TPトリガ。`None`は通常注文。
     pub trigger: Option<NewTrigger>,
 }
@@ -64,14 +67,25 @@ pub fn insert_pending_order(
         }
         None => ic_sqlite_vfs::db::Value::Null,
     };
+    let slippage = match order.slippage_tolerance_bps {
+        Some(value) => ic_sqlite_vfs::db::Value::Integer(i64::from(value)),
+        None => ic_sqlite_vfs::db::Value::Null,
+    };
+    let expires_after = match order.expires_after {
+        Some(value) => {
+            ic_sqlite_vfs::db::Value::Integer(i64::try_from(value).map_err(|_| Error::Overflow)?)
+        }
+        None => ic_sqlite_vfs::db::Value::Null,
+    };
     connection
         .execute(
             "INSERT INTO orders
                (order_id, user_id, account_id, client_request_id, cloid, market, asset_index,
                 side, kind, price, quantity, reduce_only, trigger_kind, trigger_price,
-                trigger_is_market, state, filled_quantity, cancel_requested, created_at, updated_at)
+                trigger_is_market, effective_leverage, slippage_tolerance_bps, expires_after,
+                state, filled_quantity, cancel_requested, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     '0', 0, ?17, ?17)",
+                     ?17, ?18, 'pending', '0', 0, ?19, ?19)",
             params![
                 order.order_id.as_slice(),
                 order.user_id.as_slice(),
@@ -88,7 +102,9 @@ pub fn insert_pending_order(
                 trigger_kind,
                 trigger_price,
                 trigger_is_market,
-                order_state_str(OrderState::Pending),
+                order.effective_leverage as i64,
+                slippage,
+                expires_after,
                 now as i64
             ],
         )
@@ -257,7 +273,9 @@ pub fn list_orders(
         .query_all(
             "SELECT rowid, order_id, cloid, market, asset_index, side, kind, price, quantity,
                     filled_quantity, reduce_only, state, cancel_requested, hl_oid, created_at, updated_at,
-                    dispatch_state, trigger_kind, trigger_price, trigger_is_market
+                    dispatch_state, trigger_kind, trigger_price, trigger_is_market,
+                    preflight_state, effective_leverage, slippage_tolerance_bps, expires_after,
+                    last_error
                FROM orders
               WHERE user_id = ?1 AND (?2 IS NULL OR rowid < ?2)
               ORDER BY rowid DESC
@@ -292,6 +310,11 @@ pub fn list_orders(
                     row.get::<Option<String>>(17)?,
                     row.get::<Option<String>>(18)?,
                     row.get::<Option<i64>>(19)?,
+                    row.get::<String>(20)?,
+                    row.get::<i64>(21)?,
+                    row.get::<Option<i64>>(22)?,
+                    row.get::<Option<i64>>(23)?,
+                    row.get::<Option<String>>(24)?,
                 ))
             },
         )
@@ -303,6 +326,8 @@ pub fn list_orders(
                 order_state_from_str(&row.11).ok_or(Error::Invariant("unknown order state"))?;
             let dispatch_state = crate::states::action_state_from_str(&row.16)
                 .ok_or(Error::Invariant("unknown dispatch state"))?;
+            let preflight_state = crate::states::action_state_from_str(&row.20)
+                .ok_or(Error::Invariant("unknown preflight state"))?;
             Ok((
                 row.0,
                 OrderSummary {
@@ -318,6 +343,22 @@ pub fn list_orders(
                     reduce_only: row.10 != 0,
                     state,
                     dispatch_state,
+                    preflight_state,
+                    effective_leverage: u32::try_from(row.21)
+                        .map_err(|_| Error::Invariant("bad leverage"))?,
+                    effective_slippage_bps: row
+                        .22
+                        .map(|value| {
+                            u32::try_from(value).map_err(|_| Error::Invariant("bad slippage"))
+                        })
+                        .transpose()?,
+                    expires_after: row
+                        .23
+                        .map(|value| {
+                            u64::try_from(value).map_err(|_| Error::Invariant("bad expiry"))
+                        })
+                        .transpose()?,
+                    last_error: row.24,
                     cancel_requested: row.12 != 0,
                     hl_oid: row
                         .13
@@ -389,6 +430,7 @@ pub fn order_owner(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignableOrder {
     pub account_id: [u8; 32],
+    pub market: String,
     pub asset_index: u32,
     pub is_buy: bool,
     pub price: Option<String>,
@@ -398,6 +440,11 @@ pub struct SignableOrder {
     pub reduce_only: bool,
     pub cloid: [u8; 16],
     pub created_at: u64,
+    pub effective_leverage: u32,
+    pub expires_after: Option<u64>,
+    pub preflight_state: api_types::fund::ActionState,
+    pub preflight_nonce: u64,
+    pub order_nonce: u64,
     /// SL/TPトリガ（`None`は通常注文）。
     pub trigger: Option<OrderTrigger>,
 }
@@ -411,11 +458,18 @@ pub struct OrderTrigger {
     pub is_market: bool,
 }
 
-pub fn queued_orders(connection: &Connection, limit: u32) -> Result<Vec<[u8; 32]>, Error> {
+pub fn queued_orders(
+    connection: &Connection,
+    now: u64,
+    limit: u32,
+) -> Result<Vec<[u8; 32]>, Error> {
     let rows = connection
         .query_all(
-            "SELECT order_id FROM orders WHERE dispatch_state = 'queued' ORDER BY rowid LIMIT ?1",
-            params![limit as i64],
+            "SELECT order_id FROM orders
+              WHERE (dispatch_state = 'queued' AND (next_check_at IS NULL OR next_check_at <= ?1))
+                 OR (dispatch_state = 'signing' AND lease_until < ?1)
+              ORDER BY created_at LIMIT ?2",
+            params![now as i64, limit as i64],
             |row| row.get::<Vec<u8>>(0),
         )
         .map_err(sql)?;
@@ -432,15 +486,133 @@ pub fn queued_orders(connection: &Connection, limit: u32) -> Result<Vec<[u8; 32]
 pub fn claim_for_dispatch(
     connection: &mut UpdateConnection<'_>,
     order_id: &[u8; 32],
-) -> Result<bool, Error> {
+    now: u64,
+    lease_ms: u64,
+) -> Result<Option<u64>, Error> {
+    let lease_until = now.saturating_add(lease_ms);
     connection
         .execute(
-            "UPDATE orders SET dispatch_state = 'signing' WHERE order_id = ?1 AND dispatch_state = 'queued'",
-            params![order_id.as_slice()],
+            "UPDATE orders
+                SET dispatch_state = 'signing', worker_epoch = worker_epoch + 1,
+                    lease_until = ?2, attempt = attempt + 1, last_error = NULL,
+                    updated_at = ?3
+              WHERE order_id = ?1
+                AND ((dispatch_state = 'queued' AND (next_check_at IS NULL OR next_check_at <= ?3))
+                  OR (dispatch_state = 'signing' AND lease_until < ?3))",
+            params![order_id.as_slice(), lease_until as i64, now as i64],
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
-    Ok(changed > 0)
+    if changed == 0 {
+        return Ok(None);
+    }
+    connection
+        .query_scalar::<i64>(
+            "SELECT worker_epoch FROM orders WHERE order_id = ?1",
+            params![order_id.as_slice()],
+        )
+        .map_err(sql)
+        .and_then(|epoch| u64::try_from(epoch).map_err(|_| Error::Invariant("bad epoch")))
+        .map(Some)
+}
+
+/// POST前の失敗。送信していないことを保証できるため、再試行可能に戻す。
+pub fn retry_before_dispatch(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    error: &str,
+    next_check_at: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders
+                SET dispatch_state = 'queued', lease_until = NULL, next_check_at = ?3,
+                    last_error = ?4, updated_at = ?5
+              WHERE order_id = ?1 AND dispatch_state = 'signing' AND worker_epoch = ?2",
+            params![
+                order_id.as_slice(),
+                worker_epoch as i64,
+                next_check_at as i64,
+                error,
+                now as i64
+            ],
+        )
+        .map_err(sql)?;
+    let changed = crate::cas::changes(connection)?;
+    crate::cas::ensure_changed(changed, "claimed signing epoch", "claim lost")
+}
+
+/// 外部POST直前に、claimと受付時の安全条件がまだ有効か検証する。
+pub fn dispatch_blocker(
+    connection: &Connection,
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    now: u64,
+) -> Result<Option<&'static str>, Error> {
+    let row = connection
+        .query_optional(
+            "SELECT state, dispatch_state, worker_epoch, cancel_requested, expires_after,
+                    reduce_only,
+                    EXISTS(
+                        SELECT 1 FROM risk_reservations r
+                         WHERE r.account_id = orders.account_id
+                           AND r.client_request_id = orders.client_request_id
+                           AND r.state = 'held')
+               FROM orders WHERE order_id = ?1",
+            params![order_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<i64>(2)?,
+                    row.get::<i64>(3)?,
+                    row.get::<Option<i64>>(4)?,
+                    row.get::<i64>(5)?,
+                    row.get::<i64>(6)?,
+                ))
+            },
+        )
+        .map_err(sql)?
+        .ok_or(Error::NotFound)?;
+    if row.0 != "pending" || row.1 != "signing" || row.2 != worker_epoch as i64 {
+        return Ok(Some("dispatch claim is no longer current"));
+    }
+    if row.3 != 0 {
+        return Ok(Some("order was cancelled before dispatch"));
+    }
+    if row.4.is_some_and(|expiry| expiry <= now as i64) {
+        return Ok(Some("order expired before dispatch"));
+    }
+    if row.5 == 0 && row.6 == 0 {
+        return Ok(Some("risk reservation is no longer held"));
+    }
+    Ok(None)
+}
+
+pub fn abort_before_dispatch(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    reason: &str,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders
+                SET state = 'rejected', dispatch_state = 'aborted', lease_until = NULL,
+                    last_error = ?3, updated_at = ?4
+              WHERE order_id = ?1 AND worker_epoch = ?2 AND dispatch_state = 'signing'",
+            params![order_id.as_slice(), worker_epoch as i64, reason, now as i64],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "claimed signing epoch",
+        "claim lost",
+    )?;
+    release_risk_for_order(connection, order_id, now)
 }
 
 /// 署名とpayloadを保存して`dispatching`へ（送信前に確定させる）。
@@ -449,13 +621,21 @@ pub fn mark_dispatching(
     order_id: &[u8; 32],
     wire_payload: &[u8],
     signature: &[u8],
+    worker_epoch: u64,
     now: u64,
 ) -> Result<(), Error> {
     connection
         .execute(
-            "UPDATE orders SET dispatch_state = 'dispatching', wire_payload = ?2, signature = ?3, updated_at = ?4
-              WHERE order_id = ?1 AND dispatch_state = 'signing'",
-            params![order_id.as_slice(), wire_payload, signature, now as i64],
+            "UPDATE orders SET dispatch_state = 'dispatching', wire_payload = ?2, signature = ?3,
+                    updated_at = ?5
+              WHERE order_id = ?1 AND dispatch_state = 'signing' AND worker_epoch = ?4",
+            params![
+                order_id.as_slice(),
+                wire_payload,
+                signature,
+                worker_epoch as i64,
+                now as i64
+            ],
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
@@ -473,6 +653,7 @@ pub fn mark_venue_accepted(
     connection: &mut UpdateConnection<'_>,
     order_id: &[u8; 32],
     hl_oid: Option<u64>,
+    filled: bool,
     now: u64,
 ) -> Result<(), Error> {
     let oid = match hl_oid {
@@ -481,17 +662,22 @@ pub fn mark_venue_accepted(
         }
         None => ic_sqlite_vfs::db::Value::Null,
     };
+    let state = if filled { "filled" } else { "open" };
     connection
         .execute(
-            "UPDATE orders SET state = 'open', dispatch_state = 'reconciled', hl_oid = COALESCE(?2, hl_oid), updated_at = ?3
+            "UPDATE orders SET state = ?3, dispatch_state = 'reconciled', hl_oid = COALESCE(?2, hl_oid), updated_at = ?4
               WHERE order_id = ?1 AND dispatch_state = 'dispatching'",
-            params![order_id.as_slice(), oid, now as i64],
+            params![order_id.as_slice(), oid, state, now as i64],
         )
         .map_err(sql)
         .and_then(|_| {
             let changed = crate::cas::changes(connection)?;
             crate::cas::ensure_changed(changed, "dispatching", "not dispatching")
-        })
+        })?;
+    if filled {
+        release_risk_for_order(connection, order_id, now)?;
+    }
+    Ok(())
 }
 
 /// 取引所が拒否した（`rejected`へ）。
@@ -760,25 +946,33 @@ pub fn signable(
 ) -> Result<Option<SignableOrder>, Error> {
     let raw = connection
         .query_optional(
-            "SELECT account_id, asset_index, side, price, quantity, kind, client_request_id,
-                    reduce_only, cloid, created_at, trigger_kind, trigger_price, trigger_is_market
+            "SELECT account_id, market, asset_index, side, price, quantity, kind, client_request_id,
+                    reduce_only, cloid, created_at, trigger_kind, trigger_price, trigger_is_market,
+                    effective_leverage, expires_after, preflight_state,
+                    preflight_nonce, order_nonce
                FROM orders WHERE order_id = ?1",
             params![order_id.as_slice()],
             |row| {
                 Ok((
                     row.get::<Vec<u8>>(0)?,
-                    row.get::<i64>(1)?,
-                    row.get::<String>(2)?,
-                    row.get::<Option<String>>(3)?,
-                    row.get::<String>(4)?,
+                    row.get::<String>(1)?,
+                    row.get::<i64>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<Option<String>>(4)?,
                     row.get::<String>(5)?,
-                    row.get::<Vec<u8>>(6)?,
-                    row.get::<i64>(7)?,
-                    row.get::<Vec<u8>>(8)?,
-                    row.get::<i64>(9)?,
-                    row.get::<Option<String>>(10)?,
+                    row.get::<String>(6)?,
+                    row.get::<Vec<u8>>(7)?,
+                    row.get::<i64>(8)?,
+                    row.get::<Vec<u8>>(9)?,
+                    row.get::<i64>(10)?,
                     row.get::<Option<String>>(11)?,
-                    row.get::<Option<i64>>(12)?,
+                    row.get::<Option<String>>(12)?,
+                    row.get::<Option<i64>>(13)?,
+                    row.get::<i64>(14)?,
+                    row.get::<Option<i64>>(15)?,
+                    row.get::<String>(16)?,
+                    row.get::<Option<i64>>(17)?,
+                    row.get::<Option<i64>>(18)?,
                 ))
             },
         )
@@ -789,19 +983,38 @@ pub fn signable(
                 .0
                 .try_into()
                 .map_err(|_| Error::Invariant("expected a 32-byte account id"))?,
-            asset_index: u32::try_from(row.1).map_err(|_| Error::Invariant("bad index"))?,
-            is_buy: row.2 == "buy",
-            price: row.3,
-            quantity: row.4,
-            kind: row.5,
-            client_request_id: row.6,
-            reduce_only: row.7 != 0,
+            market: row.1,
+            asset_index: u32::try_from(row.2).map_err(|_| Error::Invariant("bad index"))?,
+            is_buy: row.3 == "buy",
+            price: row.4,
+            quantity: row.5,
+            kind: row.6,
+            client_request_id: row.7,
+            reduce_only: row.8 != 0,
             cloid: row
-                .8
+                .9
                 .try_into()
                 .map_err(|_| Error::Invariant("expected a 16-byte cloid"))?,
-            created_at: u64::try_from(row.9).map_err(|_| Error::Invariant("bad time"))?,
-            trigger: match trigger_from_columns(row.10, row.11, row.12)? {
+            created_at: u64::try_from(row.10).map_err(|_| Error::Invariant("bad time"))?,
+            effective_leverage: u32::try_from(row.14)
+                .map_err(|_| Error::Invariant("bad leverage"))?,
+            expires_after: row
+                .15
+                .map(|value| u64::try_from(value).map_err(|_| Error::Invariant("bad expiry")))
+                .transpose()?,
+            preflight_state: crate::states::action_state_from_str(&row.16)
+                .ok_or(Error::Invariant("unknown preflight state"))?,
+            preflight_nonce: u64::try_from(
+                row.17
+                    .ok_or(Error::Invariant("preflight nonce not allocated"))?,
+            )
+            .map_err(|_| Error::Invariant("bad nonce"))?,
+            order_nonce: u64::try_from(
+                row.18
+                    .ok_or(Error::Invariant("order nonce not allocated"))?,
+            )
+            .map_err(|_| Error::Invariant("bad nonce"))?,
+            trigger: match trigger_from_columns(row.11, row.12, row.13)? {
                 Some(trigger) => Some(OrderTrigger {
                     kind: trigger_kind_str(trigger.kind).to_string(),
                     price: trigger.trigger_price,
@@ -812,6 +1025,208 @@ pub fn signable(
         })
     })
     .transpose()
+}
+
+/// 同一Agentのaction nonceを一度だけ確保する。lease再取得時も同じnonceを使う。
+pub fn ensure_action_nonces(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    now: u64,
+) -> Result<(), Error> {
+    let existing = connection
+        .query_optional(
+            "SELECT preflight_nonce, order_nonce FROM orders WHERE order_id = ?1",
+            params![order_id.as_slice()],
+            |row| Ok((row.get::<Option<i64>>(0)?, row.get::<Option<i64>>(1)?)),
+        )
+        .map_err(sql)?
+        .ok_or(Error::NotFound)?;
+    if existing.0.is_some() && existing.1.is_some() {
+        return Ok(());
+    }
+    if existing.0.is_some() || existing.1.is_some() {
+        return Err(Error::Invariant("partially allocated action nonces"));
+    }
+    let agent = connection
+        .query_optional_scalar::<Vec<u8>>(
+            "SELECT agent_address FROM agent_generations
+              WHERE account_id = (SELECT account_id FROM orders WHERE order_id = ?1)
+                AND state = 'active'
+              ORDER BY generation DESC LIMIT 1",
+            params![order_id.as_slice()],
+        )
+        .map_err(sql)?
+        .ok_or(Error::NotFound)?;
+    let last = connection
+        .query_optional_scalar::<i64>(
+            "SELECT last_nonce FROM nonces WHERE agent_address = ?1",
+            params![agent.as_slice()],
+        )
+        .map_err(sql)?;
+    let first = last
+        .unwrap_or(0)
+        .saturating_add(1)
+        .max(i64::try_from(now).map_err(|_| Error::Overflow)?);
+    let second = first.checked_add(1).ok_or(Error::Overflow)?;
+    connection
+        .execute(
+            "INSERT INTO nonces (agent_address, last_nonce) VALUES (?1, ?2)
+             ON CONFLICT(agent_address) DO UPDATE SET last_nonce = excluded.last_nonce",
+            params![agent.as_slice(), second],
+        )
+        .map_err(sql)?;
+    connection
+        .execute(
+            "UPDATE orders SET preflight_nonce = ?2, order_nonce = ?3 WHERE order_id = ?1",
+            params![order_id.as_slice(), first, second],
+        )
+        .map_err(sql)
+}
+
+/// leverage更新を送る直前に署名済みpayloadを永続化する。
+pub fn mark_preflight_dispatching(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    wire_payload: &[u8],
+    signature: &[u8],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders
+                SET preflight_state = 'dispatching', preflight_wire_payload = ?3,
+                    preflight_signature = ?4, updated_at = ?5
+              WHERE order_id = ?1 AND worker_epoch = ?2 AND dispatch_state = 'signing'
+                AND preflight_state = 'queued'",
+            params![
+                order_id.as_slice(),
+                worker_epoch as i64,
+                wire_payload,
+                signature,
+                now as i64
+            ],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "queued preflight",
+        "claim lost",
+    )
+}
+
+pub fn mark_preflight_applied(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders SET preflight_state = 'reconciled', updated_at = ?3
+              WHERE order_id = ?1 AND worker_epoch = ?2 AND dispatch_state = 'signing'
+                AND preflight_state = 'dispatching'",
+            params![order_id.as_slice(), worker_epoch as i64, now as i64],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "dispatching preflight",
+        "claim lost",
+    )
+}
+
+/// leverage更新が拒否または不明になった場合は注文本体を送らず停止する。
+pub fn stop_after_preflight(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    rejected: bool,
+    error: &str,
+    now: u64,
+) -> Result<(), Error> {
+    let preflight = if rejected { "reconciled" } else { "unknown" };
+    let order_state = if rejected { "rejected" } else { "unknown" };
+    let dispatch = if rejected { "aborted" } else { "unknown" };
+    connection
+        .execute(
+            "UPDATE orders
+                SET preflight_state = ?3, state = ?4, dispatch_state = ?5,
+                    lease_until = NULL, last_error = ?6, updated_at = ?7
+              WHERE order_id = ?1 AND worker_epoch = ?2 AND dispatch_state = 'signing'
+                AND preflight_state = 'dispatching'",
+            params![
+                order_id.as_slice(),
+                worker_epoch as i64,
+                preflight,
+                order_state,
+                dispatch,
+                error,
+                now as i64
+            ],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "dispatching preflight",
+        "claim lost",
+    )?;
+    if rejected {
+        release_risk_for_order(connection, order_id, now)?;
+    }
+    Ok(())
+}
+
+/// controllerが取引所で確認した結果に基づき、不明preflightを解決する。
+pub fn resolve_unknown_preflight(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    applied: bool,
+    actor: &[u8],
+    now: u64,
+) -> Result<(), Error> {
+    let (state, dispatch, outcome, message) = if applied {
+        (
+            "pending",
+            "queued",
+            "applied",
+            "preflight manually confirmed",
+        )
+    } else {
+        (
+            "rejected",
+            "aborted",
+            "rejected",
+            "preflight manually rejected",
+        )
+    };
+    connection
+        .execute(
+            "UPDATE orders
+                SET preflight_state = 'reconciled', state = ?2, dispatch_state = ?3,
+                    lease_until = NULL, next_check_at = NULL, last_error = ?4,
+                    updated_at = ?5
+              WHERE order_id = ?1 AND preflight_state = 'unknown'
+                AND dispatch_state = 'unknown'",
+            params![order_id.as_slice(), state, dispatch, message, now as i64],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "unknown preflight",
+        "not unresolved",
+    )?;
+    connection
+        .execute(
+            "INSERT INTO order_resolution_events (order_id, actor, outcome, at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![order_id.as_slice(), actor, outcome, now as i64],
+        )
+        .map_err(sql)?;
+    if !applied {
+        release_risk_for_order(connection, order_id, now)?;
+    }
+    Ok(())
 }
 
 /// 取引所へ状態を問い合わせる注文のoid（未終端でoidが分かっているもの）。
@@ -838,14 +1253,20 @@ pub fn oids_awaiting_status(
 }
 
 /// 取消送信の対象（取消要求済みで未送信、`hl_oid`既知の未終端注文）。
-pub fn cancel_candidates(connection: &Connection, limit: u32) -> Result<Vec<[u8; 32]>, Error> {
+pub fn cancel_candidates(
+    connection: &Connection,
+    now: u64,
+    limit: u32,
+) -> Result<Vec<[u8; 32]>, Error> {
     let rows = connection
         .query_all(
             "SELECT order_id FROM orders
-              WHERE cancel_requested = 1 AND cancel_dispatch_state IS NULL
+              WHERE cancel_requested = 1
+                AND (cancel_dispatch_state IS NULL
+                  OR (cancel_dispatch_state = 'signing' AND cancel_lease_until < ?1))
                 AND hl_oid IS NOT NULL AND state IN ('open', 'partially_filled')
-              ORDER BY rowid LIMIT ?1",
-            params![limit as i64],
+              ORDER BY updated_at LIMIT ?2",
+            params![now as i64, limit as i64],
             |row| row.get::<Vec<u8>>(0),
         )
         .map_err(sql)?;
@@ -862,34 +1283,153 @@ pub fn cancel_candidates(connection: &Connection, limit: u32) -> Result<Vec<[u8;
 pub fn claim_cancel(
     connection: &mut UpdateConnection<'_>,
     order_id: &[u8; 32],
-) -> Result<bool, Error> {
+    now: u64,
+    lease_ms: u64,
+) -> Result<Option<(u64, u64)>, Error> {
+    let lease_until = now.saturating_add(lease_ms);
     connection
         .execute(
-            "UPDATE orders SET cancel_dispatch_state = 'signing'
-              WHERE order_id = ?1 AND cancel_dispatch_state IS NULL AND cancel_requested = 1",
-            params![order_id.as_slice()],
+            "UPDATE orders
+                SET cancel_dispatch_state = 'signing',
+                    cancel_worker_epoch = cancel_worker_epoch + 1,
+                    cancel_lease_until = ?2, cancel_attempt = cancel_attempt + 1,
+                    updated_at = ?3
+              WHERE order_id = ?1 AND cancel_requested = 1
+                AND (cancel_dispatch_state IS NULL
+                  OR (cancel_dispatch_state = 'signing' AND cancel_lease_until < ?3))",
+            params![order_id.as_slice(), lease_until as i64, now as i64],
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
-    Ok(changed > 0)
+    if changed == 0 {
+        return Ok(None);
+    }
+    let row = connection
+        .query_optional(
+            "SELECT cancel_worker_epoch, cancel_nonce,
+                    (SELECT agent_address FROM agent_generations
+                      WHERE account_id = orders.account_id AND state = 'active'
+                      ORDER BY generation DESC LIMIT 1)
+               FROM orders WHERE order_id = ?1",
+            params![order_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<i64>(0)?,
+                    row.get::<Option<i64>>(1)?,
+                    row.get::<Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .map_err(sql)?
+        .ok_or(Error::NotFound)?;
+    let nonce = match row.1 {
+        Some(value) => value,
+        None => {
+            let last = connection
+                .query_optional_scalar::<i64>(
+                    "SELECT last_nonce FROM nonces WHERE agent_address = ?1",
+                    params![row.2.as_slice()],
+                )
+                .map_err(sql)?;
+            let next = last
+                .unwrap_or(0)
+                .saturating_add(1)
+                .max(i64::try_from(now).map_err(|_| Error::Overflow)?);
+            connection
+                .execute(
+                    "INSERT INTO nonces (agent_address, last_nonce) VALUES (?1, ?2)
+                     ON CONFLICT(agent_address) DO UPDATE SET last_nonce = excluded.last_nonce",
+                    params![row.2.as_slice(), next],
+                )
+                .map_err(sql)?;
+            connection
+                .execute(
+                    "UPDATE orders SET cancel_nonce = ?2 WHERE order_id = ?1",
+                    params![order_id.as_slice(), next],
+                )
+                .map_err(sql)?;
+            next
+        }
+    };
+    Ok(Some((
+        u64::try_from(row.0).map_err(|_| Error::Invariant("bad cancel epoch"))?,
+        u64::try_from(nonce).map_err(|_| Error::Invariant("bad cancel nonce"))?,
+    )))
+}
+
+pub fn retry_cancel_before_dispatch(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    error: &str,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders SET cancel_dispatch_state = NULL, cancel_lease_until = NULL,
+                    last_error = ?3, updated_at = ?4
+              WHERE order_id = ?1 AND cancel_worker_epoch = ?2
+                AND cancel_dispatch_state = 'signing'",
+            params![order_id.as_slice(), worker_epoch as i64, error, now as i64],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "claimed cancel epoch",
+        "claim lost",
+    )
+}
+
+/// 取消payloadをPOST前に永続化する。以後は結果不明でも自動再送しない。
+pub fn mark_cancel_dispatching(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    wire_payload: &[u8],
+    signature: &[u8],
+    worker_epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders
+                SET cancel_dispatch_state = 'dispatching', cancel_wire_payload = ?2,
+                    cancel_signature = ?3, updated_at = ?5
+              WHERE order_id = ?1 AND cancel_dispatch_state = 'signing'
+                AND cancel_worker_epoch = ?4",
+            params![
+                order_id.as_slice(),
+                wire_payload,
+                signature,
+                worker_epoch as i64,
+                now as i64
+            ],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "claimed cancel epoch",
+        "claim lost",
+    )
 }
 
 /// 取消を送信済みにする（受理時は`cancelled`へ倒す。HLの最終状態は`orderStatus`照合で確認）。
 pub fn mark_cancel_sent(
     connection: &mut UpdateConnection<'_>,
     order_id: &[u8; 32],
-    wire_payload: &[u8],
+    worker_epoch: u64,
     now: u64,
 ) -> Result<(), Error> {
     connection
         .execute(
-            "UPDATE orders SET cancel_dispatch_state = 'sent', wire_payload = ?2, state = 'cancelled', updated_at = ?3
-              WHERE order_id = ?1 AND cancel_dispatch_state = 'signing'",
-            params![order_id.as_slice(), wire_payload, now as i64],
+            "UPDATE orders SET cancel_dispatch_state = 'sent', cancel_lease_until = NULL,
+                    state = 'cancelled', updated_at = ?3
+              WHERE order_id = ?1 AND cancel_dispatch_state = 'dispatching'
+                AND cancel_worker_epoch = ?2",
+            params![order_id.as_slice(), worker_epoch as i64, now as i64],
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
-    crate::cas::ensure_changed(changed, "signing", "not claimed")?;
+    crate::cas::ensure_changed(changed, "dispatching", "not claimed")?;
     // 取消済みとして扱う注文の予約は解放する（照合の結果で状態は修正され得る）。
     release_risk_for_order(connection, order_id, now)
 }
@@ -898,17 +1438,58 @@ pub fn mark_cancel_sent(
 pub fn mark_cancel_unknown(
     connection: &mut UpdateConnection<'_>,
     order_id: &[u8; 32],
+    worker_epoch: u64,
     now: u64,
 ) -> Result<(), Error> {
     connection
         .execute(
-            "UPDATE orders SET cancel_dispatch_state = 'unknown', updated_at = ?2
-              WHERE order_id = ?1 AND cancel_dispatch_state = 'signing'",
-            params![order_id.as_slice(), now as i64],
+            "UPDATE orders SET cancel_dispatch_state = 'unknown', cancel_lease_until = NULL,
+                    updated_at = ?3
+              WHERE order_id = ?1 AND cancel_dispatch_state = 'dispatching'
+                AND cancel_worker_epoch = ?2",
+            params![order_id.as_slice(), worker_epoch as i64, now as i64],
         )
         .map_err(sql)?;
     let changed = crate::cas::changes(connection)?;
-    crate::cas::ensure_changed(changed, "signing", "not claimed")
+    crate::cas::ensure_changed(changed, "dispatching", "not claimed")
+}
+
+/// POST待機中にupgrade/callback消失が起きた処理を、再送禁止の`unknown`へ倒す。
+pub fn recover_expired_dispatches(
+    connection: &mut UpdateConnection<'_>,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders
+                SET preflight_state = 'unknown', state = 'unknown', dispatch_state = 'unknown',
+                    lease_until = NULL, last_error = 'preflight callback was not observed',
+                    updated_at = ?1
+              WHERE dispatch_state = 'signing' AND preflight_state = 'dispatching'
+                AND (lease_until IS NULL OR lease_until < ?1)",
+            params![now as i64],
+        )
+        .map_err(sql)?;
+    connection
+        .execute(
+            "UPDATE orders
+                SET state = 'unknown', dispatch_state = 'unknown', lease_until = NULL,
+                    last_error = 'order callback was not observed', updated_at = ?1
+              WHERE dispatch_state = 'dispatching'
+                AND (lease_until IS NULL OR lease_until < ?1)",
+            params![now as i64],
+        )
+        .map_err(sql)?;
+    connection
+        .execute(
+            "UPDATE orders
+                SET cancel_dispatch_state = 'unknown', cancel_lease_until = NULL,
+                    last_error = 'cancel callback was not observed', updated_at = ?1
+              WHERE cancel_dispatch_state = 'dispatching'
+                AND (cancel_lease_until IS NULL OR cancel_lease_until < ?1)",
+            params![now as i64],
+        )
+        .map_err(sql)
 }
 
 /// 取消に必要な注文情報（口座・銘柄添字・取引所oid）。
@@ -989,4 +1570,39 @@ pub fn latest_fill_at(connection: &Connection, user_id: &[u8; 32]) -> Result<Opt
             .map_err(|_| Error::Invariant("negative timestamp")),
         None => Ok(None),
     }
+}
+
+/// 解決済み注文の機密payloadをredactし、期限を過ぎた詳細約定を少量ずつ削除する。
+pub fn prune_terminal_history(
+    connection: &mut UpdateConnection<'_>,
+    redact_before: u64,
+    delete_before: u64,
+    limit: u32,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders
+                SET wire_payload = NULL, signature = NULL,
+                    preflight_wire_payload = NULL, preflight_signature = NULL,
+                    cancel_wire_payload = NULL, cancel_signature = NULL
+              WHERE rowid IN (
+                    SELECT rowid FROM orders
+                     WHERE updated_at < ?1
+                       AND state IN ('filled', 'cancelled', 'rejected')
+                       AND dispatch_state IN ('reconciled', 'aborted')
+                       AND (cancel_dispatch_state IS NULL OR cancel_dispatch_state != 'unknown')
+                       AND (wire_payload IS NOT NULL OR signature IS NOT NULL
+                         OR preflight_wire_payload IS NOT NULL OR preflight_signature IS NOT NULL
+                         OR cancel_wire_payload IS NOT NULL OR cancel_signature IS NOT NULL)
+                     ORDER BY updated_at LIMIT ?2)",
+            params![redact_before as i64, limit as i64],
+        )
+        .map_err(sql)?;
+    connection
+        .execute(
+            "DELETE FROM fills WHERE fill_id IN (
+                SELECT fill_id FROM fills WHERE filled_at < ?1 ORDER BY filled_at LIMIT ?2)",
+            params![delete_before as i64, limit as i64],
+        )
+        .map_err(sql)
 }

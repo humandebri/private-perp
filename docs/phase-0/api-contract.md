@@ -1,7 +1,7 @@
 # API契約：認証・注文・資金・変更予約
 
 - 根拠：`Implementation.md` 2.3、5章、7章、11章、14.3、`Plan.md` 16.1〜16.5
-- 状態：設計契約。名称は**設計上の名前**であり、デプロイ済みCandidではない。実装はPhase 1以降
+- 状態：設計契約。実装から抽出したCandidは`candid/`に固定する。testnet・mainnetのデプロイ契約は未確定
 
 ## 1. 適用範囲と共通規約
 
@@ -274,7 +274,10 @@ type OrderSummary = record {
   order_id : Blob32; cloid : Cloid; market : text; asset_index : nat32;
   is_buy : bool; kind : text; price : opt text; quantity : text;
   filled_quantity : text; reduce_only : bool; state : OrderState;
-  dispatch_state : ActionState; cancel_requested : bool; hl_oid : opt nat64;
+  dispatch_state : ActionState; preflight_state : ActionState;
+  effective_leverage : nat32; effective_slippage_bps : opt nat32;
+  expires_after : opt Timestamp; last_error : opt text;
+  cancel_requested : bool; hl_oid : opt nat64;
   trigger : opt record { kind : variant { stop_loss; take_profit }; trigger_price : text; is_market : bool };
   created_at : Timestamp; updated_at : Timestamp;
 };
@@ -295,13 +298,17 @@ type OrderSummary = record {
 | 17e | `sweep` | update（controllerのみ） | なし（維持運用。冪等） |
 | 17f | `set_venue_endpoints` | update（controllerのみ） | なし（設定。冪等） |
 | 17g | `set_ecdsa_key_id` | update（controllerのみ） | なし（設定。冪等） |
-| 17h | `get_environment` | query | 公開（診断用。秘密を含まない） | なし |
+| 17h | `get_environment` | query（公開・診断用） | なし |
+| 17i | `resolve_unknown_order_preflight` | update（controllerのみ） | `order_id` |
 
 - `close_position`は`(session, client_request_id, market, ratio_bps, limit_price)`を取る。`limit_price`はスリッページ上限で、省略時は観測した建玉から導出する。
 - `close_all`は`(session, client_request_id)`を取り、建玉ごとに`client_request_id`から導出した受付IDで反対売買を送る。
 - `list_orders`は`Paged<OrderSummary>`（`dispatch_state`・`trigger`を含む）、`list_fills`は
   `Paged<FillView>`を返す。`FillView`は約定時刻・価格・数量・手数料・cloid・`hl_oid`を持つ。
 - 受付はHLの受理でも約定でもない。`submit_order`の応答は`queued`のみを返し、HL状態は`get_account_snapshot`または`list_orders`の照合結果で更新する（`Implementation.md` 6.3）。
+- `account_id`はvaultから導出した本人の口座と一致しなければ拒否する。新規リスクは口座の最終観測が10秒以内の場合だけ受け付ける。
+- `leverage`は省略時3、許容範囲1〜5。注文前に同じ永続nonceで`updateLeverage`を送信し、結果不明なら注文を送らず`unknown`で停止する。
+- `slippage_tolerance_bps`はmarket IOCだけで、省略時50、許容範囲1〜10,000。limit GTCで指定した場合は拒否する。`expires_after`は受付時と各POST直前に検査し、署名対象とwire payloadにも含める。
 - 封筒必須のメソッドの要求・応答は6節の`HpkeRequest`・`HpkeResponse`で包む。平文はCandidで符号化した上記の引数（`session`とメソッド固有の引数）と応答値である。
 
 ### 3.3 送信と照合（sweep）
@@ -309,7 +316,7 @@ type OrderSummary = record {
 受付（`submit_order`・`cancel_order`・`cancel_all`・`close_position`・`close_all`）はローカル状態だけを確定し、署名・送信・照合は`sweep`が行う。本番はグローバルtimer（`ic-cdk-timers`の`set_timer_interval`）が5秒間隔で起動し（timerはアップグレードで失われるため`init`／`post_upgrade`で再armする）、停止時の手動実行は`sweep`（controllerのみ）が呼ぶ。heartbeatは使わない（メッセージが無くても毎ラウンド呼ばれ、アイドル時もコストが乗るため）。
 
 - 1回の上限：送信4件・取消4件・照合2口座・注文状態4件/口座（outcallの回数を抑える）。
-- 送信（`/exchange`）は**非replicated** POST。受理は`open`＋取引所oid、拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`とし**再送しない**（リスク予約も解放しない。解消は照合で行う）。
+- 送信（`/exchange`）は**非replicated** POST。HTTP/外側の`ok`だけでなく各statusを解釈し、受理は`open`または即時`filled`、明示拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`とし**再送しない**（リスク予約も解放しない。解消は照合またはcontrollerの確認済み操作で行う）。
 - 照合（`/info`）は**replicated** outcall＋決定論的な変換関数（`transform_info`）で行う。約定（`userFills`）は`tid`で冪等に取り込み、建玉（`clearinghouseState`）は**観測の全量**で置き換え、注文状態（`orderStatus`）はoidが分かる未終端注文だけに反映する。
 - 照合の対象は`accounts`に取引所アドレスを保存済みの有効口座で、`account_id`順のカーソルで巡回する（先頭N件固定にしない）。アドレスは本人の署名済み要求の処理中にvaultから一度だけ取得して保存する。
 - 自動sweep（timer）は本番ビルドのみで組む。試験ビルドでは明示的な`test_sweep_now`で同じ経路を駆動する（PocketICで試験が待つoutcallと取り違えないため）。

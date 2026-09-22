@@ -255,6 +255,73 @@ CREATE TABLE core_environment (
 );
 ";
 
+/// v11: 注文outboxのlease、注文契約値、空建玉を含む観測時刻、hot path index。
+const ORDER_RELIABILITY: &str = "
+CREATE TABLE account_observations (
+    account_id BLOB PRIMARY KEY NOT NULL CHECK (length(account_id) = 32),
+    observed_at INTEGER NOT NULL
+);
+
+ALTER TABLE orders ADD COLUMN worker_epoch INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN lease_until INTEGER;
+ALTER TABLE orders ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN next_check_at INTEGER;
+ALTER TABLE orders ADD COLUMN last_error TEXT;
+ALTER TABLE orders ADD COLUMN cancel_worker_epoch INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN cancel_lease_until INTEGER;
+ALTER TABLE orders ADD COLUMN cancel_attempt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN effective_leverage INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE orders ADD COLUMN slippage_tolerance_bps INTEGER;
+ALTER TABLE orders ADD COLUMN expires_after INTEGER;
+ALTER TABLE orders ADD COLUMN preflight_state TEXT NOT NULL DEFAULT 'queued';
+ALTER TABLE orders ADD COLUMN preflight_wire_payload BLOB;
+ALTER TABLE orders ADD COLUMN preflight_signature BLOB;
+ALTER TABLE orders ADD COLUMN preflight_nonce INTEGER;
+ALTER TABLE orders ADD COLUMN order_nonce INTEGER;
+ALTER TABLE orders ADD COLUMN cancel_nonce INTEGER;
+ALTER TABLE orders ADD COLUMN cancel_wire_payload BLOB;
+ALTER TABLE orders ADD COLUMN cancel_signature BLOB;
+
+CREATE INDEX orders_dispatch_queue ON orders (dispatch_state, lease_until, next_check_at, created_at);
+CREATE INDEX orders_cancel_queue ON orders (cancel_requested, cancel_dispatch_state, cancel_lease_until, updated_at);
+CREATE INDEX orders_by_user ON orders (user_id);
+CREATE INDEX orders_by_oid ON orders (account_id, hl_oid);
+CREATE INDEX fills_by_user ON fills (user_id, fill_id);
+CREATE INDEX risk_reservations_held ON risk_reservations (account_id, state);
+";
+
+/// v12: 実装で置き換え済みの旧テーブルを、安全確認後に削除する。
+/// 既存データが1件でもあればCHECK違反でmigration全体をrollbackする。
+const REMOVE_LEGACY_TABLES: &str = "
+CREATE TABLE core_legacy_cleanup_guard (
+    ok INTEGER NOT NULL CHECK (ok = 1)
+);
+INSERT INTO core_legacy_cleanup_guard (ok)
+SELECT CASE WHEN
+    (SELECT COUNT(*) FROM agents) = 0 AND
+    (SELECT COUNT(*) FROM actions) = 0 AND
+    (SELECT COUNT(*) FROM action_orders) = 0 AND
+    (SELECT COUNT(*) FROM order_events) = 0
+THEN 1 ELSE 0 END;
+DROP TABLE order_events;
+DROP TABLE action_orders;
+DROP TABLE actions;
+DROP TABLE agents;
+DROP TABLE core_legacy_cleanup_guard;
+";
+
+/// v13: controllerによる不明preflight解決の監査証跡。
+const ORDER_RESOLUTION_EVENTS: &str = "
+CREATE TABLE order_resolution_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id BLOB NOT NULL CHECK (length(order_id) = 32),
+    actor BLOB NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('applied', 'rejected')),
+    at INTEGER NOT NULL
+);
+CREATE INDEX order_resolution_events_by_order ON order_resolution_events (order_id, event_id);
+";
+
 /// 照合の巡回カーソル（有効な口座を順に巡回する）。
 const RECONCILE_CURSOR: &str = "
 CREATE TABLE reconcile_cursor (
@@ -305,5 +372,17 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 10,
         sql: ENVIRONMENT,
+    },
+    Migration {
+        version: 11,
+        sql: ORDER_RELIABILITY,
+    },
+    Migration {
+        version: 12,
+        sql: REMOVE_LEGACY_TABLES,
+    },
+    Migration {
+        version: 13,
+        sql: ORDER_RESOLUTION_EVENTS,
     },
 ];

@@ -540,6 +540,17 @@ pub const EMPTY_POSITIONS: &[u8] = br#"{"assetPositions":[]}"#;
 /// Hyperliquidの`/info`（約定なし）への既定応答。
 pub const NO_FILLS: &[u8] = b"[]";
 
+fn is_update_leverage(call: &CapturedHttpCall) -> bool {
+    serde_json::from_slice::<serde_json::Value>(&call.body)
+        .ok()
+        .and_then(|body| body.get("action")?.get("type")?.as_str().map(str::to_owned))
+        .is_some_and(|kind| kind == "updateLeverage")
+}
+
+fn leverage_accepted() -> Vec<u8> {
+    br#"{"status":"ok","response":{"type":"default"}}"#.to_vec()
+}
+
 /// HLの`/exchange`と`/info`へ、用途別の応答を返すルータ。
 ///
 /// `sweep`は1回の呼び出しで送信と照合の複数のoutcallを出すため、送信内容
@@ -556,6 +567,9 @@ pub fn venue_router(
     let status = status.to_vec();
     move |call| {
         if call.url.contains("/exchange") {
+            if is_update_leverage(call) {
+                return Ok((200, leverage_accepted()));
+            }
             return Ok((200, exchange.clone()));
         }
         let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap_or_default();
@@ -575,6 +589,9 @@ pub fn venue_router_default(
     let exchange = exchange.to_vec();
     move |call| {
         if call.url.contains("/exchange") {
+            if is_update_leverage(call) {
+                return Ok((200, leverage_accepted()));
+            }
             return Ok((200, exchange.clone()));
         }
         let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap_or_default();

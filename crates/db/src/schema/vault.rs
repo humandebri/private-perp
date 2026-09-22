@@ -274,6 +274,17 @@ CREATE TABLE vault_config (
 );
 ";
 
+/// v9: 未配線の旧鍵registryを空であることを確認して削除する。
+const REMOVE_LEGACY_KEY_REGISTRY: &str = "
+CREATE TABLE vault_legacy_cleanup_guard (
+    ok INTEGER NOT NULL CHECK (ok = 1)
+);
+INSERT INTO vault_legacy_cleanup_guard (ok)
+SELECT CASE WHEN (SELECT COUNT(*) FROM key_registry) = 0 THEN 1 ELSE 0 END;
+DROP TABLE key_registry;
+DROP TABLE vault_legacy_cleanup_guard;
+";
+
 /// `funds_vault` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -307,5 +318,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 8,
         sql: ENVIRONMENT,
+    },
+    Migration {
+        version: 9,
+        sql: REMOVE_LEGACY_KEY_REGISTRY,
     },
 ];

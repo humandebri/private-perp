@@ -33,7 +33,7 @@ for trio in "funds_vault:funds_vault:funds-vault" "trading_core:trading_core:tra
   package="${rest##*:}"
   interface="$(candid-extractor "$wasm_dir/$wasm.wasm")"
   printf '%s\n' "$interface" > "$out_dir/$canister.did"
-  echo "extract-candid: $out_dir/$canister.did を更新（$package）"
+  echo "extract-candid: $out_dir/$canister.did を更新（${package}）"
 done
 
 # 試験専用のentry pointがCandidへ漏れていないことを検査する（デプロイ成果物と同じ前提）。

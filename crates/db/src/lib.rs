@@ -29,7 +29,7 @@ pub mod tx;
 /// デプロイ済みCanisterの寿命の間、変更しない。255は同梱MemoryManager互換
 /// レイアウトが予約しているため、アプリは `0..=254` のみを使う。
 pub mod memory_id {
-    /// `trading_core` のメインDB（users, agents, orders, order_events, nonces, audit）。
+    /// `trading_core` のメインDB（users, accounts, orders, nonces）。
     pub const TRADING_CORE_MAIN: u8 = 0;
     /// `trading_core` の予約スロット（将来の独立イメージ。slot catalogに記録する）。
     pub const TRADING_CORE_ARCHIVE: u8 = 1;
@@ -227,6 +227,7 @@ mod tests {
                 "core_config",
                 "agent_generations",
                 "fills",
+                "account_observations",
             ],
         );
 

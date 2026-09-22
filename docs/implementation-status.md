@@ -1,6 +1,6 @@
 # 実装状況：UI・サーバー基盤とADR
 
-更新：2026-09-21。対象はローカル開発用の合成デモ、Phase 0の契約、Phase 1のS1〜S3（ローカルで検証できた範囲）。**testnet・mainnetは未検証**で、全Phase完了ではない。
+更新：2026-09-22。対象はローカル開発用の合成デモ、Phase 0の契約、Phase 1のS1〜S3（ローカルで検証できた範囲）。**testnet・mainnetは未検証**で、全Phase完了ではない。
 
 ## Phase 1（S1・PocketIC基盤）
 
@@ -28,7 +28,7 @@
 
 - 当時の残件だった `db` のスキーマ・Migration・複式台帳・予約・nonce・epoch CAS、`funds_vault` の認証・outbox・HPKE・API、`trading_core` の注文パイプラインとモックHL照合、`control_guard` の7日猶予は、いずれも**実装・ローカル検証済み**。
 - ローカルECDSAスパイクは完了（`sign_with_ecdsa` のkey idは `test_key_1`）。PocketICの障害注入とT-xxx試験は一部実行済み（`docs/phase-0/threat-test-matrix.md`）。
-- **残る残件**：実HL（testnet）での注文受理・照合の実測、`control_guard` の一致実行のサイズ制約（実サイズwasmは単一ingressで送れない）、testnet往復と実測（別途の環境・承認が必要）、恒久エラー時の運用手順、定期sweep（timer）の失敗握り潰し。T-605（封筒の個人API適用）は2026-09-21に実装・ローカル検証済み（`docs/phase-2/README.md`）。
+- **残る残件**：実HL（testnet）での注文受理・照合の実測、`control_guard` の一致実行のサイズ制約（実サイズwasmは単一ingressで送れない）、testnet往復と実測（別途の環境・承認が必要）、恒久エラー時の運用手順。timer失敗の握り潰しは2026-09-22に解消し、Canisterログへ記録する。T-605（封筒の個人API適用）は2026-09-21に実装・ローカル検証済み（`docs/phase-2/README.md`）。
 
 ## Phase 0（契約・画面仕様・Rust雛形）
 
@@ -52,7 +52,7 @@
 - `cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -- -D warnings`：成功。
 - `cargo build --release --target wasm32-unknown-unknown`（4 Canister）：成功。各約1.25 MB（`ic-sqlite-vfs` 2.0.0をリンク）。
 - `icp project show`：`icp.yaml` のrecipe展開を確認。
-- `icp build`：4 Canister成功。`candid-extractor` と `ic-wasm` で `candid:service` を埋め込む（`.did` はビルド時生成で、契約として未コミット）。
+- `icp build`：4 Canister成功。`candid-extractor` と `ic-wasm` で `candid:service` を埋め込み、抽出した`.did`とfrontend bindingをリポジトリに同期する。
 - `icp network start -d` → `icp deploy` → `icp canister call <name> version --query`：4 Canisterが `("0.1.0")` を返し、`init` のDB初期化がtrapしないことを確認。`icp network stop` で停止し、停止も確認。
 
 ### この環境での実行上の注意
@@ -86,20 +86,20 @@
 - `pnpm typecheck`：成功。
 - `pnpm lint`：成功。型対応あり。Table v8についてReact Compiler非採用を理由とする1行限定の除外がある。
 - `pnpm format:check`：成功。
-- `pnpm test`：14件成功。注文状態・資金整数/冪等性・入口制限・ヘッダー。
-- `pnpm test:e2e`：4件成功。build後のWorkers preview、既存テスト用Chromium revision 1228を使用。
+- `pnpm test`：39件成功。HPKEのclient/server往復・AAD不一致拒否を含む。
+- `pnpm test:e2e`：7件成功。build後のWorkers previewをPlaywright Chromiumで検証。
 - Playwright CLIによる画面表示・操作・コンソール確認。スクリーンショットは引渡し成果物に保存。
 
 ブラウザ試験でJS/CSS配信の404とチャートautoSizeのレイアウト変動を検出・修正した。ビルド成功だけをUI完成とは扱っていない。Safari・Firefox、実MetaMask、実ICP、性能負荷、実資金の試験は未実施。
 
 ## 未実装・次工程を止めている条件
 
-Canisterコードは `version` とDB初期化だけの雛形ではない（資金・署名・認証・注文の業務ロジックを実装済み。本ファイル末尾を参照）。ただしCandidはビルド時に生成するもので、契約として固定していない。testnet Canister IDもない。そのため本番APIを推測して作らず、ICP接続段階を保留している。
+Canisterコードは `version` とDB初期化だけの雛形ではない（資金・署名・認証・注文の業務ロジックを実装済み。本ファイル末尾を参照）。Candidは`candid/`に固定しfrontend bindingも生成済みだが、testnet Canister IDはない。そのため実環境のICP接続段階を保留している。
 
 必要な次の成果物：
 
 1. ~~Rust/PocketICでの資金・署名・認証の実装と検証~~ → ローカル範囲は完了。testnet検証が残る。
-2. Candid生成とCanister ID、本人認証・失効の実契約。network・endpoint・tECDSA key IDは起動時の設定（controller専用setter）として実装済みで、testnetデプロイ後に実値へ確定する。
+2. ~~Candid生成~~とCanister ID、本人認証・失効の実契約。network・endpoint・tECDSA key IDは起動時の設定（controller専用setter）として実装済みで、testnetデプロイ後に実値へ確定する。
 3. ~~認証済みHPKE公開鍵の取得・鍵更新・要求と応答の暗号化仕様~~ → 鍵レジストリ・封筒・個人API4件（`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`）への適用まで実装・検証済み。`submit_order`等の書き込み系への適用はPhase 3で判断する。
 4. ~~注文・資金移動の照合fixtureと、unknownの回復契約~~ → outboxの照合と`unknown`解消を実装・検証済み。`orderStatus`照合の自動化が残る。
 5. HL公開市況の接続、口座状態・建玉・PnL・SL/TP・決済の接続。
@@ -145,5 +145,5 @@ PocketIC上の署名往復は約17.9ms（本番subnetの性能値ではない）
 3. ~~個人データAPIへの封筒適用と応答暗号化、鍵更新中の扱い（T-605）~~ → 2026-09-21に解消（4メソッドの封筒必須化・`request_id`再送拒否・`aad`束縛・鍵更新で旧封筒を拒否。試験 `core_hpke.rs`）。残余：封印するのは`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`のみで、`submit_order`・`cancel_all`・`close_position`・`close_all`・`request_agent_generation`・`get_agent_status`は平文（セッション認可のみ）。
 4. `control_guard`の一致する実行：実行経路と同時実行の単一性は極小wasmで検証済み。ただし実サイズのwasmは `execute_upgrade` の引数として2 MiB上限を超えるため（実測2,193,336バイト）、チャンク導入かコードレジストリが必要（**未解消**）。
 5. 残りの失敗試験（T-401〜T-410等）と、Phase 1完了後の読み取り専用レビュー。
-6. 運用面の残件：**恒久エラー（ダイジェスト不一致等）発生時の運用手順**が未定義。定期sweep（`funds_vault`と`trading_core`のtimer）は失敗を `let _ =` で捨てており、署名・outcall・DBの失敗が無言で消える（**未解消**）。
+6. 運用面の残件：**恒久エラー（ダイジェスト不一致等）発生時の運用手順**が未定義。定期sweepの失敗はCanisterログへ記録するよう解消済みだが、監視・通知経路は未実装。
 7. testnet：実HLの受理挙動、署名p50/p95、受付→HL受理、Confidential Subnetの成立性。**未検証**。

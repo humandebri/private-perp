@@ -79,7 +79,7 @@
 | T-401 | 同一`request_id`・異なる本文 | 本文fingerprint比較 | unit, PocketIC | 拒否（`IdempotencyConflict`） | 試験ログ | 2 |
 | T-402 | 同一`request_id`・同一本文の再送 | 受理済み結果を返す | PocketIC | 二重注文なし、同一応答 | 試験ログ | 2 |
 | T-403 | `dispatching`以降の自動再注文 | 自動再送を禁止 | PocketIC | 新cloid・新nonceが発行されない | 試験ログ | 2 |
-| T-404 | バッチ内の一部拒否を全部成功として扱う | `action_orders`で子注文ごとに照合 | PocketIC | 子注文ごとの状態が正しい | 試験ログ | 2 |
+| T-404 | HTTP成功内の注文拒否を成功として扱う | 応答内statusを注文ごとに分類 | PocketIC | inner errorが`rejected`になり予約を解放 | `core_pipeline.rs` | 2 |
 | T-405 | 部分約定後の取消を`cancelled`と表示 | `cancel_requested`と累積約定量の分離 | unit, PocketIC | `partially_filled`を維持 | 試験ログ | 2 |
 | T-406 | `orderStatus`不在を未実行と断定 | 保持期間・可視化遅延を考慮し`unknown`維持 | PocketIC | `rejected`にしない | 試験ログ | 2 |
 | T-407 | `dispatching`中のupgrade | 照合workerで再開 | PocketIC | `unknown`から照合できる | 試験ログ | 2 |

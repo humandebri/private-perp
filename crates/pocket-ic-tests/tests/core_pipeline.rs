@@ -10,7 +10,8 @@ use api_types::auth::{
 use api_types::error::ErrorCode;
 use api_types::fund::AgentGeneration;
 use api_types::order::{
-    AccountSnapshot, OrderKind, OrderState, OrderSummary, Side, SubmitOrderArgs,
+    AccountSnapshot, OrderKind, OrderState, OrderSummary, PreflightResolution, Side,
+    SubmitOrderArgs,
 };
 use api_types::{Blob, Network};
 use candid::Principal;
@@ -232,6 +233,13 @@ fn route(
     move |call| {
         let body = String::from_utf8_lossy(&call.body).to_string();
         if call.url.contains("/exchange") {
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            if request["action"]["type"] == "updateLeverage" {
+                return Ok((
+                    200,
+                    br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+                ));
+            }
             return Ok((200, exchange.clone()));
         }
         let query: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
@@ -297,7 +305,11 @@ fn the_pipeline_dispatches_and_reconciles_orders() {
     // 送信本文はAgent鍵の署名つきで、署名actionが入っている。
     let exchange = captured
         .iter()
-        .find(|call| call.url.contains("/exchange"))
+        .find(|call| {
+            call.url.contains("/exchange")
+                && serde_json::from_slice::<serde_json::Value>(&call.body)
+                    .is_ok_and(|body| body["action"]["type"] == "order")
+        })
         .expect("exchange outcall");
     let body: serde_json::Value = serde_json::from_slice(&exchange.body).expect("json");
     assert_eq!(body["action"]["type"], "order");
@@ -351,7 +363,8 @@ fn rejected_orders_release_risk_and_unknown_sends_are_not_resent() {
 
     // 取引所が拒否した注文は`rejected`になり、予約は解放される。
     let rejected = submit(&pic, core, &user, b"pipeline-rejected", "0.05").expect("accepted");
-    let venue_rejection = br#"{"status":"err","response":"insufficient margin"}"#;
+    // HTTP/outer status が成功でも、子statusのerrorは受理として扱わない。
+    let venue_rejection = br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"error":"insufficient margin"}]}}}"#;
     let (swept, _) =
         call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
             &pic,
@@ -436,6 +449,28 @@ fn rejected_orders_release_risk_and_unknown_sends_are_not_resent() {
     assert!(
         captured.iter().all(|call| !call.url.contains("/exchange")),
         "不明な注文は再送しない"
+    );
+
+    // leverage preflightが不明な場合はcontrollerの外部確認でのみ解決する。
+    let resolved: Result<(), ErrorCode> = update(
+        &pic,
+        core,
+        controller,
+        "resolve_unknown_order_preflight",
+        (uncertain.order_id.clone(), PreflightResolution::Rejected),
+    )
+    .expect("call");
+    resolved.expect("resolve unknown preflight");
+    let orders = list_orders(&pic, core, user.caller, &user.session);
+    let order = orders
+        .iter()
+        .find(|order| order.order_id.as_ref() == uncertain.order_id.as_ref())
+        .expect("order is listed");
+    assert_eq!(order.state, OrderState::Rejected);
+    assert_eq!(
+        account_snapshot(&pic, core, user.caller, &user.session).margin_used,
+        0,
+        "外部確認済みの拒否で予約を解放する"
     );
 }
 
