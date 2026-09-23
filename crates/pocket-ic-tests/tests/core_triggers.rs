@@ -182,6 +182,7 @@ fn ingest_positions(pic: &PocketIc, core: Principal, caller: Principal, session:
 
 #[allow(clippy::too_many_arguments)]
 fn trigger_args(
+    account_id: &Blob,
     session: &SessionHandle,
     request_id: &[u8],
     market: &str,
@@ -194,7 +195,7 @@ fn trigger_args(
     SubmitOrderArgs {
         session: session.clone(),
         client_request_id: blob(request_id),
-        account_id: blob(&[0u8; 32]),
+        account_id: account_id.clone(),
         market: market.to_string(),
         side,
         kind: OrderKind::LimitGtc,
@@ -247,8 +248,10 @@ fn list_orders(
 #[test]
 fn trigger_orders_require_reduce_only_a_position_and_the_closing_side() {
     let pic = pic();
-    let (core, _vault, session) = setup(&pic);
+    let (core, vault, session) = setup(&pic);
     let caller = principal(241);
+    let account_id = pocket_ic_tests::trading_account_id(&pic, vault, caller, &session);
+    pocket_ic_tests::observe_empty_account(&pic, core, caller, &session);
 
     // reduce_onlyでないトリガは受付しない（建玉を増やすSL/TPは作らない）。
     let not_reduce_only = submit(
@@ -256,6 +259,7 @@ fn trigger_orders_require_reduce_only_a_position_and_the_closing_side() {
         core,
         caller,
         trigger_args(
+            &account_id,
             &session,
             b"trigger-not-reduce-only",
             "ETH",
@@ -283,6 +287,7 @@ fn trigger_orders_require_reduce_only_a_position_and_the_closing_side() {
         core,
         caller,
         trigger_args(
+            &account_id,
             &session,
             b"trigger-no-position",
             "ETH",
@@ -306,6 +311,7 @@ fn trigger_orders_require_reduce_only_a_position_and_the_closing_side() {
         core,
         caller,
         trigger_args(
+            &account_id,
             &session,
             b"trigger-wrong-side",
             "ETH",
@@ -333,6 +339,7 @@ fn trigger_orders_require_reduce_only_a_position_and_the_closing_side() {
         core,
         caller,
         trigger_args(
+            &account_id,
             &session,
             b"trigger-short-wrong",
             "BTC",
@@ -351,6 +358,7 @@ fn trigger_orders_require_reduce_only_a_position_and_the_closing_side() {
         core,
         caller,
         trigger_args(
+            &account_id,
             &session,
             b"trigger-long-sl",
             "ETH",
@@ -370,6 +378,7 @@ fn trigger_orders_require_reduce_only_a_position_and_the_closing_side() {
         core,
         caller,
         trigger_args(
+            &account_id,
             &session,
             b"trigger-short-sl",
             "BTC",
@@ -406,12 +415,14 @@ fn trigger_orders_are_signed_as_position_tpsl() {
     let (core, vault, session) = setup(&pic);
     let caller = principal(241);
     ingest_positions(&pic, core, caller, &session);
+    let account_id = pocket_ic_tests::trading_account_id(&pic, vault, caller, &session);
 
     let accepted = submit(
         &pic,
         core,
         caller,
         trigger_args(
+            &account_id,
             &session,
             b"trigger-sign",
             "ETH",
@@ -433,6 +444,33 @@ fn trigger_orders_are_signed_as_position_tpsl() {
     )
     .expect("call");
     let (digest, signature) = signed.expect("signature");
+
+    // nonceは作成時刻ではなく署名時に採番・永続化される。実際の送信値で検証する。
+    let (swept, calls) = pocket_ic_tests::call_with_routed_outcalls::<
+        (),
+        Result<api_types::order::SweepOutcome, ErrorCode>,
+        _,
+    >(
+        &pic,
+        core,
+        caller,
+        "test_sweep_now",
+        (),
+        pocket_ic_tests::venue_router(
+            br#"{"status":"ok","response":{"data":{"statuses":[{"resting":{"oid":777}}]}}}"#,
+            STATE.as_bytes(),
+            b"[]",
+            br#"{"status":"open","order":{"oid":777}}"#,
+        ),
+    )
+    .expect("sweep call");
+    assert_eq!(swept.expect("sweep").dispatched, 1);
+    let sent = calls
+        .iter()
+        .filter_map(|call| serde_json::from_slice::<serde_json::Value>(&call.body).ok())
+        .find(|body| body["action"]["type"] == "order")
+        .expect("order outcall");
+    let nonce = sent["nonce"].as_u64().expect("persisted order nonce");
 
     // 期待するaction（trigger + positionTpsl）をテスト側で組み立てて一致を確認する。
     let orders = list_orders(&pic, core, caller, &session);
@@ -459,7 +497,7 @@ fn trigger_orders_are_signed_as_position_tpsl() {
     let msgpack = expected.to_value().encode();
     let action_hash = hl_sign::hash::action_hash(&ActionHashInput {
         action_msgpack: &msgpack,
-        nonce: order.created_at,
+        nonce,
         vault_address: None,
         expires_after: None,
     });
@@ -493,15 +531,17 @@ fn trigger_orders_are_signed_as_position_tpsl() {
 #[test]
 fn trigger_orders_are_dispatched_with_the_position_tpsl_action() {
     let pic = pic();
-    let (core, _vault, session) = setup(&pic);
+    let (core, vault, session) = setup(&pic);
     let caller = principal(241);
     ingest_positions(&pic, core, caller, &session);
+    let account_id = pocket_ic_tests::trading_account_id(&pic, vault, caller, &session);
 
     let take_profit = submit(
         &pic,
         core,
         caller,
         trigger_args(
+            &account_id,
             &session,
             b"trigger-tp",
             "ETH",
@@ -531,7 +571,12 @@ fn trigger_orders_are_dispatched_with_the_position_tpsl_action() {
         caller,
         "test_sweep_now",
         (),
-        pocket_ic_tests::venue_router_default(&venue_body),
+        pocket_ic_tests::venue_router(
+            &venue_body,
+            STATE.as_bytes(),
+            b"[]",
+            br#"{"status":"open","order":{"oid":777}}"#,
+        ),
     )
     .expect("call");
     assert_eq!(swept.expect("sweep").dispatched, 1);

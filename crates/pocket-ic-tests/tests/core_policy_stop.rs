@@ -16,6 +16,7 @@ use pocket_ic_tests::{
     FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, deploy, fund_trading_account, pic, principal,
     update, update_args,
 };
+use pocket_ic_tests::{observe_empty_account, trading_account_id};
 
 const ORIGIN: &str = "https://app.example.test";
 const UNIVERSE: &str = r#"[{"name":"SOL","szDecimals":0},{"name":"ETH","szDecimals":5},{"name":"BTC","szDecimals":5}]"#;
@@ -77,11 +78,16 @@ fn open_session(
     session.expect("session")
 }
 
-fn order_args(session: &SessionHandle, request_id: &[u8], market: &str) -> SubmitOrderArgs {
+fn order_args(
+    account_id: &Blob,
+    session: &SessionHandle,
+    request_id: &[u8],
+    market: &str,
+) -> SubmitOrderArgs {
     SubmitOrderArgs {
         session: session.clone(),
         client_request_id: blob(request_id),
-        account_id: blob(&[0u8; 32]),
+        account_id: account_id.clone(),
         market: market.to_string(),
         side: Side::Buy,
         kind: OrderKind::LimitGtc,
@@ -184,6 +190,8 @@ fn a_stopped_policy_blocks_new_orders() {
         5_000_000_000,
         151,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
     let agent: Result<AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -200,7 +208,10 @@ fn a_stopped_policy_blocks_new_orders() {
         core,
         caller,
         "submit_order",
-        (session.clone(), order_args(&session, b"stop-before", "ETH")),
+        (
+            session.clone(),
+            order_args(&account_id, &session, b"stop-before", "ETH"),
+        ),
     )
     .expect("call");
     before.expect("accepted before stop");
@@ -214,7 +225,10 @@ fn a_stopped_policy_blocks_new_orders() {
         core,
         caller,
         "submit_order",
-        (session.clone(), order_args(&session, b"stop-during", "ETH")),
+        (
+            session.clone(),
+            order_args(&account_id, &session, b"stop-during", "ETH"),
+        ),
     )
     .expect("call");
     assert!(
@@ -231,7 +245,10 @@ fn a_stopped_policy_blocks_new_orders() {
         core,
         caller,
         "submit_order",
-        (session.clone(), order_args(&session, b"stop-after", "ETH")),
+        (
+            session.clone(),
+            order_args(&account_id, &session, b"stop-after", "ETH"),
+        ),
     )
     .expect("call");
     after.expect("accepted after clear");

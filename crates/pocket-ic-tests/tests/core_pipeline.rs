@@ -96,6 +96,7 @@ fn open_session(
 
 /// 取引可能なユーザー1人分の準備（口座・equity・Agent承認）。
 struct User {
+    account_id: Blob,
     caller: Principal,
     session: SessionHandle,
     trading_address: [u8; 20],
@@ -134,7 +135,9 @@ fn provision_user(
     let agent_address = agent.expect("agent").agent_address;
     approve_agent_at_vault(pic, vault, caller, &session, 1, agent_address.as_ref())
         .expect("approve agent");
+    pocket_ic_tests::observe_empty_account(pic, core, caller, &session);
     User {
+        account_id: pocket_ic_tests::trading_account_id(pic, vault, caller, &session),
         caller,
         session,
         trading_address,
@@ -202,7 +205,7 @@ fn submit(
             SubmitOrderArgs {
                 session: user.session.clone(),
                 client_request_id: blob(request_id),
-                account_id: blob(&[0u8; 32]),
+                account_id: user.account_id.clone(),
                 market: "ETH".to_string(),
                 side: Side::Buy,
                 kind: OrderKind::LimitGtc,
@@ -458,7 +461,7 @@ fn rejected_orders_release_risk_and_unknown_sends_are_not_resent() {
     );
 
     // leverage preflightが不明な場合はcontrollerの外部確認でのみ解決する。
-    let resolved: Result<(), ErrorCode> = update(
+    let resolved: Result<(), ErrorCode> = update_args(
         &pic,
         core,
         controller,

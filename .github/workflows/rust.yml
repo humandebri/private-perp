@@ -85,7 +85,10 @@ jobs:
       # wasmビルド → crates/pocket-ic-tests の試験を実行する。
       # 取得時の完全性検証はプラットフォーム別checksumで行う（fetch-pocket-ic.sh）。
       - name: PocketIC integration tests
-        run: bash scripts/pocket-ic-test.sh
+        run: bash scripts/pocket-ic-test.sh --no-fail-fast
+      - name: PocketIC runner failure propagation
+        if: always()
+        run: node --test scripts/pocket-ic-runner.test.mjs
       # 公式SDKのfixtureはコミット済み。生成器はネットワークとpnpmを要するため
       # CIでは再生成せず、固定したfixtureとの一致だけを検証する。
       - name: Official SDK fixture comparison

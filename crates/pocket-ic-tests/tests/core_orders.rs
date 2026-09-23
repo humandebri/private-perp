@@ -15,6 +15,7 @@ use pocket_ic_tests::{
     call_with_mocked_outcall, configure_policy, deploy, envelope, fund_trading_account, pic,
     principal, query_args, rotate_hpke_key, sweep_with_venue_outcalls, update, update_args,
 };
+use pocket_ic_tests::{observe_empty_account, trading_account_id};
 
 const ORIGIN: &str = "https://app.example.test";
 const UNIVERSE: &str = r#"[{"name":"SOL","szDecimals":0},{"name":"ETH","szDecimals":5},{"name":"BTC","szDecimals":5}]"#;
@@ -77,6 +78,7 @@ fn open_session(
 }
 
 fn order_args(
+    account_id: &Blob,
     session: &SessionHandle,
     request_id: &[u8],
     market: &str,
@@ -86,7 +88,7 @@ fn order_args(
     SubmitOrderArgs {
         session: session.clone(),
         client_request_id: blob(request_id),
-        account_id: blob(&[0u8; 32]),
+        account_id: account_id.clone(),
         market: market.to_string(),
         side: Side::Buy,
         kind: OrderKind::LimitGtc,
@@ -151,6 +153,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
         5_000_000_000,
         31,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
 
     // 銘柄解決の設定が無い状態ではfail-closedで拒否する（固定値を使わない）。
     let no_context: Result<SubmitOrderResult, ErrorCode> = update_args(
@@ -160,7 +163,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"order-ctx", "ETH", "0.05", "2500"),
+            order_args(&account_id, &session, b"order-ctx", "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -179,21 +182,28 @@ fn orders_are_accepted_idempotently_after_authorization() {
     .expect("call");
     context.expect("set_market_context");
 
-    let account: Result<Option<Blob>, ErrorCode> =
-        update(&pic, vault, caller, "get_trading_account", session.clone()).expect("account call");
-    let account = account.expect("account").expect("provisioned");
-    let observed: Result<u32, ErrorCode> = update_args(
-        &pic,
-        core,
-        caller,
-        "test_ingest_positions",
-        (
-            session.clone(),
-            r#"{"assetPositions":[],"marginSummary":{"totalMarginUsed":"0"}}"#.to_string(),
-        ),
-    )
-    .expect("observation call");
-    observed.expect("observed account");
+    // 誤った口座と未観測口座は、他の入力が正常でも受付しない。
+    for (id, expected) in [
+        (blob(&[0u8; 32]), NotAllowedCode::AccountNotOwned),
+        (account_id.clone(), NotAllowedCode::OperationNotAvailable),
+    ] {
+        let rejected: Result<SubmitOrderResult, ErrorCode> = update_args(
+            &pic,
+            core,
+            caller,
+            "submit_order",
+            (
+                session.clone(),
+                order_args(&id, &session, b"unobserved", "ETH", "0.05", "2500"),
+            ),
+        )
+        .expect("call");
+        assert_eq!(
+            rejected.expect_err("fail closed"),
+            ErrorCode::NotAllowed { code: expected }
+        );
+    }
+    observe_empty_account(&pic, core, caller, &session);
 
     // 受付できる（ETHはmetaの添字1）。
     let accepted: Result<SubmitOrderResult, ErrorCode> = update_args(
@@ -203,10 +213,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "submit_order",
         (
             session.clone(),
-            SubmitOrderArgs {
-                account_id: account.clone(),
-                ..order_args(&session, &[71u8; 32], "ETH", "0.05", "2500")
-            },
+            order_args(&account_id, &session, &[71u8; 32], "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -222,10 +229,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "submit_order",
         (
             session.clone(),
-            SubmitOrderArgs {
-                account_id: account.clone(),
-                ..order_args(&session, &[71u8; 32], "ETH", "0.05", "2500")
-            },
+            order_args(&account_id, &session, &[71u8; 32], "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -241,10 +245,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "submit_order",
         (
             session.clone(),
-            SubmitOrderArgs {
-                account_id: account.clone(),
-                ..order_args(&session, &[71u8; 32], "ETH", "0.06", "2500")
-            },
+            order_args(&account_id, &session, &[71u8; 32], "ETH", "0.06", "2500"),
         ),
     )
     .expect("call");
@@ -261,7 +262,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"order-2", "SOL", "1", "100"),
+            order_args(&account_id, &session, b"order-2", "SOL", "1", "100"),
         ),
     )
     .expect("call");
@@ -438,7 +439,7 @@ fn orders_are_accepted_idempotently_after_authorization() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"order-3", "BTC", "0.01", "60000"),
+            order_args(&account_id, &session, b"order-3", "BTC", "0.01", "60000"),
         ),
     )
     .expect("call");
@@ -629,6 +630,8 @@ fn core_signs_orders_with_the_agent_key() {
         5_000_000_000,
         51,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
 
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
@@ -651,7 +654,7 @@ fn core_signs_orders_with_the_agent_key() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"sign-1", "ETH", "0.05", "2500"),
+            order_args(&account_id, &session, b"sign-1", "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -739,6 +742,8 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
         5_000_000_000,
         61,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -758,7 +763,7 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"dispatch-1", "ETH", "0.05", "2500"),
+            order_args(&account_id, &session, b"dispatch-1", "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -793,7 +798,7 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"stale-fresh", "ETH", "0.05", "2500"),
+            order_args(&account_id, &session, b"stale-fresh", "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -809,13 +814,15 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"stale-old", "ETH", "0.05", "2500"),
+            order_args(&account_id, &session, b"stale-old", "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
-    assert!(
-        matches!(stale, Err(ErrorCode::NotAllowed { .. })),
-        "古い観測では新規注文を拒否: {stale:?}"
+    assert_eq!(
+        stale.expect_err("古い観測では新規注文を拒否"),
+        ErrorCode::NotAllowed {
+            code: NotAllowedCode::OperationNotAvailable,
+        }
     );
 
     // 再取り込みで新しくなれば再び受け付ける。
@@ -835,7 +842,7 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"stale-again", "ETH", "0.05", "2500"),
+            order_args(&account_id, &session, b"stale-again", "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -901,6 +908,8 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
         5_000_000_000,
         71,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -921,7 +930,7 @@ fn rejected_and_uncertain_orders_are_classified_without_resending() {
             "submit_order",
             (
                 session.clone(),
-                order_args(&session, request_id, "ETH", "0.05", "2500"),
+                order_args(&account_id, &session, request_id, "ETH", "0.05", "2500"),
             ),
         )
         .expect("call")
@@ -1021,6 +1030,8 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
         5_000_000_000,
         81,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
 
     let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
@@ -1029,7 +1040,7 @@ fn the_snapshot_merges_vault_balances_and_core_orders() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"snapshot-1", "ETH", "0.05", "2500"),
+            order_args(&account_id, &session, b"snapshot-1", "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -1186,6 +1197,8 @@ fn fills_are_ingested_idempotently() {
         5_000_000_000,
         111,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -1204,7 +1217,14 @@ fn fills_are_ingested_idempotently() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"fills-ingest", "ETH", "0.05", "2500"),
+            order_args(
+                &account_id,
+                &session,
+                b"fills-ingest",
+                "ETH",
+                "0.05",
+                "2500",
+            ),
         ),
     )
     .expect("call");
@@ -1312,6 +1332,8 @@ fn order_status_updates_are_reflected() {
         5_000_000_000,
         121,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -1330,7 +1352,7 @@ fn order_status_updates_are_reflected() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"status-1", "ETH", "0.05", "2500"),
+            order_args(&account_id, &session, b"status-1", "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -1470,6 +1492,8 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         5_000_000_000,
         211,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
     let agent: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -1489,7 +1513,7 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"cancel-1", "ETH", "0.05", "2500"),
+            order_args(&account_id, &session, b"cancel-1", "ETH", "0.05", "2500"),
         ),
     )
     .expect("call");
@@ -1513,7 +1537,8 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         &pic,
         core,
         caller,
-        br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+        br#"{"status":"ok","response":{"type":"cancel","data":{"statuses":[{"success":true}]}}}"#
+            .to_vec(),
     )
     .expect("call");
     assert_eq!(swept.expect("cancel sweep").cancels, 1, "取消が送信される");
@@ -1534,7 +1559,7 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         "submit_order",
         (
             session.clone(),
-            order_args(&session, b"cancel-2", "ETH", "0.02", "2400"),
+            order_args(&account_id, &session, b"cancel-2", "ETH", "0.02", "2400"),
         ),
     )
     .expect("call");
@@ -1556,7 +1581,8 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         &pic,
         core,
         caller,
-        br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+        br#"{"status":"ok","response":{"type":"cancel","data":{"statuses":[{"success":true}]}}}"#
+            .to_vec(),
     )
     .expect("call");
     assert_eq!(swept.expect("cancel sweep").cancels, 1);
@@ -1649,6 +1675,8 @@ fn order_status_is_scoped_to_the_account() {
         5_000_000_000,
         202,
     );
+    let account_id_a = trading_account_id(&pic, vault, caller_a, &session_a);
+    observe_empty_account(&pic, core, caller_a, &session_a);
     let agent_a: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -1668,7 +1696,14 @@ fn order_status_is_scoped_to_the_account() {
         "submit_order",
         (
             session_a.clone(),
-            order_args(&session_a, b"scope-order-a", "ETH", "0.05", "2500"),
+            order_args(
+                &account_id_a,
+                &session_a,
+                b"scope-order-a",
+                "ETH",
+                "0.05",
+                "2500",
+            ),
         ),
     )
     .expect("call");
@@ -1690,6 +1725,8 @@ fn order_status_is_scoped_to_the_account() {
         5_000_000_000,
         204,
     );
+    let account_id_b = trading_account_id(&pic, vault, caller_b, &session_b);
+    observe_empty_account(&pic, core, caller_b, &session_b);
     let agent_b: Result<api_types::fund::AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -1709,7 +1746,14 @@ fn order_status_is_scoped_to_the_account() {
         "submit_order",
         (
             session_b.clone(),
-            order_args(&session_b, b"scope-order-b", "ETH", "0.05", "2500"),
+            order_args(
+                &account_id_b,
+                &session_b,
+                b"scope-order-b",
+                "ETH",
+                "0.05",
+                "2500",
+            ),
         ),
     )
     .expect("call");

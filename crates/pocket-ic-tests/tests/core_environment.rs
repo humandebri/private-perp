@@ -336,6 +336,7 @@ fn the_configured_endpoints_are_used_for_venue_calls() {
     let agent_address = agent.expect("agent").agent_address;
     approve_agent_at_vault(&pic, vault, caller, &session, 1, agent_address.as_ref())
         .expect("approve agent");
+    pocket_ic_tests::observe_empty_account(&pic, core, caller, &session);
     let submitted: Result<api_types::order::SubmitOrderResult, ErrorCode> = update_args(
         &pic,
         core,
@@ -346,7 +347,7 @@ fn the_configured_endpoints_are_used_for_venue_calls() {
             SubmitOrderArgs {
                 session: session.clone(),
                 client_request_id: blob(b"env-order"),
-                account_id: blob(&[0u8; 32]),
+                account_id: pocket_ic_tests::trading_account_id(&pic, vault, caller, &session),
                 market: "ETH".to_string(),
                 side: Side::Buy,
                 kind: OrderKind::LimitGtc,

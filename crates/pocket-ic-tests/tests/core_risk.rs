@@ -17,6 +17,7 @@ use pocket_ic_tests::{
     envelope, fund_trading_account, pic, principal, rotate_hpke_key, sweep_with_venue_outcalls,
     update, update_args,
 };
+use pocket_ic_tests::{observe_empty_account, trading_account_id};
 
 const ORIGIN: &str = "https://app.example.test";
 const UNIVERSE: &str = r#"[{"name":"SOL","szDecimals":0},{"name":"ETH","szDecimals":5},{"name":"BTC","szDecimals":5}]"#;
@@ -78,11 +79,11 @@ fn open_session(
     session.expect("session")
 }
 
-fn order_args(session: &SessionHandle) -> SubmitOrderArgs {
+fn order_args(account_id: &Blob, session: &SessionHandle) -> SubmitOrderArgs {
     SubmitOrderArgs {
         session: session.clone(),
         client_request_id: blob(b"risk-1"),
-        account_id: blob(&[0u8; 32]),
+        account_id: account_id.clone(),
         market: "ETH".to_string(),
         side: Side::Buy,
         kind: OrderKind::LimitGtc,
@@ -154,6 +155,8 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
         5_000_000_000,
         161,
     );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
     let agent: Result<AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -171,7 +174,7 @@ fn risk_is_reserved_on_acceptance_and_released_on_rejection() {
         core,
         caller,
         "submit_order",
-        (session.clone(), order_args(&session)),
+        (session.clone(), order_args(&account_id, &session)),
     )
     .expect("call");
     submitted.expect("accepted order");

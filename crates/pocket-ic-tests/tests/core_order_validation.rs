@@ -78,6 +78,7 @@ fn open_session(
 }
 
 fn args(
+    account_id: &Blob,
     session: &SessionHandle,
     request_id: &[u8],
     market: &str,
@@ -88,7 +89,7 @@ fn args(
     SubmitOrderArgs {
         session: session.clone(),
         client_request_id: blob(request_id),
-        account_id: blob(&[0u8; 32]),
+        account_id: account_id.clone(),
         market: market.to_string(),
         side: Side::Buy,
         kind: OrderKind::LimitGtc,
@@ -162,6 +163,8 @@ fn invalid_orders_are_rejected_without_side_effects() {
         5_000_000_000,
         171,
     );
+    let account_id = pocket_ic_tests::trading_account_id(&pic, vault, caller, &session);
+    pocket_ic_tests::observe_empty_account(&pic, core, caller, &session);
     let agent: Result<AgentGeneration, ErrorCode> = update(
         &pic,
         core,
@@ -180,7 +183,15 @@ fn invalid_orders_are_rejected_without_side_effects() {
         "submit_order",
         (
             session.clone(),
-            args(&session, b"v-1", "ETH", "0.1234567", Some("2500"), 3),
+            args(
+                &account_id,
+                &session,
+                b"v-1",
+                "ETH",
+                "0.1234567",
+                Some("2500"),
+                3,
+            ),
         ),
     )
     .expect("call");
@@ -197,7 +208,7 @@ fn invalid_orders_are_rejected_without_side_effects() {
         "submit_order",
         (
             session.clone(),
-            args(&session, b"v-2", "ETH", "0.05", None, 3),
+            args(&account_id, &session, b"v-2", "ETH", "0.05", None, 3),
         ),
     )
     .expect("call");
@@ -214,7 +225,15 @@ fn invalid_orders_are_rejected_without_side_effects() {
         "submit_order",
         (
             session.clone(),
-            args(&session, b"v-3", "ETH", "0.05", Some("2500"), 6),
+            args(
+                &account_id,
+                &session,
+                b"v-3",
+                "ETH",
+                "0.05",
+                Some("2500"),
+                6,
+            ),
         ),
     )
     .expect("call");
@@ -231,12 +250,17 @@ fn invalid_orders_are_rejected_without_side_effects() {
         "submit_order",
         (
             session.clone(),
-            args(&session, b"v-4", "SOL", "1", Some("100"), 3),
+            args(&account_id, &session, b"v-4", "SOL", "1", Some("100"), 3),
         ),
     )
     .expect("call");
     assert!(
-        matches!(not_allowed, Err(ErrorCode::NotAllowed { .. })),
+        matches!(
+            not_allowed,
+            Err(ErrorCode::NotAllowed {
+                code: api_types::error::NotAllowedCode::AssetNotAllowed
+            })
+        ),
         "{not_allowed:?}"
     );
 
@@ -279,6 +303,41 @@ fn orders_are_rejected_when_the_policy_is_not_configured() {
     // policy principal を設定しない（既定の fail-closed を検証する）。
     let caller = principal(182);
     let session = open_session(&pic, vault, caller, &secret(191));
+    fund_trading_account(
+        &pic,
+        vault,
+        controller,
+        caller,
+        &session,
+        b"no-policy-fund",
+        5_000_000_000,
+        172,
+    );
+    let account_id = pocket_ic_tests::trading_account_id(&pic, vault, caller, &session);
+    pocket_ic_tests::observe_empty_account(&pic, core, caller, &session);
+    let meta: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_meta_cache",
+        (
+            "local".to_string(),
+            "hyperliquid".to_string(),
+            UNIVERSE.to_string(),
+        ),
+    )
+    .expect("call");
+    meta.expect("meta");
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .expect("call");
+    context.expect("context");
+
     let denied: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
         core,
@@ -286,7 +345,15 @@ fn orders_are_rejected_when_the_policy_is_not_configured() {
         "submit_order",
         (
             session.clone(),
-            args(&session, b"no-policy", "ETH", "0.01", Some("2500"), 3),
+            args(
+                &account_id,
+                &session,
+                b"no-policy",
+                "ETH",
+                "0.01",
+                Some("2500"),
+                3,
+            ),
         ),
     )
     .expect("call");

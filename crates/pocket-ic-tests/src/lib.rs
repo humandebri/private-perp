@@ -9,6 +9,43 @@
 pub mod envelope;
 pub mod fixed_rng;
 
+/// 既に作成済みの実取引口座IDを取得する。口座の作成や観測は行わない。
+pub fn trading_account_id(
+    pic: &pocket_ic::PocketIc,
+    vault: candid::Principal,
+    caller: candid::Principal,
+    session: &api_types::auth::SessionHandle,
+) -> api_types::Blob {
+    let result: Result<Option<api_types::Blob>, api_types::error::ErrorCode> =
+        update(pic, vault, caller, "get_trading_account", session.clone()).expect("call");
+    let id = result
+        .expect("get_trading_account")
+        .expect("trading account exists");
+    assert_eq!(id.len(), 32, "account ID is not an HL address");
+    id
+}
+
+/// 建玉なしの取引口座を明示的に観測する。送信ヘルパからは呼ばない。
+pub fn observe_empty_account(
+    pic: &pocket_ic::PocketIc,
+    core: candid::Principal,
+    caller: candid::Principal,
+    session: &api_types::auth::SessionHandle,
+) {
+    let result: Result<u32, api_types::error::ErrorCode> = update_args(
+        pic,
+        core,
+        caller,
+        "test_ingest_positions",
+        (
+            session.clone(),
+            r#"{"assetPositions":[],"marginSummary":{"totalMarginUsed":"0"}}"#.to_string(),
+        ),
+    )
+    .expect("call");
+    assert_eq!(result.expect("observe empty account"), 0);
+}
+
 use candid::{CandidType, Principal};
 use pocket_ic::common::rest::{
     CanisterHttpHeader, CanisterHttpMethod, CanisterHttpReject, CanisterHttpReplication,

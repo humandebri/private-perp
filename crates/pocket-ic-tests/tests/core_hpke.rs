@@ -81,8 +81,8 @@ fn open_session(
     session.expect("session")
 }
 
-/// controller・core・セッションを用意する（HPKE鍵は生成しない）。
-fn setup(pic: &PocketIc) -> (Principal, Principal, SessionHandle) {
+/// controller・vault・core・セッションを用意する（HPKE鍵は生成しない）。
+fn setup(pic: &PocketIc) -> (Principal, Principal, Principal, SessionHandle) {
     let controller = principal(160);
     let vault = deploy(
         pic,
@@ -147,14 +147,14 @@ fn setup(pic: &PocketIc) -> (Principal, Principal, SessionHandle) {
     let agent_address = agent.expect("agent").agent_address;
     approve_agent_at_vault(pic, vault, caller, &session, 1, agent_address.as_ref())
         .expect("approve agent");
-    (controller, core, session)
+    (controller, vault, core, session)
 }
 
 /// 個人APIは正しい封筒でのみ通り、平文のない応答を返す。
 #[test]
 fn personal_apis_require_a_valid_envelope() {
     let pic = pic();
-    let (controller, core, session) = setup(&pic);
+    let (controller, vault, core, session) = setup(&pic);
     let caller = principal(161);
     let client = envelope::client(1);
 
@@ -176,6 +176,7 @@ fn personal_apis_require_a_valid_envelope() {
         pocket_ic_tests::query(&pic, core, caller, "get_hpke_public_key", ()).expect("call");
     assert_eq!(served.expect("public key"), public);
 
+    pocket_ic_tests::observe_empty_account(&pic, core, caller, &session);
     // 注文を1件受付けてから、個人APIを封筒で叩く。
     let submitted: Result<SubmitOrderResult, ErrorCode> = update_args(
         &pic,
@@ -187,7 +188,7 @@ fn personal_apis_require_a_valid_envelope() {
             SubmitOrderArgs {
                 session: session.clone(),
                 client_request_id: blob(b"hpke-order"),
-                account_id: blob(&[0u8; 32]),
+                account_id: pocket_ic_tests::trading_account_id(&pic, vault, caller, &session),
                 market: "ETH".to_string(),
                 side: Side::Buy,
                 kind: OrderKind::LimitGtc,
@@ -286,7 +287,7 @@ fn personal_apis_require_a_valid_envelope() {
 #[test]
 fn envelope_bindings_are_enforced() {
     let pic = pic();
-    let (controller, core, session) = setup(&pic);
+    let (controller, _vault, core, session) = setup(&pic);
     let caller = principal(161);
     let client = envelope::client(2);
     rotate_hpke_key(&pic, core, controller);
@@ -462,7 +463,7 @@ fn envelope_bindings_are_enforced() {
 #[test]
 fn a_request_id_cannot_be_reused() {
     let pic = pic();
-    let (controller, core, session) = setup(&pic);
+    let (controller, _vault, core, session) = setup(&pic);
     let caller = principal(161);
     let client = envelope::client(4);
     rotate_hpke_key(&pic, core, controller);
@@ -522,7 +523,7 @@ fn a_request_id_cannot_be_reused() {
 #[test]
 fn rotating_the_key_invalidates_old_envelopes() {
     let pic = pic();
-    let (controller, core, session) = setup(&pic);
+    let (controller, _vault, core, session) = setup(&pic);
     let caller = principal(161);
     let client = envelope::client(5);
     let first = rotate_hpke_key(&pic, core, controller);
