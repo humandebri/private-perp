@@ -7,6 +7,7 @@ pub mod accounts;
 pub mod actions;
 pub mod agents;
 pub mod auth;
+pub mod budget;
 pub mod core_config;
 pub mod core_requests;
 pub mod events;

@@ -8,6 +8,9 @@
 //! （`docs/phase-0/api-contract.md` 5節）。任意送金・即時upgrade・出金先変更は提供しない。
 
 use api_types::error::{BadRequestCode, ErrorCode};
+use api_types::operations::{
+    BudgetClass, MAX_REST_BUDGET_CAPACITY, RestBudgetConfig, RestBudgetRequest, RestBudgetStatus,
+};
 use api_types::policy::{Policy, StopStatus};
 use candid::Principal;
 use db::error::Error as DbError;
@@ -38,6 +41,89 @@ fn map_db(error: DbError) -> ErrorCode {
 #[ic_cdk::query]
 fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// 共有予算の利用者を初期登録する。登録済みの別principalへの変更は拒否する。
+#[ic_cdk::update]
+fn register_budget_worker(role: String, principal: Principal) -> Result<(), ErrorCode> {
+    if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "controller required".into(),
+        });
+    }
+    if role != "vault" && role != "core" {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "role must be vault or core".into(),
+        });
+    }
+    let bytes = check_principal(principal, "invalid budget worker")?;
+    db::tx::update(|c| db::repo::budget::register_worker(c, &role, &bytes)).map_err(map_db)
+}
+
+#[ic_cdk::update]
+fn configure_rest_budget(config: RestBudgetConfig) -> Result<(), ErrorCode> {
+    require_role(ic_cdk::api::msg_caller(), "guard", "guard required")?;
+    if !(4..=MAX_REST_BUDGET_CAPACITY).contains(&config.capacity)
+        || config.exit_reserve == 0
+        || config.exit_reserve >= config.capacity
+    {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "invalid REST budget".into(),
+        });
+    }
+    db::tx::update(|c| db::repo::budget::configure(c, &config)).map_err(map_db)
+}
+
+/// 公開するのは集計のみ。口座・要求ID・callerは公開しない。
+#[ic_cdk::query]
+fn get_rest_budget_status() -> Result<RestBudgetStatus, ErrorCode> {
+    db::tx::query(|c| db::repo::budget::status(c, ic_cdk::api::time() / 1_000_000)).map_err(map_db)
+}
+
+#[ic_cdk::update]
+fn consume_rest_budget(request: RestBudgetRequest) -> Result<(), ErrorCode> {
+    let caller = ic_cdk::api::msg_caller();
+    if !db::tx::query(|c| db::repo::budget::is_worker(c, caller.as_slice())).map_err(map_db)? {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "registered budget worker required".into(),
+        });
+    }
+    let now = ic_cdk::api::time() / 1_000_000;
+    if !request.valid_at(now) {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "invalid budget request".into(),
+        });
+    }
+    // Emergency stop still permits read-only reconciliation and safe exits.
+    if request.class == BudgetClass::NewRisk && get_stop_status().stopped {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    match db::tx::update(|c| db::repo::budget::consume(c, caller.as_slice(), &request, now))
+        .map_err(|error| match error {
+            DbError::NotFound => ErrorCode::PolicyUnavailable,
+            other => map_db(other),
+        })? {
+        true => Ok(()),
+        false => Err(ErrorCode::VenueRateLimited {
+            retry_after_ms: Some(db::repo::budget::WINDOW_MS),
+        }),
+    }
+}
+
+/// 復旧停止はoperatorだけ。解除はSNS経路とし、controller向けの迂回口を設けない。
+#[ic_cdk::update]
+fn pause_for_recovery() -> Result<(), ErrorCode> {
+    require_role(ic_cdk::api::msg_caller(), "operator", "operator required")?;
+    db::tx::update(|c| db::repo::budget::pause(c, true)).map_err(map_db)
+}
+
+#[ic_cdk::update]
+fn clear_recovery_pause() -> Result<(), ErrorCode> {
+    require_role(ic_cdk::api::msg_caller(), "sns", "SNS required")?;
+    db::tx::update(|c| db::repo::budget::pause(c, false)).map_err(map_db)
 }
 
 /// 現在の政策（allowlist）。未設定はエラー（fail-closed）。

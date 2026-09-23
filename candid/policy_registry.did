@@ -18,6 +18,7 @@ type BadRequestCode = variant {
   PriceOutOfRange;
   UnsupportedAsset;
 };
+type BudgetClass = variant { Exit; Reconcile; NewRisk };
 // API全体のエラー。
 type ErrorCode = variant {
   Internal : record { code : text };
@@ -60,8 +61,28 @@ type Policy = record {
   markets : vec text;
   version : nat64;
 };
+type RestBudgetConfig = record { exit_reserve : nat32; capacity : nat32 };
+type RestBudgetRequest = record {
+  // 消費試行ごとの32-byte ID。先頭8 bytesはexpires_atのbig-endian表現。
+  // 残り24 bytesは試行ごとに一意。期限を書き換えて同じIDを再取得できない。
+  request_id : blob;
+  weight : nat32;
+  class : BudgetClass;
+  // 予算取得と送信開始の共通期限（exclusive、最大60秒）。
+  // consume_rest_budgetのOkを確認したworkerだけが、期限前に1回送信できる。
+  // workerは送信直前にvalid_atと業務状態を再検証し、awaitを挟まず送信開始する。
+  // 期限切れの許可は使わない。計上はこの期限の60秒後まで保持する（未送信でも返金なし）。
+  expires_at : nat64;
+};
+type RestBudgetStatus = record {
+  new_risk_used : nat32;
+  recovery_paused : bool;
+  used : nat32;
+  config : opt RestBudgetConfig;
+};
 type Result = variant { Ok; Err : ErrorCode };
 type Result_1 = variant { Ok : Policy; Err : ErrorCode };
+type Result_2 = variant { Ok : RestBudgetStatus; Err : ErrorCode };
 // 停止状態（理由コードのみを公開する）。
 type StopStatus = record {
   stopped : bool;
@@ -71,12 +92,21 @@ type StopStatus = record {
 service : () -> {
   // 緊急停止の解除（SNS governanceのみ）。即時の緩和を運営鍵では行えないようにする。
   clear_emergency_stop : () -> (Result);
+  clear_recovery_pause : () -> (Result);
+  configure_rest_budget : (RestBudgetConfig) -> (Result);
+  consume_rest_budget : (RestBudgetRequest) -> (Result);
   // 現在の政策（allowlist）。未設定はエラー（fail-closed）。
   get_policy : () -> (Result_1) query;
+  // 公開するのは集計のみ。口座・要求ID・callerは公開しない。
+  get_rest_budget_status : () -> (Result_2) query;
   // 役割別のprincipal（診断用）。
   get_role_principal : (text) -> (opt principal) query;
   // 停止状態（理由コードのみを公開する）。
   get_stop_status : () -> (StopStatus) query;
+  // 復旧停止はoperatorだけ。解除はSNS経路とし、controller向けの迂回口を設けない。
+  pause_for_recovery : () -> (Result);
+  // 共有予算の利用者を初期登録する。登録済みの別principalへの変更は拒否する。
+  register_budget_worker : (text, principal) -> (Result);
   // 緊急停止（**停止方向のみ**）。解除は `clear_emergency_stop`（SNS経路）だけが行える。
   set_emergency_stop : () -> (Result);
   // `control_guard` のprincipalを設定する（controllerのみ、初期化時）。

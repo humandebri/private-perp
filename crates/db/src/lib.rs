@@ -244,7 +244,14 @@ mod tests {
         assert_tables(
             &policy,
             "policy",
-            &["policy", "stop_status", "policy_roles"],
+            &[
+                "policy",
+                "stop_status",
+                "policy_roles",
+                "budget_workers",
+                "rest_budget_config",
+                "rest_budget_usage",
+            ],
         );
     }
 

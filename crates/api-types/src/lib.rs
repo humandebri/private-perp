@@ -12,6 +12,7 @@ pub mod environment;
 pub mod error;
 pub mod fund;
 pub mod guard;
+pub mod operations;
 pub mod order;
 pub mod policy;
 
