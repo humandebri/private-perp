@@ -1,0 +1,12 @@
+[package]
+name = "eligibility-issuer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+api-types = { path = "../../crates/api-types" }
+candid.workspace = true
+hex.workspace = true
+hl-sign = { path = "../../crates/hl-sign" }

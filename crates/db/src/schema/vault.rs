@@ -306,6 +306,28 @@ CREATE INDEX allocation_confirmations_by_request
     ON allocation_confirmations (user_id, client_request_id);
 ";
 
+/// v11: policyをHL REST予算の単一の調整者として参照する。
+const REST_BUDGET_POLICY: &str = "
+ALTER TABLE vault_config ADD COLUMN policy_principal BLOB;
+";
+
+/// v12: 回収フェンスのcore設定と永続的な世代・照合位置。
+const RECOVERY_FENCES: &str = "
+ALTER TABLE vault_config ADD COLUMN core_principal BLOB;
+ALTER TABLE fund_actions ADD COLUMN recovery_fence_epoch INTEGER;
+ALTER TABLE fund_actions ADD COLUMN recovery_checked_until INTEGER;
+ALTER TABLE fund_actions ADD COLUMN recovery_window_ms INTEGER NOT NULL DEFAULT 3600000;
+ALTER TABLE fund_actions ADD COLUMN recovery_match_hash BLOB;
+ALTER TABLE fund_actions ADD COLUMN recovery_ambiguous INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fund_actions ADD COLUMN recovery_fence_released_at INTEGER;
+";
+
+/// v13: testnetで履歴の完全性を確認するまでは未実行の自動判定を禁止する。
+const RECOVERY_HISTORY_GATE: &str = "
+ALTER TABLE vault_config ADD COLUMN recovery_history_verified INTEGER NOT NULL DEFAULT 0
+    CHECK (recovery_history_verified IN (0, 1));
+";
+
 /// `funds_vault` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -347,5 +369,115 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 10,
         sql: ALLOCATION_CONFIRMATIONS,
+    },
+    Migration {
+        version: 11,
+        sql: REST_BUDGET_POLICY,
+    },
+    Migration {
+        version: 12,
+        sql: RECOVERY_FENCES,
+    },
+    Migration {
+        version: 13,
+        sql: RECOVERY_HISTORY_GATE,
+    },
+    Migration {
+        version: 14,
+        sql: super::send_journal::CLIENT_SQL,
+    },
+    Migration {
+        version: 15,
+        sql: "CREATE TABLE hpke_requests (
+            request_id BLOB PRIMARY KEY NOT NULL CHECK(length(request_id) = 32),
+            method TEXT NOT NULL, caller BLOB NOT NULL,
+            received_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+            CREATE INDEX hpke_requests_by_expiry ON hpke_requests(expires_at);",
+    },
+    Migration {
+        version: 16,
+        sql: "ALTER TABLE send_journal_client ADD COLUMN guard BLOB;",
+    },
+    Migration {
+        version: 17,
+        sql: super::send_journal::STAGE_SQL,
+    },
+    Migration {
+        version: 18,
+        sql: "CREATE TABLE eligibility_config (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            terms_version INTEGER NOT NULL CHECK(terms_version > 0),
+            issuer_address BLOB NOT NULL CHECK(length(issuer_address) = 20),
+            mock_issuer INTEGER NOT NULL CHECK(mock_issuer IN (0, 1))
+        );
+        CREATE TABLE eligibility_tokens (
+            user_id BLOB PRIMARY KEY CHECK(length(user_id) = 32),
+            principal BLOB NOT NULL,
+            account_id BLOB NOT NULL CHECK(length(account_id) = 32),
+            network TEXT NOT NULL,
+            terms_version INTEGER NOT NULL,
+            issued_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            nonce BLOB NOT NULL UNIQUE CHECK(length(nonce) = 32),
+            digest BLOB NOT NULL CHECK(length(digest) = 32)
+        );",
+    },
+    Migration {
+        version: 19,
+        sql: super::send_journal::CYCLES_SQL,
+    },
+    Migration {
+        version: 20,
+        sql:
+            "CREATE TABLE eligibility_nonces (
+            nonce BLOB PRIMARY KEY CHECK(length(nonce) = 32),
+            digest BLOB NOT NULL CHECK(length(digest) = 32)
+        );
+        INSERT INTO eligibility_nonces(nonce, digest) SELECT nonce, digest FROM eligibility_tokens;",
+    },
+    Migration {
+        version: 21,
+        sql: "CREATE TABLE builder_fee_mock_consents (
+            user_id BLOB PRIMARY KEY CHECK(length(user_id) = 32),
+            principal BLOB NOT NULL,
+            account_id BLOB NOT NULL CHECK(length(account_id) = 32),
+            builder_address BLOB NOT NULL CHECK(length(builder_address) = 20),
+            network TEXT NOT NULL,
+            issued_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            nonce BLOB NOT NULL UNIQUE CHECK(length(nonce) = 32),
+            digest BLOB NOT NULL CHECK(length(digest) = 32),
+            eoa_signature BLOB NOT NULL CHECK(length(eoa_signature) = 65),
+            approved_at INTEGER NOT NULL,
+            fee_decibps INTEGER NOT NULL DEFAULT 0 CHECK(fee_decibps = 0)
+        );
+        CREATE TABLE builder_fee_mock_nonces (
+            nonce BLOB PRIMARY KEY CHECK(length(nonce) = 32),
+            digest BLOB NOT NULL CHECK(length(digest) = 32)
+        );
+        CREATE TABLE builder_fee_accounting (
+            event_id BLOB PRIMARY KEY CHECK(length(event_id) = 32),
+            user_id BLOB NOT NULL CHECK(length(user_id) = 32),
+            account_id BLOB NOT NULL CHECK(length(account_id) = 32),
+            event_kind TEXT NOT NULL CHECK(event_kind = 'mock_approval'),
+            amount_micros INTEGER NOT NULL CHECK(amount_micros = 0),
+            recorded_at INTEGER NOT NULL
+        );",
+    },
+    Migration {
+        version: 22,
+        sql: super::send_journal::RECOVERY_STAGE_SQL,
+    },
+    Migration {
+        version: 23,
+        sql: super::send_journal::CLIENT_WRITER_FENCE_SQL,
+    },
+    Migration {
+        version: 24,
+        sql: super::send_journal::RECOVERY_RECEIPTS_SQL,
+    },
+    Migration {
+        version: 25,
+        sql: super::send_journal::REPLAY_VALIDATION_SQL,
     },
 ];

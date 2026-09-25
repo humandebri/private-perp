@@ -39,6 +39,8 @@ pub mod memory_id {
     pub const FUNDS_VAULT_MAIN: u8 = 0;
     /// `control_guard` の変更予約・実行記録（別Canister）。
     pub const CONTROL_GUARD_MAIN: u8 = 0;
+    /// 独立した送信意図の追記専用ジャーナル。vault/coreのbackup対象外。
+    pub const SEND_JOURNAL_MAIN: u8 = 0;
     /// アプリが使えるMemoryIdの上限。255は予約済み。
     pub const MAX_APP_MEMORY_ID: u8 = 254;
 }
@@ -119,6 +121,7 @@ mod tests {
             ("core", schema::core::MIGRATIONS),
             ("guard", schema::guard::MIGRATIONS),
             ("policy", schema::policy::MIGRATIONS),
+            ("send_journal", schema::send_journal::MIGRATIONS),
         ]
     }
 

@@ -40,6 +40,13 @@ type ErrorCode = variant {
   InsufficientFunds : record { requested : nat64; available : nat64 };
   Unauthenticated : record { reason : text };
 };
+type MarketThreshold = record {
+  max_spread_bps : nat32;
+  min_day_notional_usdc : nat64;
+  expected_index : nat32;
+  market : text;
+  min_each_side_depth_usdc : nat64;
+};
 // 権限・状態に起因する拒否の理由コード。
 type NotAllowedCode = variant {
   UpgradeContentMismatch;
@@ -54,6 +61,7 @@ type NotAllowedCode = variant {
   OperationNotAvailable;
   UpgradeNotScheduled;
 };
+type RestBudgetConfig = record { exit_reserve : nat32; capacity : nat32 };
 type Result = variant { Ok; Err : ErrorCode };
 type ScheduleUpgradeArgs = record { request : UpgradeRequest };
 type ScheduledUpgrade = record {
@@ -79,12 +87,21 @@ service : () -> {
   // 
   // 対象を指定せずに全件取消にすると、実行（対象ごとに1件）と対象が食い違う。
   cancel_upgrade : (principal) -> (Result);
+  configure_cycles : (principal, nat, nat) -> (Result);
+  configure_eligibility : (principal, nat64, blob, bool) -> (Result);
+  configure_market_threshold : (principal, MarketThreshold) -> (Result);
+  // SNSが市場の許可版を設定する経路。policyは登録済みguardのcallerを検証する。
+  configure_policy_version : (principal, nat64, vec text) -> (Result);
+  // SNSが共有REST予算を設定する経路。policyは登録済みguardのcallerを検証する。
+  configure_rest_budget : (principal, RestBudgetConfig) -> (Result);
   // 予約済みの内容と一致するupgradeを実行する（実行者は誰でもよい）。
   execute_upgrade : (principal, blob, blob) -> (Result);
   // SNS governanceのPrincipal（診断用）。
   get_sns_principal : () -> (opt principal) query;
   // 予約状況（公開）。
   get_upgrade_status : () -> (UpgradeStatus) query;
+  // SNSだけが、独立送信ジャーナルの証跡が一致したworkerを再開できる。
+  resume_journal : (principal) -> (Result);
   // 変更を予約する（SNS governanceのみ）。7日後にだけ実行できる。
   schedule_upgrade : (ScheduleUpgradeArgs) -> (Result);
   // SNS governanceのPrincipalを設定する（controllerのみ、初期化時）。

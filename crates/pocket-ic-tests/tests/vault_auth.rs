@@ -7,10 +7,13 @@ use api_types::auth::{
     ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
 };
 use api_types::error::{BadRequestCode, ErrorCode};
+use api_types::journal::{RecoveryPayload, RecoveryRecord};
 use candid::Principal;
 use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
-use pocket_ic_tests::{FUNDS_VAULT_WASM, deploy_default, pic, principal, update};
+use pocket_ic_tests::{
+    FUNDS_VAULT_WASM, deploy_default, pic, principal, query, update, update_args,
+};
 use std::time::Duration;
 
 const ORIGIN: &str = "https://app.example.test";
@@ -104,6 +107,87 @@ fn login_with_a_valid_signature_opens_a_session() {
     let handle = outcome.expect("session");
     assert_eq!(handle.vault_principal, vault);
     assert!(handle.expires_at > 0);
+
+    let controller = pic.get_controllers(vault)[0];
+    let journal: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_send_journal", ()).expect("journal query");
+    let journal = journal.expect("journal configured").expect("journal id");
+    let records: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, vault, "recovery_events", (0u64, 10u32))
+            .expect("private recovery events");
+    let records = records.expect("recovery records");
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        &records[0].event.payload,
+        RecoveryPayload::IdentityRegistration {
+            user_id,
+            owner,
+            eoa_address,
+            network,
+        } if user_id.len() == 32
+            && *owner == caller
+            && eoa_address.as_ref() == eoa
+            && network == "local"
+    ));
+
+    let second = issue(&pic, vault, caller, eoa);
+    let second_challenge = rebuild(vault, caller, eoa, &second, ORIGIN, "local");
+    let second_signature = second_challenge.sign_for_tests(&secret_key).expect("sign");
+    let again: Result<SessionHandle, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "open_session",
+        OpenSessionRequest {
+            challenge_id: second.challenge_id,
+            eoa_signature: second_signature.to_bytes65().to_vec().into(),
+        },
+    )
+    .expect("second login call");
+    again.expect("second session");
+    let after: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, vault, "recovery_events", (0u64, 10u32))
+            .expect("private recovery events");
+    assert_eq!(after.expect("recovery records").len(), 1);
+
+    pic.stop_canister(journal, Some(controller))
+        .expect("stop journal");
+    let third = issue(&pic, vault, caller, eoa);
+    let third_challenge = rebuild(vault, caller, eoa, &third, ORIGIN, "local");
+    let third_signature = third_challenge.sign_for_tests(&secret_key).expect("sign");
+    let during_outage: Result<SessionHandle, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "open_session",
+        OpenSessionRequest {
+            challenge_id: third.challenge_id,
+            eoa_signature: third_signature.to_bytes65().to_vec().into(),
+        },
+    )
+    .expect("existing identity login call");
+    during_outage.expect("existing identity can authenticate during journal outage");
+
+    let new_secret = secret(106);
+    let new_eoa = address_from_secret(&new_secret).expect("new address");
+    let new_challenge = issue(&pic, vault, caller, new_eoa);
+    let new_typed = rebuild(vault, caller, new_eoa, &new_challenge, ORIGIN, "local");
+    let new_signature = new_typed.sign_for_tests(&new_secret).expect("sign");
+    let new_identity: Result<SessionHandle, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "open_session",
+        OpenSessionRequest {
+            challenge_id: new_challenge.challenge_id,
+            eoa_signature: new_signature.to_bytes65().to_vec().into(),
+        },
+    )
+    .expect("new identity login call");
+    assert!(
+        new_identity.is_err(),
+        "new identity requires durable journal"
+    );
 }
 
 #[test]

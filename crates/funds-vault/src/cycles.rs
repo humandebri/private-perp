@@ -1,0 +1,52 @@
+use api_types::error::ErrorCode;
+use api_types::operations_status::CyclesStatus;
+
+fn map_db(error: db::error::Error) -> ErrorCode {
+    crate::auth::map_db(error, None)
+}
+
+pub fn configure(daily_floor: u128, exit_reserve: u128) -> Result<(), ErrorCode> {
+    let guard = db::tx::query(db::repo::send_journal_client::guard_principal)
+        .map_err(map_db)?
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    if ic_cdk::api::msg_caller().as_slice() != guard.as_slice() {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "SNS guard required".into(),
+        });
+    }
+    if daily_floor == 0 || exit_reserve == 0 {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    db::tx::update(|c| db::repo::cycles::configure(c, daily_floor, exit_reserve)).map_err(map_db)
+}
+
+pub fn status() -> Result<CyclesStatus, ErrorCode> {
+    let now = crate::clock::now_ms();
+    let balance = ic_cdk::api::canister_cycle_balance();
+    db::tx::update(|c| db::repo::cycles::sample(c, balance, now)).map_err(map_db)?;
+    current(now, balance)
+}
+
+fn current(now: u64, balance: u128) -> Result<CyclesStatus, ErrorCode> {
+    let (config, observed) = db::tx::query(|c| {
+        Ok((
+            db::repo::cycles::config(c)?,
+            db::repo::cycles::observed_daily_burn(c, now)?,
+        ))
+    })
+    .map_err(map_db)?;
+    Ok(CyclesStatus::calculate(balance, observed, config, now))
+}
+
+pub fn require_new() -> Result<(), ErrorCode> {
+    if current(
+        crate::clock::now_ms(),
+        ic_cdk::api::canister_cycle_balance(),
+    )?
+    .new_risk_stopped
+    {
+        Err(ErrorCode::PolicyUnavailable)
+    } else {
+        Ok(())
+    }
+}

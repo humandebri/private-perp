@@ -9,6 +9,7 @@ use api_types::auth::{
     SessionStatus,
 };
 use api_types::error::{BadRequestCode, ErrorCode, NotAllowedCode};
+use api_types::journal::{RecoveryEvent, RecoveryPayload};
 use candid::Principal;
 use db::error::Error as DbError;
 use db::repo::auth::{ChallengeRow, SessionRow};
@@ -278,7 +279,33 @@ pub async fn open_session(
     let candidate_user_id = random::random32().await?;
     let expires_at = now.saturating_add(config::SESSION_TTL_MS);
 
-    let (_user_id, revocation_generation) = db::tx::update(|connection| {
+    let mut logical_id = b"vault_identity".to_vec();
+    logical_id.extend_from_slice(row.network.as_bytes());
+    logical_id.extend_from_slice(&row.eoa_address);
+    let identity_event = RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&logical_id).to_vec().into(),
+        payload: RecoveryPayload::IdentityRegistration {
+            user_id: candidate_user_id.to_vec().into(),
+            owner: caller,
+            eoa_address: row.eoa_address.to_vec().into(),
+            network: row.network.clone(),
+        },
+    };
+    let ack = journal_client::append_recovery_event_if("vault", identity_event.clone(), |c| {
+        Ok(db::repo::auth::find_identity_by_eoa(c, &row.eoa_address)?.is_none())
+    })
+    .await?;
+
+    let result = db::tx::update(|connection| {
+        if let Some(ack) = &ack {
+            if db::repo::auth::find_identity_by_eoa(connection, &row.eoa_address)?.is_some() {
+                return Err(DbError::Conflict);
+            }
+            journal_client::record_recovery_event(connection, &identity_event, ack)?;
+        } else if db::repo::auth::find_identity_by_eoa(connection, &row.eoa_address)?.is_none() {
+            return Err(DbError::Conflict);
+        }
         let identity =
             db::repo::auth::ensure_identity(connection, &row.eoa_address, &candidate_user_id, now)?;
         db::repo::auth::touch_login(connection, &identity.user_id, now)?;
@@ -300,8 +327,16 @@ pub async fn open_session(
             now,
         )?;
         Ok((identity.user_id, identity.revocation_generation))
-    })
-    .map_err(|error| map_db(error, None))?;
+    });
+    let (_user_id, revocation_generation) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            if ack.is_some() {
+                journal_client::lock()?;
+            }
+            return Err(map_db(error, None));
+        }
+    };
 
     Ok(SessionHandle {
         session_id: session_id.to_vec().into(),

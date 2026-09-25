@@ -151,8 +151,8 @@ pub fn insert_fund_action(
 }
 
 /// 署名者ごとのnonceを `max(now_ms, last + 1)` で確保する（同一トランザクション）。
-pub fn allocate_master_nonce(
-    connection: &mut UpdateConnection<'_>,
+pub fn next_master_nonce(
+    connection: &Connection,
     signer_id: &str,
     now_ms: u64,
 ) -> Result<u64, Error> {
@@ -164,17 +164,28 @@ pub fn allocate_master_nonce(
         .map_err(sql)?;
     let now = i64::try_from(now_ms).map_err(|_| Error::Overflow)?;
     let next = match last {
-        Some(previous) => previous.saturating_add(1).max(now),
+        Some(previous) => previous.checked_add(1).ok_or(Error::Overflow)?.max(now),
         None => now,
     };
+    u64::try_from(next).map_err(|_| Error::Overflow)
+}
+
+/// 署名者ごとのnonceを確保する。先行ジャーナルが予定値を記録した場合は、
+/// 同じトランザクションで返値を照合してからactionを作る。
+pub fn allocate_master_nonce(
+    connection: &mut UpdateConnection<'_>,
+    signer_id: &str,
+    now_ms: u64,
+) -> Result<u64, Error> {
+    let next = next_master_nonce(connection, signer_id, now_ms)?;
     connection
         .execute(
             "INSERT INTO master_nonces (signer_id, last_nonce) VALUES (?1, ?2)
              ON CONFLICT(signer_id) DO UPDATE SET last_nonce = excluded.last_nonce",
-            params![signer_id, next],
+            params![signer_id, i64::try_from(next).map_err(|_| Error::Overflow)?],
         )
         .map_err(sql)?;
-    u64::try_from(next).map_err(|_| Error::Overflow)
+    Ok(next)
 }
 
 /// 未署名actionを1件確保する（epochを増やしてリースを取る）。
@@ -260,6 +271,22 @@ pub fn action_state(
             action_state_from_str(&value).ok_or(Error::Invariant("unknown dispatch state"))
         })
         .transpose()
+}
+
+pub fn recovery_lease_valid(
+    connection: &Connection,
+    action_id: &[u8; 32],
+    epoch: u64,
+    now: u64,
+) -> Result<bool, Error> {
+    let valid = connection
+        .query_optional_scalar::<i64>(
+            "SELECT 1 FROM fund_actions WHERE action_id = ?1 AND worker_epoch = ?2
+          AND dispatch_state = 'signing' AND kind = 'recovery' AND lease_until >= ?3",
+            params![action_id.as_slice(), epoch as i64, now as i64],
+        )
+        .map_err(sql)?;
+    Ok(valid.is_some())
 }
 
 /// 署名済みとして保存する（payloadと署名はこの時点で必須）。
@@ -362,6 +389,24 @@ pub fn mark_unknown(
         ActionState::Dispatching,
         ActionState::Unknown,
         Some(reason),
+        now,
+    )
+}
+
+/// HL履歴によってunknownが確定した場合だけ遷移する。
+pub fn reconcile_unknown(
+    connection: &mut UpdateConnection<'_>,
+    action_id: &[u8; 32],
+    epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    cas_transition(
+        connection,
+        action_id,
+        epoch,
+        ActionState::Unknown,
+        ActionState::Reconciled,
+        None,
         now,
     )
 }
@@ -581,5 +626,474 @@ pub fn mark_resolved(
         ActionState::Reconciled,
         None,
         now,
+    )
+}
+
+/// 回収のcoreフェンス世代を送信前に保存する。
+pub fn record_recovery_fence(
+    connection: &mut UpdateConnection<'_>,
+    action_id: &[u8; 32],
+    worker_epoch: u64,
+    fence_epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE fund_actions SET recovery_fence_epoch = ?3, updated_at = ?4
+         WHERE action_id = ?1 AND worker_epoch = ?2 AND dispatch_state = 'signing'
+           AND kind = 'recovery' AND (recovery_fence_epoch IS NULL OR recovery_fence_epoch = ?3)",
+            params![
+                action_id.as_slice(),
+                worker_epoch as i64,
+                fence_epoch as i64,
+                now as i64
+            ],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "signing recovery",
+        "claim lost",
+    )
+}
+
+pub fn recovery_fence_epoch(
+    connection: &Connection,
+    action_id: &[u8; 32],
+) -> Result<Option<u64>, Error> {
+    connection
+        .query_optional(
+            "SELECT recovery_fence_epoch FROM fund_actions WHERE action_id = ?1",
+            params![action_id.as_slice()],
+            |row| row.get::<Option<i64>>(0),
+        )
+        .map_err(sql)?
+        .flatten()
+        .map(|value| u64::try_from(value).map_err(|_| Error::Invariant("bad fence epoch")))
+        .transpose()
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveryRelease {
+    pub action_id: [u8; 32],
+    pub account_id: [u8; 32],
+    pub user_id: [u8; 32],
+    pub request_id: Vec<u8>,
+    pub fence_epoch: u64,
+    pub state: String,
+}
+
+pub fn recovery_release_candidates(
+    connection: &Connection,
+    limit: u32,
+) -> Result<Vec<RecoveryRelease>, Error> {
+    let rows = connection
+        .query_all(
+            "SELECT a.action_id, r.account_id, a.user_id, a.client_request_id,
+                a.recovery_fence_epoch, a.dispatch_state
+           FROM fund_actions a JOIN fund_requests r
+             ON r.user_id = a.user_id AND r.client_request_id = a.client_request_id
+          WHERE a.kind = 'recovery' AND a.recovery_fence_epoch IS NOT NULL
+            AND a.recovery_fence_released_at IS NULL
+            AND ((a.dispatch_state = 'reconciled' AND r.state IN ('settled', 'rejected'))
+              OR a.dispatch_state = 'aborted')
+          ORDER BY a.updated_at, a.action_id LIMIT ?1",
+            params![limit as i64],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<Vec<u8>>(1)?,
+                    row.get::<Vec<u8>>(2)?,
+                    row.get::<Vec<u8>>(3)?,
+                    row.get::<i64>(4)?,
+                    row.get::<String>(5)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    rows.into_iter()
+        .map(|(action, account, user, request, epoch, state)| {
+            Ok(RecoveryRelease {
+                action_id: action
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad action id"))?,
+                account_id: account
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad account id"))?,
+                user_id: user
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad user id"))?,
+                request_id: request,
+                fence_epoch: u64::try_from(epoch)
+                    .map_err(|_| Error::Invariant("bad fence epoch"))?,
+                state,
+            })
+        })
+        .collect()
+}
+
+pub fn mark_recovery_fence_released(
+    connection: &mut UpdateConnection<'_>,
+    action_id: &[u8; 32],
+    epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection.execute(
+        "UPDATE fund_actions SET recovery_fence_released_at = ?3 WHERE action_id = ?1 AND recovery_fence_epoch = ?2 AND recovery_fence_released_at IS NULL",
+        params![action_id.as_slice(), epoch as i64, now as i64],
+    ).map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "fence release pending",
+        "already released",
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveryCheck {
+    pub action_id: [u8; 32],
+    pub account_id: [u8; 32],
+    pub user_id: [u8; 32],
+    pub request_id: Vec<u8>,
+    pub amount: u64,
+    pub destination: String,
+    pub nonce: u64,
+    pub worker_epoch: u64,
+    pub fence_epoch: u64,
+    pub checked_until: Option<u64>,
+    pub window_ms: u64,
+    pub action_state: String,
+    pub match_hash: Option<[u8; 32]>,
+    pub ambiguous: bool,
+}
+
+pub fn recovery_checks(connection: &Connection, limit: u32) -> Result<Vec<RecoveryCheck>, Error> {
+    let rows = connection
+        .query_all(
+            "SELECT a.action_id, r.account_id, a.user_id, a.client_request_id, r.amount,
+                r.destination, a.nonce, a.worker_epoch, a.recovery_fence_epoch,
+                a.recovery_checked_until, a.recovery_window_ms, a.dispatch_state,
+                a.recovery_match_hash, a.recovery_ambiguous
+           FROM fund_actions a JOIN fund_requests r
+             ON r.user_id = a.user_id AND r.client_request_id = a.client_request_id
+          WHERE a.kind = 'recovery' AND a.recovery_fence_epoch IS NOT NULL
+            AND a.recovery_ambiguous = 0
+            AND r.state IN ('unknown', 'executing')
+            AND a.dispatch_state IN ('unknown', 'reconciled')
+          ORDER BY a.updated_at, a.action_id LIMIT ?1",
+            params![limit as i64],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<Vec<u8>>(1)?,
+                    row.get::<Vec<u8>>(2)?,
+                    row.get::<Vec<u8>>(3)?,
+                    row.get::<i64>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<i64>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<i64>(8)?,
+                    row.get::<Option<i64>>(9)?,
+                    row.get::<i64>(10)?,
+                    row.get::<String>(11)?,
+                    row.get::<Option<Vec<u8>>>(12)?,
+                    row.get::<i64>(13)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(RecoveryCheck {
+                action_id: row
+                    .0
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad action id"))?,
+                account_id: row
+                    .1
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad account id"))?,
+                user_id: row
+                    .2
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad user id"))?,
+                request_id: row.3,
+                amount: u64::try_from(row.4).map_err(|_| Error::Invariant("bad amount"))?,
+                destination: row.5,
+                nonce: u64::try_from(row.6).map_err(|_| Error::Invariant("bad nonce"))?,
+                worker_epoch: u64::try_from(row.7)
+                    .map_err(|_| Error::Invariant("bad worker epoch"))?,
+                fence_epoch: u64::try_from(row.8)
+                    .map_err(|_| Error::Invariant("bad fence epoch"))?,
+                checked_until: row
+                    .9
+                    .map(|v| u64::try_from(v).map_err(|_| Error::Invariant("bad cursor")))
+                    .transpose()?,
+                window_ms: u64::try_from(row.10).map_err(|_| Error::Invariant("bad window"))?,
+                action_state: row.11,
+                match_hash: row
+                    .12
+                    .map(|hash| {
+                        hash.try_into()
+                            .map_err(|_| Error::Invariant("bad recovery hash"))
+                    })
+                    .transpose()?,
+                ambiguous: row.13 != 0,
+            })
+        })
+        .collect()
+}
+
+pub fn mark_recovery_ambiguous(
+    connection: &mut UpdateConnection<'_>,
+    action_id: &[u8; 32],
+    epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection.execute(
+        "UPDATE fund_actions SET recovery_ambiguous = 1, updated_at = ?3
+          WHERE action_id = ?1 AND worker_epoch = ?2 AND dispatch_state IN ('unknown', 'reconciled')",
+        params![action_id.as_slice(), epoch as i64, now as i64],
+    ).map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "recovery check",
+        "stale callback",
+    )
+}
+
+pub fn defer_recovery_check(
+    connection: &mut UpdateConnection<'_>,
+    action_id: &[u8; 32],
+    epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE fund_actions SET updated_at = MAX(updated_at + 1, ?3)
+              WHERE action_id = ?1 AND worker_epoch = ?2
+          AND dispatch_state IN ('unknown', 'reconciled')",
+            params![action_id.as_slice(), epoch as i64, now as i64],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "recovery check",
+        "stale callback",
+    )
+}
+
+pub fn advance_recovery_check(
+    connection: &mut UpdateConnection<'_>,
+    action_id: &[u8; 32],
+    epoch: u64,
+    checked_until: u64,
+    window_ms: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection.execute(
+        "UPDATE fund_actions SET recovery_checked_until = ?3, recovery_window_ms = ?4, updated_at = ?5
+          WHERE action_id = ?1 AND worker_epoch = ?2 AND kind = 'recovery'
+            AND dispatch_state IN ('unknown', 'reconciled')
+            AND (recovery_checked_until IS NULL OR recovery_checked_until <= ?3)",
+        params![action_id.as_slice(), epoch as i64, checked_until as i64, window_ms as i64, now as i64],
+    ).map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "recovery check",
+        "stale callback",
+    )
+}
+
+pub fn set_recovery_match_hash(
+    connection: &mut UpdateConnection<'_>,
+    action_id: &[u8; 32],
+    epoch: u64,
+    hash: &[u8; 32],
+) -> Result<(), Error> {
+    connection.execute(
+        "UPDATE fund_actions SET recovery_match_hash = ?3 WHERE action_id = ?1 AND worker_epoch = ?2
+          AND recovery_match_hash IS NULL AND dispatch_state IN ('unknown', 'reconciled')",
+        params![action_id.as_slice(), epoch as i64, hash.as_slice()],
+    ).map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "unmatched recovery",
+        "already matched",
+    )
+}
+
+/// 本人の回収フェンス表示。未送信の準備と、送信後の照合を区別する。
+pub fn recovery_fence_status(
+    connection: &Connection,
+    user_id: &[u8; 32],
+) -> Result<Option<String>, Error> {
+    connection.query_optional_scalar::<String>(
+        "SELECT CASE WHEN r.state IN ('unknown', 'executing') THEN 'reconciling' ELSE 'preparing' END
+           FROM fund_actions a JOIN fund_requests r
+             ON r.user_id = a.user_id AND r.client_request_id = a.client_request_id
+          WHERE a.user_id = ?1 AND a.kind = 'recovery'
+            AND a.recovery_fence_released_at IS NULL
+            AND (r.state IN ('reserved', 'unknown', 'executing') OR a.recovery_fence_epoch IS NOT NULL)
+          ORDER BY CASE WHEN r.state IN ('unknown', 'executing') THEN 0 ELSE 1 END,
+                   a.created_at DESC LIMIT 1",
+        params![user_id.as_slice()],
+    ).map_err(sql)
+}
+
+pub fn active_recovery_exists(connection: &Connection) -> Result<bool, Error> {
+    Ok(connection
+        .query_scalar::<i64>(
+            "SELECT EXISTS(
+            SELECT 1 FROM fund_actions a JOIN fund_requests r
+              ON r.user_id = a.user_id AND r.client_request_id = a.client_request_id
+            WHERE a.kind = 'recovery' AND (
+              r.state IN ('reserved', 'unknown', 'executing') OR
+              (a.recovery_fence_epoch IS NOT NULL AND a.recovery_fence_released_at IS NULL)
+            ))",
+            &[],
+        )
+        .map_err(sql)?
+        != 0)
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveryProof {
+    pub worker_epoch: u64,
+    pub checked_until: Option<u64>,
+    pub match_hash: Option<[u8; 32]>,
+    pub ambiguous: bool,
+}
+
+pub fn recovery_proof(
+    connection: &Connection,
+    action_id: &[u8; 32],
+) -> Result<Option<RecoveryProof>, Error> {
+    let row = connection
+        .query_optional(
+            "SELECT worker_epoch, recovery_checked_until, recovery_match_hash, recovery_ambiguous
+           FROM fund_actions WHERE action_id = ?1 AND kind = 'recovery'
+             AND dispatch_state IN ('unknown', 'reconciled')",
+            params![action_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<i64>(0)?,
+                    row.get::<Option<i64>>(1)?,
+                    row.get::<Option<Vec<u8>>>(2)?,
+                    row.get::<i64>(3)?,
+                ))
+            },
+        )
+        .map_err(sql)?;
+    row.map(|(epoch, cursor, hash, ambiguous)| {
+        Ok(RecoveryProof {
+            worker_epoch: u64::try_from(epoch)
+                .map_err(|_| Error::Invariant("bad recovery epoch"))?,
+            checked_until: cursor
+                .map(|value| {
+                    u64::try_from(value).map_err(|_| Error::Invariant("bad recovery cursor"))
+                })
+                .transpose()?,
+            match_hash: hash
+                .map(|value| {
+                    value
+                        .try_into()
+                        .map_err(|_| Error::Invariant("bad recovery hash"))
+                })
+                .transpose()?,
+            ambiguous: ambiguous != 0,
+        })
+    })
+    .transpose()
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyRecovery {
+    pub action_id: [u8; 32],
+    pub account_id: [u8; 32],
+    pub user_id: [u8; 32],
+    pub request_id: Vec<u8>,
+    pub worker_epoch: u64,
+    pub dispatch_state: String,
+}
+
+pub fn legacy_recoveries(
+    connection: &Connection,
+    limit: u32,
+) -> Result<Vec<LegacyRecovery>, Error> {
+    let rows = connection.query_all(
+        "SELECT a.action_id, r.account_id, a.user_id, a.client_request_id, a.worker_epoch, a.dispatch_state
+           FROM fund_actions a JOIN fund_requests r
+             ON r.user_id = a.user_id AND r.client_request_id = a.client_request_id
+          WHERE a.kind = 'recovery' AND a.recovery_fence_epoch IS NULL
+            AND a.dispatch_state IN ('dispatching', 'unknown', 'reconciled')
+            AND r.state IN ('reserved', 'unknown', 'executing')
+          ORDER BY a.updated_at, a.action_id LIMIT ?1",
+        params![limit as i64],
+        |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<Vec<u8>>(1)?, row.get::<Vec<u8>>(2)?, row.get::<Vec<u8>>(3)?, row.get::<i64>(4)?, row.get::<String>(5)?)),
+    ).map_err(sql)?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(LegacyRecovery {
+                action_id: row
+                    .0
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad legacy action"))?,
+                account_id: row
+                    .1
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad legacy account"))?,
+                user_id: row
+                    .2
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad legacy user"))?,
+                request_id: row.3,
+                worker_epoch: u64::try_from(row.4)
+                    .map_err(|_| Error::Invariant("bad legacy epoch"))?,
+                dispatch_state: row.5,
+            })
+        })
+        .collect()
+}
+
+pub fn record_legacy_recovery_fence(
+    connection: &mut UpdateConnection<'_>,
+    action: &LegacyRecovery,
+    fence_epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    if action.dispatch_state == "dispatching" {
+        mark_unknown(
+            connection,
+            &action.action_id,
+            action.worker_epoch,
+            "upgrade_result_unknown",
+            now,
+        )?;
+        crate::repo::funds::set_request_state(
+            connection,
+            &action.user_id,
+            &action.request_id,
+            api_types::fund::FundRequestState::Unknown,
+            now,
+        )?;
+    }
+    connection
+        .execute(
+            "UPDATE fund_actions SET recovery_fence_epoch = ?3, updated_at = ?4
+          WHERE action_id = ?1 AND worker_epoch = ?2 AND kind = 'recovery'
+            AND recovery_fence_epoch IS NULL AND dispatch_state IN ('unknown', 'reconciled')",
+            params![
+                action.action_id.as_slice(),
+                action.worker_epoch as i64,
+                fence_epoch as i64,
+                now as i64
+            ],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "legacy recovery",
+        "stale legacy recovery",
     )
 }

@@ -10,8 +10,12 @@
 //! 認可は `funds_vault` の `session_status` に問い合わせ、返却されたprincipalをこの
 //! Canisterが受け取ったcallerと比較する（vaultはcoreのcallerを知らないため）。
 
+mod cycles;
 mod environment;
+mod market;
 mod pipeline;
+mod recovery;
+mod rest_budget;
 mod venue;
 
 use api_types::auth::{SessionHandle, SessionStatus};
@@ -77,14 +81,24 @@ fn set_vault_principal(vault: Principal) -> Result<(), ErrorCode> {
         });
     }
     let bytes = vault.as_slice().to_vec();
-    if bytes.is_empty() || bytes.len() > 29 {
+    if vault == Principal::anonymous() || bytes.is_empty() || bytes.len() > 29 {
         return Err(ErrorCode::BadRequest {
             code: BadRequestCode::MalformedPayload,
             detail: "invalid vault principal".to_string(),
         });
     }
-    db::tx::update(|connection| db::repo::core_config::set_vault_principal(connection, &bytes))
-        .map_err(map_db)
+    db::tx::update(|connection| {
+        let previous = db::repo::core_config::vault_principal(connection)?;
+        if previous.is_some()
+            && previous.as_deref() != Some(bytes.as_slice())
+            && (db::repo::recovery_fences::migration_locked(connection)?
+                || db::repo::recovery_fences::any_active(connection)?)
+        {
+            return Err(db::error::Error::Conflict);
+        }
+        db::repo::core_config::set_vault_principal(connection, &bytes)
+    })
+    .map_err(map_db)
 }
 
 /// 政策Canisterのprincipalを設定する（controllerのみ）。
@@ -166,6 +180,55 @@ fn get_vault_principal() -> Option<Principal> {
         .ok()
         .flatten()
         .map(|bytes| Principal::from_slice(&bytes))
+}
+
+#[ic_cdk::update]
+async fn prepare_recovery(
+    request: api_types::recovery::PrepareRecovery,
+) -> Result<api_types::recovery::RecoveryFenceToken, ErrorCode> {
+    recovery::prepare(request).await
+}
+
+#[ic_cdk::update]
+async fn commit_recovery(token: api_types::recovery::RecoveryFenceToken) -> Result<(), ErrorCode> {
+    recovery::commit(token).await
+}
+
+#[ic_cdk::update]
+fn mark_recovery_unknown(token: api_types::recovery::RecoveryFenceToken) -> Result<(), ErrorCode> {
+    recovery::mark_unknown(token)
+}
+
+#[ic_cdk::update]
+fn abort_recovery(token: api_types::recovery::RecoveryFenceToken) -> Result<(), ErrorCode> {
+    recovery::abort(token)
+}
+
+#[ic_cdk::update]
+fn finish_recovery(token: api_types::recovery::RecoveryFenceToken) -> Result<(), ErrorCode> {
+    recovery::finish(token)
+}
+
+#[ic_cdk::update]
+fn migrate_recovery(
+    request: api_types::recovery::PrepareRecovery,
+) -> Result<api_types::recovery::RecoveryFenceToken, ErrorCode> {
+    recovery::migrate(request)
+}
+
+#[ic_cdk::update]
+fn finish_recovery_migration() -> Result<(), ErrorCode> {
+    recovery::finish_migration()
+}
+
+#[ic_cdk::update]
+fn begin_recovery_migration() -> Result<(), ErrorCode> {
+    recovery::begin_migration()
+}
+
+#[ic_cdk::query]
+fn recovery_migration_locked() -> Result<bool, ErrorCode> {
+    db::tx::query(db::repo::recovery_fences::migration_locked).map_err(map_db)
 }
 
 /// HPKEの鍵世代を更新する（controllerのみ）。
@@ -401,6 +464,40 @@ fn set_market_context(network: String, dex: String) -> Result<(), ErrorCode> {
     .map_err(map_db)
 }
 
+#[ic_cdk::update]
+fn configure_cycles(daily_floor: u128, exit_reserve: u128) -> Result<(), ErrorCode> {
+    cycles::configure(daily_floor, exit_reserve)
+}
+
+#[ic_cdk::update]
+fn get_cycles_status() -> Result<api_types::operations_status::CyclesStatus, ErrorCode> {
+    cycles::status()
+}
+
+#[ic_cdk::update]
+fn configure_market_threshold(
+    input: api_types::operations_status::MarketThreshold,
+) -> Result<(), ErrorCode> {
+    market::configure(input)
+}
+
+#[ic_cdk::query]
+fn get_market_status(
+    market: String,
+) -> Result<api_types::operations_status::MarketStatus, ErrorCode> {
+    market::status(&market)
+}
+
+#[ic_cdk::update]
+async fn refresh_market() -> Result<(), ErrorCode> {
+    if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "controller required".into(),
+        });
+    }
+    market::poll_if_due(ic_cdk::api::time() / 1_000_000).await
+}
+
 /// `meta`の`universe`を登録する（ローカルのブートストラップ。本番はHL `/info` から取得する）。
 #[ic_cdk::update]
 fn set_meta_cache(network: String, dex: String, universe: String) -> Result<(), ErrorCode> {
@@ -463,6 +560,81 @@ fn get_environment() -> Result<api_types::environment::EnvironmentView, ErrorCod
     environment::resolved()
 }
 
+#[ic_cdk::update]
+fn set_send_journal(principal: Principal) -> Result<(), ErrorCode> {
+    if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "controller required".into(),
+        });
+    }
+    journal_client::configure(principal)
+}
+
+#[ic_cdk::update]
+fn set_journal_guard(principal: Principal) -> Result<(), ErrorCode> {
+    if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "controller required".into(),
+        });
+    }
+    journal_client::set_guard(principal)
+}
+
+#[ic_cdk::update]
+async fn resume_journal() -> Result<(), ErrorCode> {
+    journal_client::resume("core").await
+}
+
+#[ic_cdk::query]
+fn get_send_journal() -> Result<Option<Principal>, ErrorCode> {
+    journal_client::configured()
+}
+
+#[ic_cdk::query]
+fn get_journal_send_status() -> Result<(bool, bool), ErrorCode> {
+    journal_client::public_status()
+}
+
+#[ic_cdk::query]
+fn get_journal_guard() -> Result<Option<Principal>, ErrorCode> {
+    if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "controller required".into(),
+        });
+    }
+    journal_client::guard()
+}
+
+#[ic_cdk::query]
+fn journal_restore_status() -> Result<(u64, u64, bool), ErrorCode> {
+    if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "controller required".into(),
+        });
+    }
+    journal_client::status()
+}
+
+#[ic_cdk::query]
+fn recovery_stage_status() -> Result<(u64, bool), ErrorCode> {
+    if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "controller required".into(),
+        });
+    }
+    journal_client::recovery_stage_status()
+}
+
+#[ic_cdk::query]
+fn recovery_replay_pending() -> Result<bool, ErrorCode> {
+    if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "controller required".into(),
+        });
+    }
+    journal_client::replay_pending_validation()
+}
+
 /// 外部確認済みのleverage preflight不明状態をcontrollerが解決する。
 #[ic_cdk::update]
 fn resolve_unknown_order_preflight(
@@ -498,13 +670,55 @@ fn resolve_unknown_order_preflight(
 /// 受付を1件処理する（認可・検証・冪等性・pending注文の登録）。
 ///
 /// 署名・送信・照合はパイプライン（次段階）が行う。ここでは受付だけを確定させる。
-#[ic_cdk::update]
 async fn submit_order(
     session: SessionHandle,
     args: api_types::order::SubmitOrderArgs,
 ) -> Result<api_types::order::SubmitOrderResult, ErrorCode> {
     let user_id = authorize(&session).await?;
     submit_inner(&session, user_id, args).await
+}
+
+struct OrderAcceptance<'a> {
+    user_id: &'a [u8; 32],
+    account_id: &'a [u8; 32],
+    request_id: &'a [u8],
+    fingerprint: &'a [u8; 32],
+    reduce_only: bool,
+    notional: u64,
+    equity: u64,
+}
+
+fn order_acceptance_preflight(
+    connection: &ic_sqlite_vfs::db::connection::Connection,
+    order: &OrderAcceptance<'_>,
+) -> Result<db::repo::core_requests::AcceptOutcome, DbError> {
+    if !order.reduce_only
+        && (db::repo::recovery_fences::migration_locked(connection)?
+            || db::repo::recovery_fences::active(connection, order.account_id)?)
+    {
+        return Err(DbError::Conflict);
+    }
+    let accepted = db::repo::core_requests::request_status(
+        connection,
+        order.user_id,
+        order.request_id,
+        order.fingerprint,
+    )?;
+    if accepted != db::repo::core_requests::AcceptOutcome::Accepted {
+        return Ok(accepted);
+    }
+    if db::repo::orders::pending_order_count(connection, order.account_id)? >= MAX_PENDING_ORDERS {
+        return Err(DbError::Invariant("too many pending orders"));
+    }
+    if !order.reduce_only {
+        db::repo::orders::ensure_risk_within_equity(
+            connection,
+            order.account_id,
+            order.notional,
+            order.equity,
+        )?;
+    }
+    Ok(db::repo::core_requests::AcceptOutcome::Accepted)
 }
 
 /// 認可済みの受付（`submit_order`・決済の共通経路）。
@@ -518,21 +732,34 @@ async fn submit_inner(
     args: api_types::order::SubmitOrderArgs,
 ) -> Result<api_types::order::SubmitOrderResult, ErrorCode> {
     let now = ic_cdk::api::time() / 1_000_000;
+    if args.client_request_id.is_empty() || args.client_request_id.len() > 64 {
+        return Err(bad(
+            BadRequestCode::MalformedPayload,
+            "client_request_id must be 1..=64 bytes",
+        ));
+    }
 
     // 銘柄は初期allowlistのみ。asset indexはmetaから解決する（固定値を埋め込まない）。
     // 緊急停止中は新規受付を行わない（fail-closed）。
-    require_not_stopped().await?;
+    if !args.reduce_only {
+        cycles::require_new()?;
+        require_not_stopped().await?;
+    }
 
     let market = args.market.to_uppercase();
     // 銘柄はpolicy_registryのallowlistで判定する（照会失敗・未設定はfail-closed）。
-    if !policy_markets()
-        .await?
-        .iter()
-        .any(|allowed| allowed == &market)
+    if !args.reduce_only
+        && !policy_markets()
+            .await?
+            .iter()
+            .any(|allowed| allowed == &market)
     {
         return Err(ErrorCode::NotAllowed {
             code: api_types::error::NotAllowedCode::AssetNotAllowed,
         });
+    }
+    if !args.reduce_only {
+        market::require(&market)?;
     }
 
     // 数量・価格は正規化十進で検証し、丸めない。
@@ -658,6 +885,9 @@ async fn submit_inner(
             code: api_types::error::NotAllowedCode::AccountNotOwned,
         });
     }
+    if !args.reduce_only {
+        vault_eligibility_session(session, &account_id).await?;
+    }
     // 照合（sweep）はセッションを持たないため、取引所アドレスをここで保存しておく。
     cache_trading_address(session, &account_id, &user_id).await?;
     // 取引所データが古い、または一度も観測できていない場合は新規リスクを増やさない。
@@ -707,37 +937,184 @@ async fn submit_inner(
     };
 
     // 上の外部照会中にstopやallowlistが変わり得るため、永続化直前に再検証する。
-    require_not_stopped().await?;
-    if !policy_markets()
-        .await?
-        .iter()
-        .any(|allowed| allowed == &market)
+    if !args.reduce_only {
+        cycles::require_new()?;
+        market::require(&market)?;
+        require_not_stopped().await?;
+    }
+    if !args.reduce_only {
+        vault_eligibility_session(session, &account_id).await?;
+    }
+    if !args.reduce_only
+        && !policy_markets()
+            .await?
+            .iter()
+            .any(|allowed| allowed == &market)
     {
         return Err(ErrorCode::NotAllowed {
             code: api_types::error::NotAllowedCode::AssetNotAllowed,
         });
     }
 
-    let accepted = db::tx::update(|connection| {
+    if notional > i64::MAX as u64 {
+        return Err(bad(
+            BadRequestCode::QuantityOutOfRange,
+            "notional exceeds storage range",
+        ));
+    }
+    let now = ic_cdk::api::time() / 1_000_000;
+    if args.expires_after.is_some_and(|expires| expires <= now) {
+        return Err(bad(BadRequestCode::MalformedPayload, "order has expired"));
+    }
+    let request_id = args.client_request_id.as_ref();
+    let acceptance = OrderAcceptance {
+        user_id: &user_id,
+        account_id: &account_id,
+        request_id,
+        fingerprint: &fingerprint,
+        reduce_only: args.reduce_only,
+        notional,
+        equity,
+    };
+    match db::tx::query(|connection| order_acceptance_preflight(connection, &acceptance))
+        .map_err(map_db)?
+    {
+        db::repo::core_requests::AcceptOutcome::Duplicate => {
+            let (existing_id, existing_cloid) = db::tx::query(|connection| {
+                db::repo::orders::order_by_request(connection, &user_id, request_id)
+            })
+            .map_err(map_db)?
+            .ok_or_else(|| internal("duplicate request without an order".to_string()))?;
+            return Ok(api_types::order::SubmitOrderResult {
+                request_id: args.client_request_id,
+                order_id: existing_id.to_vec().into(),
+                cloid: existing_cloid.to_vec().into(),
+                accepted_at: now,
+            });
+        }
+        db::repo::core_requests::AcceptOutcome::Conflict => {
+            return Err(ErrorCode::IdempotencyConflict {
+                request_id: args.client_request_id,
+            });
+        }
+        db::repo::core_requests::AcceptOutcome::Accepted => {}
+    }
+    let mut logical = b"order_accepted".to_vec();
+    logical.extend_from_slice(&user_id);
+    logical.extend_from_slice(request_id);
+    let event = api_types::journal::RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&logical).to_vec().into(),
+        payload: api_types::journal::RecoveryPayload::OrderAccepted {
+            order_id: order_id.to_vec().into(),
+            request_id: request_id.to_vec().into(),
+            user_id: user_id.to_vec().into(),
+            account_id: account_id.to_vec().into(),
+            cloid: cloid.to_vec().into(),
+            body_hash: fingerprint.to_vec().into(),
+            risk_micros: notional,
+            reduce_only: args.reduce_only,
+            accepted_at_ms: now,
+        },
+    };
+    let ack = journal_client::append_recovery_event_if("core", event.clone(), |connection| {
+        match order_acceptance_preflight(connection, &acceptance)? {
+            db::repo::core_requests::AcceptOutcome::Accepted => Ok(true),
+            db::repo::core_requests::AcceptOutcome::Duplicate
+            | db::repo::core_requests::AcceptOutcome::Conflict => Ok(false),
+        }
+    })
+    .await?;
+    let Some(ack) = ack else {
+        let status = db::tx::query(|connection| {
+            db::repo::core_requests::request_status(connection, &user_id, request_id, &fingerprint)
+        })
+        .map_err(map_db)?;
+        return match status {
+            db::repo::core_requests::AcceptOutcome::Duplicate => {
+                let (existing_id, existing_cloid) = db::tx::query(|connection| {
+                    db::repo::orders::order_by_request(connection, &user_id, request_id)
+                })
+                .map_err(map_db)?
+                .ok_or_else(|| internal("duplicate request without an order".to_string()))?;
+                Ok(api_types::order::SubmitOrderResult {
+                    request_id: args.client_request_id,
+                    order_id: existing_id.to_vec().into(),
+                    cloid: existing_cloid.to_vec().into(),
+                    accepted_at: now,
+                })
+            }
+            db::repo::core_requests::AcceptOutcome::Conflict => {
+                Err(ErrorCode::IdempotencyConflict {
+                    request_id: args.client_request_id,
+                })
+            }
+            db::repo::core_requests::AcceptOutcome::Accepted => Err(ErrorCode::PolicyUnavailable),
+        };
+    };
+
+    let revalidated = async {
+        if authorize(session).await? != user_id || trading_account(session).await? != account_id {
+            return Err(ErrorCode::SessionRevoked);
+        }
+        if args
+            .expires_after
+            .is_some_and(|expires| expires <= ic_cdk::api::time() / 1_000_000)
+        {
+            return Err(bad(BadRequestCode::MalformedPayload, "order has expired"));
+        }
+        if !args.reduce_only {
+            cycles::require_new()?;
+            market::require(&market)?;
+            require_not_stopped().await?;
+            vault_eligibility_session(session, &account_id).await?;
+            if !policy_markets()
+                .await?
+                .iter()
+                .any(|allowed| allowed == &market)
+            {
+                return Err(ErrorCode::NotAllowed {
+                    code: api_types::error::NotAllowedCode::AssetNotAllowed,
+                });
+            }
+            if resolve_asset(&market)?.0 != asset_index {
+                return Err(ErrorCode::PolicyUnavailable);
+            }
+            let observed = db::tx::query(|connection| {
+                db::repo::positions::latest_observed(connection, &account_id)
+            })
+            .map_err(map_db)?;
+            if observed.is_none_or(|observed| {
+                (ic_cdk::api::time() / 1_000_000).saturating_sub(observed) > STALE_DATA_MS
+            }) {
+                return Err(ErrorCode::NotAllowed {
+                    code: api_types::error::NotAllowedCode::OperationNotAvailable,
+                });
+            }
+        }
+        Ok(())
+    }
+    .await;
+    let result = db::tx::update(|connection| {
+        journal_client::record_recovery_event(connection, &event, &ack)?;
+        let admitted = revalidated.is_ok()
+            && matches!(
+                order_acceptance_preflight(connection, &acceptance),
+                Ok(db::repo::core_requests::AcceptOutcome::Accepted)
+            );
         let accepted = db::repo::core_requests::accept_request(
             connection,
             &user_id,
-            args.client_request_id.as_ref(),
+            request_id,
             &fingerprint,
             now,
         )?;
         if accepted != db::repo::core_requests::AcceptOutcome::Accepted {
-            return Ok(accepted);
-        }
-        // 未終端の注文数に上限を設ける（1口座あたりのpending・open・unknown）。
-        if db::repo::orders::pending_order_count(connection, &account_id)? >= MAX_PENDING_ORDERS {
-            return Err(DbError::Invariant("too many pending orders"));
+            return Err(DbError::Conflict);
         }
         // reduce-onlyはエクスポージャを増やさないため、リスク予約を取らない
         // （予約すると建玉を閉じるための資金が無い状態で決済できなくなる）。
-        if !args.reduce_only {
-            // 予約済みリスクに今回の想定元本を足してもequityを超えないこと。
-            db::repo::orders::ensure_risk_within_equity(connection, &account_id, notional, equity)?;
+        if admitted && !args.reduce_only {
             db::repo::orders::reserve_risk(
                 connection,
                 &account_id,
@@ -779,35 +1156,26 @@ async fn submit_inner(
             },
             now,
         )?;
-        Ok(accepted)
-    })
-    .map_err(map_db)?;
-
-    let (accepted_order_id, accepted_cloid) = match accepted {
-        db::repo::core_requests::AcceptOutcome::Accepted => (order_id, cloid),
-        db::repo::core_requests::AcceptOutcome::Duplicate => {
-            // 同一ID・同一本文の再送は、最初に受付けた結果をそのまま返す。
-            db::tx::query(|connection| {
-                db::repo::orders::order_by_request(
-                    connection,
-                    &user_id,
-                    args.client_request_id.as_ref(),
-                )
-            })
-            .map_err(map_db)?
-            .ok_or_else(|| internal("duplicate request without an order".to_string()))?
+        if !admitted {
+            db::repo::orders::reject_queued_acceptance(connection, &order_id, now)?;
         }
-        db::repo::core_requests::AcceptOutcome::Conflict => {
-            return Err(ErrorCode::IdempotencyConflict {
-                request_id: args.client_request_id,
-            });
+        Ok(admitted)
+    });
+    let admitted = match result {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            journal_client::lock()?;
+            return Err(map_db(error));
         }
     };
+    if !admitted {
+        return Err(revalidated.err().unwrap_or(ErrorCode::PolicyUnavailable));
+    }
 
     Ok(api_types::order::SubmitOrderResult {
         request_id: args.client_request_id,
-        order_id: accepted_order_id.to_vec().into(),
-        cloid: accepted_cloid.to_vec().into(),
+        order_id: order_id.to_vec().into(),
+        cloid: cloid.to_vec().into(),
         accepted_at: now,
     })
 }
@@ -817,7 +1185,6 @@ async fn submit_inner(
 /// `limit_price`はスリッページ上限（公開市況から画面が決める）。省略時は観測した
 /// 建玉からmark価格を近似して`DEFAULT_SLIPPAGE_BPS`の幅を付ける。
 /// `ratio_bps`は建玉に対する比率（10000 = 全量）。
-#[ic_cdk::update]
 async fn close_position(
     session: SessionHandle,
     client_request_id: api_types::Blob,
@@ -845,7 +1212,6 @@ async fn close_position(
 /// 1件の失敗で全体を止めない（建玉ごとの結果を返す）。受付IDは
 /// `client_request_id`と銘柄から導出するため、同じIDの再送は同じ注文として扱われる
 /// （建玉が変わっている場合は`IdempotencyConflict`になる）。
-#[ic_cdk::update]
 async fn close_all(
     session: SessionHandle,
     client_request_id: api_types::Blob,
@@ -1052,7 +1418,6 @@ fn signed_micros(text: &str) -> Result<i128, ErrorCode> {
 /// Agent世代を要求する（**coreが鍵を導出・保管**し、vaultはmaster署名でアドレスを承認する）。
 ///
 /// 未承認の世代があるうちは同じ世代を返す。注文はこの世代の鍵で署名する。
-#[ic_cdk::update]
 async fn request_agent_generation(
     session: SessionHandle,
 ) -> Result<api_types::fund::AgentGeneration, ErrorCode> {
@@ -1242,7 +1607,6 @@ fn is_terminal(state: api_types::order::OrderState) -> bool {
 }
 
 /// 未終端の注文すべてに取消要求を付ける（送信はsweepが行う）。
-#[ic_cdk::update]
 async fn cancel_all(session: SessionHandle) -> Result<u64, ErrorCode> {
     let user_id = authorize(&session).await?;
     let now = ic_cdk::api::time() / 1_000_000;
@@ -1250,6 +1614,70 @@ async fn cancel_all(session: SessionHandle) -> Result<u64, ErrorCode> {
         db::repo::orders::mark_all_cancel_requested(connection, &user_id, now)
     })
     .map_err(map_db)
+}
+
+/// 本人向け書込みの封筒入口。業務エラーも暗号化した結果として返す。
+#[ic_cdk::update]
+async fn private_call(
+    envelope: api_types::envelope::HpkeRequest,
+) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
+    let method = envelope.method.clone();
+    if !matches!(
+        method.as_str(),
+        "submit_order" | "close_position" | "close_all" | "request_agent_generation" | "cancel_all"
+    ) {
+        return Err(bad(
+            BadRequestCode::MalformedPayload,
+            "unknown private method",
+        ));
+    }
+    // 外側のBlobが複数引数Candidの生バイト列を保持する。
+    let (payload, request_id, caller) =
+        open_envelope::<api_types::Blob>(&envelope, &method).await?;
+    let malformed = || bad(BadRequestCode::MalformedPayload, "invalid private payload");
+    match method.as_str() {
+        "submit_order" => {
+            let (session, args) = candid::decode_args::<(
+                SessionHandle,
+                api_types::order::SubmitOrderArgs,
+            )>(payload.as_ref())
+            .map_err(|_| malformed())?;
+            let result = submit_order(session, args).await;
+            seal_envelope(&envelope, &method, &request_id, caller, &result).await
+        }
+        "close_position" => {
+            let (session, id, market, ratio, price) = candid::decode_args::<(
+                SessionHandle,
+                api_types::Blob,
+                String,
+                u32,
+                Option<String>,
+            )>(payload.as_ref())
+            .map_err(|_| malformed())?;
+            let result = close_position(session, id, market, ratio, price).await;
+            seal_envelope(&envelope, &method, &request_id, caller, &result).await
+        }
+        "close_all" => {
+            let (session, id) =
+                candid::decode_args::<(SessionHandle, api_types::Blob)>(payload.as_ref())
+                    .map_err(|_| malformed())?;
+            let result = close_all(session, id).await;
+            seal_envelope(&envelope, &method, &request_id, caller, &result).await
+        }
+        "request_agent_generation" => {
+            let session =
+                candid::decode_one::<SessionHandle>(payload.as_ref()).map_err(|_| malformed())?;
+            let result = request_agent_generation(session).await;
+            seal_envelope(&envelope, &method, &request_id, caller, &result).await
+        }
+        "cancel_all" => {
+            let session =
+                candid::decode_one::<SessionHandle>(payload.as_ref()).map_err(|_| malformed())?;
+            let result = cancel_all(session).await;
+            seal_envelope(&envelope, &method, &request_id, caller, &result).await
+        }
+        _ => unreachable!(),
+    }
 }
 
 /// 約定一覧（新しい順。**封筒必須**。認可にvaultへの問い合わせが必要なためupdate）。
@@ -1627,11 +2055,16 @@ async fn cache_trading_address(
     account_id: &[u8; 32],
     user_id: &[u8; 32],
 ) -> Result<(), ErrorCode> {
-    let cached =
-        db::tx::query(|connection| db::repo::accounts::master_address(connection, account_id))
-            .map_err(map_db)?;
-    if cached.is_some() {
-        return Ok(());
+    let cached = db::tx::query(|connection| db::repo::accounts::identity(connection, account_id))
+        .map_err(map_db)?;
+    if let Some((cached_user, _)) = cached {
+        return if cached_user == *user_id {
+            Ok(())
+        } else {
+            Err(ErrorCode::NotAllowed {
+                code: api_types::error::NotAllowedCode::AccountNotOwned,
+            })
+        };
     }
     let vault = vault_principal()?;
     let response = Call::bounded_wait(vault, "get_trading_address")
@@ -1647,11 +2080,36 @@ async fn cache_trading_address(
         .as_ref()
         .try_into()
         .map_err(|_| internal("trading address must be 20 bytes".to_string()))?;
+    let mut id_material = b"core_account_identity".to_vec();
+    id_material.extend_from_slice(account_id);
+    let event = api_types::journal::RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&id_material).to_vec().into(),
+        payload: api_types::journal::RecoveryPayload::IdentityAccount {
+            user_id: user_id.to_vec().into(),
+            owner: ic_cdk::api::msg_caller(),
+            account_id: account_id.to_vec().into(),
+            address: address.to_vec().into(),
+        },
+    };
+    let ack = journal_client::append_recovery_event("core", event.clone()).await?;
     let now = ic_cdk::api::time() / 1_000_000;
-    db::tx::update(|connection| {
-        db::repo::accounts::upsert(connection, account_id, user_id, &address, now)
-    })
-    .map_err(map_db)
+    let saved = db::tx::update(|connection| {
+        journal_client::record_recovery_event(connection, &event, &ack)?;
+        match db::repo::accounts::identity(connection, account_id)? {
+            Some((existing_user, existing_address))
+                if existing_user == *user_id && existing_address == address =>
+            {
+                Ok(())
+            }
+            Some(_) => Err(DbError::Conflict),
+            None => db::repo::accounts::upsert(connection, account_id, user_id, &address, now),
+        }
+    });
+    if saved.is_err() {
+        journal_client::lock()?;
+    }
+    saved.map_err(map_db)
 }
 
 async fn vault_session_status(session: &SessionHandle) -> Result<SessionStatus, ErrorCode> {
@@ -1666,6 +2124,32 @@ async fn vault_session_status(session: &SessionHandle) -> Result<SessionStatus, 
         .candid()
         .map_err(|error| internal(error.to_string()))?;
     status
+}
+
+async fn vault_eligibility_session(
+    session: &SessionHandle,
+    account_id: &[u8; 32],
+) -> Result<(), ErrorCode> {
+    let response = Call::bounded_wait(vault_principal()?, "check_eligibility_for_core")
+        .with_args(&(session.clone(), account_id.to_vec()))
+        .await
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    response
+        .candid::<Result<(), ErrorCode>>()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?
+}
+
+async fn vault_eligibility_account(
+    user_id: &[u8; 32],
+    account_id: &[u8; 32],
+) -> Result<(), ErrorCode> {
+    let response = Call::bounded_wait(vault_principal()?, "check_eligibility_account_for_core")
+        .with_args(&(user_id.to_vec(), account_id.to_vec()))
+        .await
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    response
+        .candid::<Result<(), ErrorCode>>()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?
 }
 
 /// vaultから本人の取引口座equityを取得する（リスク上限の判断に使う）。
@@ -1866,9 +2350,9 @@ async fn test_ingest_fills(
     fills_json: String,
 ) -> Result<u32, ErrorCode> {
     let user_id = authorize(&session).await?;
+    let account_id = trading_account(&session).await?;
     let now = ic_cdk::api::time() / 1_000_000;
-    db::tx::update(|connection| pipeline::ingest_fills_json(connection, &user_id, &fills_json, now))
-        .map_err(map_db)
+    pipeline::ingest_fills_json(&user_id, &account_id, &fills_json, now).await
 }
 
 /// テスト専用：`/info`の`orderStatus`相当を反映する（`test-venue`のみ）。
@@ -1882,10 +2366,7 @@ async fn test_apply_order_status(
     // 本人の取引口座の注文だけを更新対象にする（oidは口座ごとに採番される）。
     let account_id = trading_account(&session).await?;
     let now = ic_cdk::api::time() / 1_000_000;
-    db::tx::update(|connection| {
-        pipeline::apply_order_status_json(connection, &account_id, &status_json, now)
-    })
-    .map_err(map_db)
+    pipeline::apply_order_status_json(&account_id, &status_json, now).await
 }
 
 /// テスト専用：`clearinghouseState`相当の建玉を取り込む（`test-venue`のみ）。
@@ -1922,6 +2403,14 @@ fn init() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     init_db();
+    if let Err(error) = journal_client::lock() {
+        ic_cdk::trap(format!("send journal lock failed: {error:?}"));
+    }
+    if let Err(error) =
+        db::tx::update(|connection| db::repo::recovery_fences::set_migration_lock(connection, true))
+    {
+        ic_cdk::trap(format!("recovery migration lock failed: {error}"));
+    }
     // グローバルtimerはアップグレードで失われるため予約し直す。
     #[cfg(not(feature = "test-venue"))]
     schedule_sweep();

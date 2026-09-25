@@ -464,11 +464,24 @@ pub fn identity_by_user(
     raw.map(convert_identity).transpose()
 }
 
+/// 出金intentのnonceが既に別の受付で消費されたかを確認する。
+pub fn intent_nonce_used(
+    connection: &Connection,
+    user_id: &[u8; 32],
+    nonce: u64,
+) -> Result<bool, Error> {
+    let nonce = i64::try_from(nonce).map_err(|_| Error::Overflow)?;
+    connection
+        .query_optional_scalar::<i64>(
+            "SELECT 1 FROM used_intent_nonces WHERE user_id = ?1 AND nonce = ?2",
+            params![user_id.as_slice(), nonce],
+        )
+        .map(|value| value.is_some())
+        .map_err(sql)
+}
+
 /// 出金intentのnonceを使用済みにする（単回使用）。
-///
-/// 署名済みintentのnonceが再利用されると、同じ署名を別の受付IDで再送して
-/// 二重に資金移動を起こせる。`used_intent_nonces` の主キーで拒否する（重複は
-/// `Conflict`）。
+/// 同じ署名を別の受付IDで再送して二重送金できないようにする。
 pub fn use_intent_nonce(
     connection: &mut UpdateConnection<'_>,
     user_id: &[u8; 32],

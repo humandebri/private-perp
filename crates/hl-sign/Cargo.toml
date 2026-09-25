@@ -8,7 +8,9 @@ description = "Hyperliquidのaction構築・署名対象ハッシュ（純粋・
 
 [dependencies]
 hl-types = { path = "../hl-types" }
+hex.workspace = true
 k256.workspace = true
+serde_json.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
 

@@ -72,7 +72,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 /// vaultへ「この世代のこのアドレスを承認せよ」と依頼する（outcallはmockで応答させる）。

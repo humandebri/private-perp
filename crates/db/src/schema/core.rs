@@ -332,6 +332,38 @@ CREATE TABLE account_metrics (
 );
 ";
 
+/// v15: userFills is expensive; retain its last successful poll across upgrades.
+const FILL_POLL: &str = "
+ALTER TABLE account_observations ADD COLUMN last_fills_checked_at INTEGER;
+";
+
+/// v16: unresolved orders get one priority reconciliation slot per sweep.
+const PRIORITY_RECONCILE_CURSOR: &str = "
+CREATE TABLE reconcile_priority_cursor (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    last_account_id BLOB NOT NULL CHECK (length(last_account_id) = 32),
+    updated_at INTEGER NOT NULL
+);
+";
+
+/// v17: vaultとの回収プロトコル。終端行を保持して世代を再利用しない。
+const RECOVERY_FENCES: &str = "
+CREATE TABLE recovery_fences (
+    account_id BLOB PRIMARY KEY NOT NULL CHECK (length(account_id) = 32),
+    user_id BLOB NOT NULL CHECK (length(user_id) = 32),
+    request_id BLOB NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch > 0),
+    state TEXT NOT NULL CHECK (state IN ('preparing', 'ready', 'committed', 'unknown', 'released')),
+    checked_at INTEGER,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE recovery_migration_lock (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    locked INTEGER NOT NULL CHECK (locked IN (0, 1))
+);
+INSERT INTO recovery_migration_lock (id, locked) VALUES (1, 0);
+";
+
 /// 照合の巡回カーソル（有効な口座を順に巡回する）。
 const RECONCILE_CURSOR: &str = "
 CREATE TABLE reconcile_cursor (
@@ -398,5 +430,70 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 14,
         sql: ACCOUNT_METRICS,
+    },
+    Migration {
+        version: 15,
+        sql: FILL_POLL,
+    },
+    Migration {
+        version: 16,
+        sql: PRIORITY_RECONCILE_CURSOR,
+    },
+    Migration {
+        version: 17,
+        sql: RECOVERY_FENCES,
+    },
+    Migration {
+        version: 18,
+        sql: super::send_journal::CLIENT_SQL,
+    },
+    Migration {
+        version: 19,
+        sql: "ALTER TABLE send_journal_client ADD COLUMN guard BLOB;",
+    },
+    Migration {
+        version: 20,
+        sql: super::send_journal::STAGE_SQL,
+    },
+    Migration {
+        version: 21,
+        sql: super::send_journal::CYCLES_SQL,
+    },
+    Migration {
+        version: 22,
+        sql: "CREATE TABLE market_thresholds (
+        market TEXT PRIMARY KEY CHECK(market IN ('BTC','ETH')),
+        expected_index INTEGER NOT NULL CHECK(expected_index >= 0),
+        min_day_notional_usdc INTEGER NOT NULL CHECK(min_day_notional_usdc > 0),
+        max_spread_bps INTEGER NOT NULL CHECK(max_spread_bps BETWEEN 1 AND 10000),
+        min_each_side_depth_usdc INTEGER NOT NULL CHECK(min_each_side_depth_usdc > 0)
+      );
+      CREATE TABLE market_observations (
+        market TEXT PRIMARY KEY CHECK(market IN ('BTC','ETH')),
+        observed_at INTEGER,
+        checked_at INTEGER NOT NULL,
+        reason_code TEXT,
+        asset_index INTEGER,
+        day_notional_usdc INTEGER,
+        spread_bps INTEGER,
+        bid_depth_usdc INTEGER,
+        ask_depth_usdc INTEGER
+      );",
+    },
+    Migration {
+        version: 23,
+        sql: super::send_journal::RECOVERY_STAGE_SQL,
+    },
+    Migration {
+        version: 24,
+        sql: super::send_journal::CLIENT_WRITER_FENCE_SQL,
+    },
+    Migration {
+        version: 25,
+        sql: super::send_journal::RECOVERY_RECEIPTS_SQL,
+    },
+    Migration {
+        version: 26,
+        sql: super::send_journal::REPLAY_VALIDATION_SQL,
     },
 ];

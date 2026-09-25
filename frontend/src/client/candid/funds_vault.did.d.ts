@@ -37,13 +37,6 @@ export type AgentState =
   | { Approving: null }
   | { Requested: null }
   | { Revoked: null }
-export interface AllocationRequest {
-  client_request_id: Uint8Array | number[]
-  target: AccountKind
-  intent_signature: [] | [Uint8Array | number[]]
-  session: SessionHandle
-  amount: bigint
-}
 /**
  * 資産・銘柄。初期対応はHyperCore USDCとBTC・ETH perpsのみ。
  */
@@ -69,6 +62,13 @@ export type BadRequestCode =
   | { MissingField: null }
   | { PriceOutOfRange: null }
   | { UnsupportedAsset: null }
+export interface BuilderFeeMockStatus {
+  approval_records: bigint
+  builder_address: [] | [Uint8Array | number[]]
+  approved: boolean
+  charged_micros: bigint
+  expires_at: [] | [bigint]
+}
 /**
  * challengeの用途。`withdrawal` のchallengeはセッション確立に使えない。
  */
@@ -92,7 +92,22 @@ export interface ChallengeResponse {
   challenge_id: Uint8Array | number[]
   expires_at: bigint
 }
-export type Destination = { AuthenticatedEoaHlAccount: null }
+export interface CyclesStatus {
+  warning: boolean
+  observed_daily_burn: bigint
+  balance: bigint
+  refill_target: [] | [bigint]
+  exit_reserve: [] | [bigint]
+  configured_daily_floor: [] | [bigint]
+  estimated_days: [] | [bigint]
+  new_risk_stopped: boolean
+  observed_at: bigint
+}
+export interface EligibilityStatus {
+  terms_version: bigint
+  eligible: boolean
+  expires_at: [] | [bigint]
+}
 /**
  * 解決済みの環境設定（既定値の適用と検証を通したもの）。
  */
@@ -150,15 +165,6 @@ export interface FundEvent {
   event_id: Uint8Array | number[]
   amount: bigint
 }
-export interface FundRequestAccepted {
-  request_id: Uint8Array | number[]
-  accepted_at: bigint
-  /**
-   * 送信するactionのID。wire payloadを構築する段階（署名時）に確定するため未確定は`None`。
-   */
-  fund_action_id: [] | [Uint8Array | number[]]
-  state: FundRequestState
-}
 /**
  * 資金要求の状態（`state-machines.md` 3節）。
  */
@@ -173,6 +179,7 @@ export interface FundStatus {
   trading_equity: bigint
   in_transit: bigint
   unknowns: Array<UnresolvedAction>
+  recovery_fence: [] | [RecoveryFenceStatus]
   trading_unrealized_pnl: bigint
   withdrawable: bigint
   reserve_unallocated: bigint
@@ -190,6 +197,50 @@ export interface FundingInstructions {
   hl_account_address: Uint8Array | number[]
   memo_required: boolean
   account_kind: AccountKind
+}
+/**
+ * 個人APIの要求封筒。
+ */
+export interface HpkeRequest {
+  /**
+   * `network`・`canister`・`method`・`caller`・`request_id`・期限を束縛する。
+   */
+  aad: Uint8Array | number[]
+  /**
+   * 要求の単回使用ID（再送は拒否する）。
+   */
+  request_id: Uint8Array | number[]
+  method: string
+  /**
+   * ChaCha20-Poly1305の暗号文（`enc || ciphertext`）。
+   */
+  ciphertext: Uint8Array | number[]
+  /**
+   * サーバ公開鍵のID（現行世代の公開鍵そのもの）。
+   */
+  key_id: Uint8Array | number[]
+  network: Network
+  /**
+   * 応答を暗号化するブラウザ公開鍵。
+   */
+  client_public_key: Uint8Array | number[]
+  /**
+   * 呼び出し先のcanister principal（別canisterへの転用を拒否する）。
+   */
+  canister: Principal
+  expires_at: bigint
+}
+/**
+ * 個人APIの応答封筒。
+ */
+export interface HpkeResponse {
+  request_id: Uint8Array | number[]
+  /**
+   * `client_public_key`宛の暗号文（`enc || ciphertext`）。
+   */
+  ciphertext: Uint8Array | number[]
+  key_id: Uint8Array | number[]
+  observed_at: bigint
 }
 /**
  * # HTTP Header.
@@ -262,22 +313,30 @@ export interface Paged {
   revision: bigint
   observed_at: bigint
 }
-export type Result = { Ok: AgentGeneration } | { Err: ErrorCode }
+export type RecoveryFenceStatus = { Reconciling: null } | { Preparing: null }
+export type Result = { Ok: BuilderFeeMockStatus } | { Err: ErrorCode }
 export type Result_1 = { Ok: null } | { Err: ErrorCode }
-export type Result_10 = { Ok: ChallengeResponse } | { Err: ErrorCode }
-export type Result_11 = { Ok: Paged } | { Err: ErrorCode }
-export type Result_12 = { Ok: SessionHandle } | { Err: ErrorCode }
-export type Result_13 = { Ok: number } | { Err: ErrorCode }
-export type Result_14 = { Ok: FundRequestAccepted } | { Err: ErrorCode }
-export type Result_15 = { Ok: SessionStatus } | { Err: ErrorCode }
+export type Result_10 = { Ok: FundingInstructions } | { Err: ErrorCode }
+export type Result_11 = { Ok: Uint8Array | number[] } | { Err: ErrorCode }
+export type Result_12 = { Ok: [] | [Principal] } | { Err: ErrorCode }
+export type Result_13 = { Ok: [] | [Uint8Array | number[]] } | { Err: ErrorCode }
+export type Result_14 = { Ok: ChallengeResponse } | { Err: ErrorCode }
+export type Result_15 = { Ok: [bigint, bigint, boolean] } | { Err: ErrorCode }
+export type Result_16 = { Ok: Paged } | { Err: ErrorCode }
+export type Result_17 = { Ok: SessionHandle } | { Err: ErrorCode }
+export type Result_18 = { Ok: HpkeResponse } | { Err: ErrorCode }
+export type Result_21 = { Ok: [bigint, boolean] } | { Err: ErrorCode }
+export type Result_22 = { Ok: [boolean, boolean] } | { Err: ErrorCode }
+export type Result_19 = { Ok: number } | { Err: ErrorCode }
 export type Result_2 = { Ok: boolean } | { Err: ErrorCode }
-export type Result_3 = { Ok: [] | [AgentGeneration] } | { Err: ErrorCode }
-export type Result_4 = { Ok: [bigint, bigint] } | { Err: ErrorCode }
-export type Result_5 = { Ok: EnvironmentView } | { Err: ErrorCode }
-export type Result_6 = { Ok: FundStatus } | { Err: ErrorCode }
-export type Result_7 = { Ok: FundingInstructions } | { Err: ErrorCode }
-export type Result_8 = { Ok: Uint8Array | number[] } | { Err: ErrorCode }
-export type Result_9 = { Ok: [] | [Uint8Array | number[]] } | { Err: ErrorCode }
+export type Result_20 = { Ok: SessionStatus } | { Err: ErrorCode }
+export type Result_3 = { Ok: EligibilityStatus } | { Err: ErrorCode }
+export type Result_4 = { Ok: [] | [AgentGeneration] } | { Err: ErrorCode }
+export type Result_5 = { Ok: [bigint, bigint] } | { Err: ErrorCode }
+export type Result_6 = { Ok: CyclesStatus } | { Err: ErrorCode }
+export type Result_7 = { Ok: [] | [[bigint, Uint8Array | number[]]] } | { Err: ErrorCode }
+export type Result_8 = { Ok: EnvironmentView } | { Err: ErrorCode }
+export type Result_9 = { Ok: FundStatus } | { Err: ErrorCode }
 /**
  * 失効世代付きセッション。`trading_core` はvaultが発行したものだけを受け入れる。
  */
@@ -330,32 +389,20 @@ export interface UnresolvedAction {
   since: bigint
   state: ActionState
 }
-export interface WithdrawalRequest {
-  /**
-   * 初期の出金先は認証EOAのHL口座のみ。
-   */
-  destination: Destination
-  asset: AssetId
-  client_request_id: Uint8Array | number[]
-  network: Network
-  intent_signature: Uint8Array | number[]
-  session: SessionHandle
-  nonce: bigint
-  amount: bigint
-  expires_at: bigint
-}
 export interface _SERVICE {
-  /**
-   * 渡されたAgentアドレスを世代へ承認する（master鍵で署名して送信し、結果を永続化する）。
-   *
-   * `generation` は `trading_core` が採番した世代を渡す。承認はvaultの
-   * `agent_generations` に保存され、取引所の応答が不明な場合は `active` にしない。
-   */
-  approve_agent_generation: ActorMethod<[SessionHandle, bigint, Uint8Array | number[]], Result>
+  builder_fee_mock_status: ActorMethod<[SessionHandle], Result>
   /**
    * 呼び出し元のPrincipal（診断用。認可の判断は各メソッド内で行う）。
    */
   caller_principal: ActorMethod<[], Principal>
+  check_eligibility_account_for_core: ActorMethod<
+    [Uint8Array | number[], Uint8Array | number[]],
+    Result_1
+  >
+  /**
+   * Core-only admission check. Core must separately bind the session principal to its caller.
+   */
+  check_eligibility_for_core: ActorMethod<[SessionHandle, Uint8Array | number[]], Result_1>
   /**
    * 宛先が未解決だった入金を、後から判明した利用者へ振り替える（controllerのみ）。
    *
@@ -363,48 +410,52 @@ export interface _SERVICE {
    * イベントを再計上しない）。同一イベントの二重請求は仕訳の要求IDで拒否する。
    */
   claim_unmatched_deposit: ActorMethod<[Uint8Array | number[], Uint8Array | number[]], Result_1>
-  /**
-   * 取引所の入金を本人へ計上する（controllerのみ。宛先が導出口座の場合）。
-   */
-  credit_venue_deposit: ActorMethod<
-    [Uint8Array | number[], bigint, Uint8Array | number[], string],
-    Result_2
-  >
+  configure_cycles: ActorMethod<[bigint, bigint], Result_1>
+  configure_eligibility: ActorMethod<[bigint, Uint8Array | number[], boolean], Result_1>
+  eligibility_status: ActorMethod<[SessionHandle], Result_3>
   /**
    * 口座・世代の承認状態（`trading_core` が状態表示と署名可否の判断に使う）。
    */
-  get_agent_approval: ActorMethod<[Uint8Array | number[], bigint], Result_3>
+  get_agent_approval: ActorMethod<[Uint8Array | number[], bigint], Result_4>
   /**
    * 本人の残高（`trading_core` がsnapshotを作るための参照）。
    *
    * 戻り値は `(取引口座の残高, 出金可能額)`。認可のcaller束縛は呼び出し側（core）が
    * `session_status` で行う。
    */
-  get_balances: ActorMethod<[SessionHandle], Result_4>
+  get_balances: ActorMethod<[SessionHandle], Result_5>
+  get_core_principal: ActorMethod<[], [] | [Principal]>
+  get_cycles_status: ActorMethod<[], Result_6>
+  get_eligibility_configuration: ActorMethod<[], Result_7>
   /**
    * 現在の環境設定（診断用・公開）。秘密は含まない。
    */
-  get_environment: ActorMethod<[], Result_5>
+  get_environment: ActorMethod<[], Result_8>
   /**
    * 資金状態（認証済みセッションが必要）。
    */
-  get_fund_status: ActorMethod<[SessionHandle], Result_6>
+  get_fund_status: ActorMethod<[SessionHandle], Result_9>
   /**
    * 入金案内（認証済みセッションが必要）。
    */
-  get_funding_instructions: ActorMethod<[SessionHandle], Result_7>
+  get_funding_instructions: ActorMethod<[SessionHandle], Result_10>
   /**
    * 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
    */
-  get_hpke_public_key: ActorMethod<[], Result_8>
+  get_hpke_public_key: ActorMethod<[], Result_11>
+  get_journal_guard: ActorMethod<[], Result_12>
+  get_journal_send_status: ActorMethod<[], Result_22>
+  get_policy_principal: ActorMethod<[], [] | [Principal]>
+  get_recovery_history_verified: ActorMethod<[], Result_2>
+  get_send_journal: ActorMethod<[], Result_12>
   /**
    * 本人の取引口座ID（`trading_core` が所有権の確認に使う）。
    */
-  get_trading_account: ActorMethod<[SessionHandle], Result_9>
+  get_trading_account: ActorMethod<[SessionHandle], Result_13>
   /**
    * 本人の取引口座アドレス（着金確認や照合に使う）。
    */
-  get_trading_address: ActorMethod<[SessionHandle], Result_8>
+  get_trading_address: ActorMethod<[SessionHandle], Result_11>
   /**
    * 取引所の入金（ledger update）を記録する（controllerのみ）。
    *
@@ -416,71 +467,66 @@ export interface _SERVICE {
   /**
    * ログインchallengeを発行する。
    */
-  issue_challenge: ActorMethod<[ChallengeRequest], Result_10>
+  issue_challenge: ActorMethod<[ChallengeRequest], Result_14>
+  journal_restore_status: ActorMethod<[], Result_15>
+  recovery_replay_pending: ActorMethod<[], Result_2>
+  recovery_stage_status: ActorMethod<[], Result_21>
   /**
    * 資金履歴（認証済みセッションが必要）。
    */
-  list_fund_events: ActorMethod<[SessionHandle, [] | [Uint8Array | number[]], number], Result_11>
+  list_fund_events: ActorMethod<[SessionHandle, [] | [Uint8Array | number[]], number], Result_16>
   /**
    * challengeを消費してセッションを発行する。
    */
-  open_session: ActorMethod<[OpenSessionRequest], Result_12>
+  open_session: ActorMethod<[OpenSessionRequest], Result_17>
   /**
-   * 入金先（準備口座）を用意する。`get_funding_instructions` の前提を作る。
+   * 個人向け書込みの唯一の公開入口。エラーを含む業務結果も暗号化して返す。
    */
-  provision_reserve_account: ActorMethod<[SessionHandle], Result_8>
+  private_call: ActorMethod<[HpkeRequest], Result_18>
   /**
    * 取引所の入金を取得して取り込む（controllerのみ）。
    *
    * 取得はreplicated outcall（変換関数で決定論化）、取り込みは検証済みの`deposits::credit`。
    */
-  reconcile_deposits: ActorMethod<[Uint8Array | number[]], Result_13>
-  /**
-   * 配分を要求する（受付＋予約）。
-   */
-  request_allocation: ActorMethod<[AllocationRequest], Result_14>
-  /**
-   * 回収（trading口座→準備口座）を要求する。
-   */
-  request_recovery: ActorMethod<[SessionHandle, Uint8Array | number[], bigint], Result_14>
-  /**
-   * 出金を要求する（本人署名の検証＋受付＋予約）。
-   */
-  request_withdrawal: ActorMethod<[WithdrawalRequest], Result_14>
+  reconcile_deposits: ActorMethod<[Uint8Array | number[]], Result_19>
   /**
    * 不明なactionを「未実行」として解消する（controllerのみ）。
    *
-   * 取引所が実行済みと確認できた場合の消込は、証跡（tx）を伴う別経路で行うため
-   * ここでは受け付けない（`OperationNotAvailable`）。`unknown` と `dispatching` の
-   * どちらも対象にするが、**取引所へ照会した証跡**を `evidence` として必須にする。
+   * 未確認の外部送信を自由文の申告だけで「未実行」と確定してはならない。
+   * 取引所履歴との照合による証明経路ができるまで手動解消を停止する。
    */
   resolve_unknown_action: ActorMethod<[Uint8Array | number[], boolean, string], Result_1>
-  /**
-   * セッションを失効させる。
-   */
-  revoke_session: ActorMethod<[SessionHandle], Result_1>
+  resume_journal: ActorMethod<[], Result_1>
   /**
    * HPKEの鍵世代を更新する（controllerのみ）。
    *
    * 秘密鍵はcanister内のDBに留め、公開鍵のみを配布する（`Plan.md` 16.5）。
    */
-  rotate_hpke_key: ActorMethod<[], Result_8>
+  rotate_hpke_key: ActorMethod<[], Result_11>
   /**
    * セッションの有効性（canister間の検証経路。呼び出し元は返却されたprincipalを検証する）。
    */
-  session_status: ActorMethod<[SessionHandle], Result_15>
+  session_status: ActorMethod<[SessionHandle], Result_20>
+  set_core_principal: ActorMethod<[Principal], Result_1>
   /**
    * 閾値ECDSAのkey IDを設定する（controllerのみ）。
    *
    * testnetの鍵名はデプロイ後に実測して確定する（`docs/phase-0/environments.md` 2節）。
    */
   set_ecdsa_key_id: ActorMethod<[string], Result_1>
+  set_journal_guard: ActorMethod<[Principal], Result_1>
   /**
    * 環境のnetworkを設定する（controllerのみ）。
    *
    * mainnetはPhase 2では拒否する（`docs/phase-0/environments.md` E-2）。
    */
   set_network: ActorMethod<[string], Result_1>
+  /**
+   * 共有REST予算のpolicy principal（controllerのみ）。
+   */
+  set_policy_principal: ActorMethod<[Principal], Result_1>
+  set_recovery_history_verified: ActorMethod<[boolean], Result_1>
+  set_send_journal: ActorMethod<[Principal], Result_1>
   /**
    * Hyperliquidのendpointを設定する（controllerのみ）。
    *

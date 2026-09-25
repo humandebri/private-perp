@@ -170,6 +170,25 @@ export function exchange(body) {
 
 export function info(body) {
   if (state.scenario.infoUnavailable) throw new HttpError(503, 'LOCAL MOCK info unavailable')
+  if (body.type === 'metaAndAssetCtxs') return [
+    { universe: [
+      { name: 'SOL', szDecimals: 0, maxLeverage: 10 },
+      { name: 'ETH', szDecimals: 5, maxLeverage: 50 },
+      { name: 'BTC', szDecimals: 5, maxLeverage: 50 },
+    ] },
+    [
+      { dayNtlVlm: '10000000' },
+      { dayNtlVlm: '100000000' },
+      { dayNtlVlm: '500000000' },
+    ],
+  ]
+  if (body.type === 'l2Book' && marketState[body.coin]) {
+    const mid = marketState[body.coin].mid
+    return { coin: body.coin, time: Date.now(), levels: [
+      [{ px: String(mid - 1), sz: '1.25', n: 2 }],
+      [{ px: String(mid + 1), sz: '1.10', n: 2 }],
+    ] }
+  }
   if (body.type === 'userNonFundingLedgerUpdates') {
     return state.deposits.get(normalizeAddress(body.user)) ?? []
   }

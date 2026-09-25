@@ -6,6 +6,8 @@
 
 use crate::clock;
 use api_types::error::ErrorCode;
+use api_types::journal::{RecoveryEvent, RecoveryPayload};
+use api_types::operations::BudgetClass;
 use db::error::Error as DbError;
 use ic_cdk_management_canister::{HttpMethod, HttpRequest, transform_context_from_query};
 use ic_sqlite_vfs::db::UpdateConnection;
@@ -30,6 +32,12 @@ fn transform_info(
                             .and_then(|delta| delta.get("usdc"))
                             .cloned()
                             .unwrap_or(serde_json::Value::Null),
+                        "delta": {
+                            "type": entry.get("delta").and_then(|delta| delta.get("type")).cloned().unwrap_or(serde_json::Value::Null),
+                            "user": entry.get("delta").and_then(|delta| delta.get("user")).cloned().unwrap_or(serde_json::Value::Null),
+                            "destination": entry.get("delta").and_then(|delta| delta.get("destination")).cloned().unwrap_or(serde_json::Value::Null),
+                            "usdc": entry.get("delta").and_then(|delta| delta.get("usdc")).cloned().unwrap_or(serde_json::Value::Null),
+                        },
                     })
                 })
                 .collect();
@@ -47,17 +55,35 @@ fn transform_info(
 
 /// 入金（non-funding ledger updates）をreplicated outcallで取得する。
 pub async fn fetch_ledger_updates(user: &str) -> Result<Vec<u8>, ErrorCode> {
+    fetch_ledger_updates_range(user, 0, None).await
+}
+
+pub async fn fetch_ledger_updates_range(
+    user: &str,
+    start_time: u64,
+    end_time: Option<u64>,
+) -> Result<Vec<u8>, ErrorCode> {
+    // This info endpoint has a base weight of 20 and a return-size surcharge.
+    // Reserve the documented maximum of 2000 rows before starting the outcall.
+    let permit = crate::rest_budget::acquire(BudgetClass::Reconcile, 120).await?;
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
     let info_url = crate::environment::resolved()?.info_url;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "type": "userNonFundingLedgerUpdates",
         "user": user,
-    })
-    .to_string();
+        "startTime": start_time,
+    });
+    if let Some(end_time) = end_time {
+        body["endTime"] = serde_json::json!(end_time);
+    }
+    let body = body.to_string();
     let response = HttpRequest::new(&info_url)
         .with_method(HttpMethod::POST)
         .with_header("Content-Type", "application/json")
         .with_body(body.into_bytes())
-        .with_max_response_bytes(16 * 1024)
+        .with_max_response_bytes(512 * 1024)
         .with_transform(transform_context_from_query(
             "transform_info".to_string(),
             Vec::new(),
@@ -67,37 +93,12 @@ pub async fn fetch_ledger_updates(user: &str) -> Result<Vec<u8>, ErrorCode> {
         .map_err(|error| ErrorCode::UpstreamUnavailable {
             venue: error.to_string(),
         })?;
-    Ok(response.body)
-}
-
-/// 十進文字列をマイクロUSDCへ（丸めない）。
-pub fn decimal_micros(text: &str) -> Result<u64, ErrorCode> {
-    let (integer, fraction) = match text.split_once('.') {
-        Some((integer, fraction)) => (integer, fraction),
-        None => (text, ""),
-    };
-    let integer: u128 = integer.parse().map_err(|_| ErrorCode::BadRequest {
-        code: api_types::error::BadRequestCode::MalformedPayload,
-        detail: "invalid amount".to_string(),
-    })?;
-    if fraction.len() > 6 {
-        return Err(ErrorCode::BadRequest {
-            code: api_types::error::BadRequestCode::MalformedPayload,
-            detail: "more than 6 decimals".to_string(),
+    if response.status.to_string() != "200" {
+        return Err(ErrorCode::UpstreamUnavailable {
+            venue: format!("ledger info HTTP {}", response.status),
         });
     }
-    let mut padded = fraction.to_string();
-    while padded.len() < 6 {
-        padded.push('0');
-    }
-    let fraction: u128 = padded.parse().map_err(|_| ErrorCode::BadRequest {
-        code: api_types::error::BadRequestCode::MalformedPayload,
-        detail: "invalid amount".to_string(),
-    })?;
-    u64::try_from(integer * 1_000_000 + fraction).map_err(|_| ErrorCode::BadRequest {
-        code: api_types::error::BadRequestCode::MalformedPayload,
-        detail: "amount out of range".to_string(),
-    })
+    Ok(response.body)
 }
 
 /// 入金として計上できる額（マイクロUSDC）だけを返す。
@@ -105,13 +106,51 @@ pub fn decimal_micros(text: &str) -> Result<u64, ErrorCode> {
 /// `userNonFundingLedgerUpdates` には送金・出金などの**負の**deltaやゼロ・非十進が混ざる。
 /// これらは入金ではないため `None` とし、照合側は読み飛ばす（1件の負値で巡回全体を
 /// 止めない）。
-pub fn deposit_amount_micros(text: &str) -> Option<u64> {
-    if text.starts_with('-') || text.starts_with('+') {
-        return None;
-    }
-    match decimal_micros(text) {
-        Ok(amount) if amount > 0 => Some(amount),
-        _ => None,
+pub fn deposit_amount_micros(value: &serde_json::Value) -> Option<u64> {
+    let amount = crate::amount::parse(value)?;
+    (!amount.negative && amount.micros > 0).then_some(amount.micros)
+}
+
+/// Only credit genuine deposits or inbound transfers. A managed trading to
+/// reserve recovery is settled by its own action and must not be credited twice.
+pub fn creditable_entry(entry: &serde_json::Value, address: &[u8; 20]) -> Result<bool, DbError> {
+    let delta = entry.get("delta");
+    match delta
+        .and_then(|value| value.get("type"))
+        .and_then(|value| value.as_str())
+    {
+        Some("deposit") => Ok(true),
+        Some("internalTransfer") => {
+            let expected = format!("0x{}", hex::encode(address));
+            if delta
+                .and_then(|value| value.get("destination"))
+                .and_then(|value| value.as_str())
+                .is_none_or(|destination| !destination.eq_ignore_ascii_case(&expected))
+            {
+                return Ok(false);
+            }
+            let Some(sender) = delta
+                .and_then(|value| value.get("user"))
+                .and_then(|value| value.as_str())
+            else {
+                return Ok(false);
+            };
+            let Ok(sender_bytes) = hex::decode(sender.strip_prefix("0x").unwrap_or(sender)) else {
+                return Ok(false);
+            };
+            let Ok(sender_address) = <[u8; 20]>::try_from(sender_bytes) else {
+                return Ok(false);
+            };
+            let managed_recovery = db::tx::query(|connection| {
+                let from =
+                    db::repo::ledger::custody_account_by_address(connection, &sender_address)?;
+                let to = db::repo::ledger::custody_account_by_address(connection, address)?;
+                Ok::<bool, DbError>(matches!((from, to), (Some(from), Some(to))
+                    if from.kind == "trading" && to.kind == "reserve" && from.user_id == to.user_id))
+            })?;
+            Ok(!managed_recovery)
+        }
+        _ => Ok(false),
     }
 }
 
@@ -133,86 +172,64 @@ pub fn credit(
     input.extend_from_slice(tx_hash);
     let event_id = hl_sign::keccak256(&input);
 
-    let event = db::repo::events::ExternalEvent {
-        event_id,
-        network: network.to_string(),
-        account_address: *address,
-        counterparty: [0u8; 20],
-        asset: asset.to_string(),
-        amount,
-        kind: "deposit".to_string(),
-        at: now,
-        evidence_ref: Some(hex::encode(tx_hash)),
+    db::repo::deposits::credit_external_deposit(
+        connection, &event_id, network, tx_hash, amount, address, asset, now,
+    )
+}
+
+/// Persist the venue evidence before changing any balance. The receipt and
+/// ledger mutation commit together; an ambiguous journal response locks sends.
+pub async fn credit_journaled(
+    network: &str,
+    tx_hash: &[u8],
+    amount: u64,
+    address: &[u8; 20],
+    at: u64,
+) -> Result<bool, ErrorCode> {
+    let internal = |error: DbError| ErrorCode::Internal {
+        code: format!("{error:?}"),
     };
-    if !db::repo::events::ingest_external_event(connection, &event, now)? {
+    if tx_hash.is_empty() || tx_hash.len() > 64 || amount == 0 || amount > i64::MAX as u64 {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    let mut input = b"deposit".to_vec();
+    input.extend_from_slice(tx_hash);
+    let event_id = hl_sign::keccak256(&input);
+    if db::tx::query(|c| db::repo::events::find_external_event(c, network, &event_id))
+        .map_err(&internal)?
+        .is_some()
+    {
         return Ok(false);
     }
-    match db::repo::ledger::custody_account_by_address(connection, address)? {
-        Some(owner) if owner.kind == "trading" => {
-            // 取引口座への着金＝配分の確定（移動中→取引）。移動中の額を超える分は
-            // 配分として説明できないため、取引口座への直接入金として与信する
-            // （そうしないと `user_in_transit` が負債超過になり残高参照が壊れる）。
-            let in_transit = db::repo::ledger::user_in_transit_balance(connection, &owner.user_id)?;
-            let confirmable = amount.min(in_transit);
-            let confirmed = db::repo::funds::confirm_executing_allocations(
-                connection,
-                &owner.user_id,
-                &owner.account_id,
-                &event_id,
-                confirmable,
-                now,
-            )?;
-            if confirmed > 0 {
-                db::repo::ledger::allocation_confirm(
-                    connection,
-                    &owner.user_id,
-                    &owner.account_id,
-                    confirmed,
-                    now,
-                    &event_id,
-                )?;
-            }
-            let excess = amount - confirmed;
-            if excess > 0 {
-                db::repo::ledger::trading_deposit_confirmed(
-                    connection,
-                    &owner.account_id,
-                    excess,
-                    now,
-                )?;
-                db::repo::events::insert_audit(
-                    connection,
-                    "system",
-                    "trading_deposit_direct",
-                    None,
-                    Some(&hex::encode(address)),
-                    now,
-                )?;
-            }
+    let mut logical = b"deposit_credit".to_vec();
+    logical.extend_from_slice(network.as_bytes());
+    logical.extend_from_slice(&event_id);
+    let event = RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&logical).to_vec().into(),
+        payload: RecoveryPayload::DepositCredit {
+            tx_hash: tx_hash.to_vec().into(),
+            network: network.to_string(),
+            address: address.to_vec().into(),
+            amount_micros: amount,
+            observed_at_ms: at,
+        },
+    };
+    let ack = journal_client::append_recovery_event("vault", event.clone()).await?;
+    let result = db::tx::update(|c| {
+        journal_client::record_recovery_event(c, &event, &ack)?;
+        if !credit(c, network, tx_hash, amount, address, "usdc", at)? {
+            return Err(DbError::Conflict);
         }
-        Some(owner) => {
-            // 準備口座への着金＝利用者への与信。
-            db::repo::ledger::deposit_confirmed(
-                connection,
-                &owner.user_id,
-                amount,
-                now,
-                &event_id,
-            )?;
-        }
-        None => {
-            db::repo::ledger::unmatched_deposit(connection, amount, now, &event_id)?;
-            db::repo::events::insert_audit(
-                connection,
-                "system",
-                "unmatched_deposit",
-                None,
-                Some(&hex::encode(address)),
-                now,
-            )?;
+        Ok(true)
+    });
+    match result {
+        Ok(inserted) => Ok(inserted),
+        Err(error) => {
+            journal_client::lock()?;
+            Err(internal(error))
         }
     }
-    Ok(true)
 }
 
 /// 現在時刻（ミリ秒）。
@@ -245,7 +262,7 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
         last = Some((created_at, address));
         let body = match fetch_ledger_updates(&format!("0x{}", hex::encode(address))).await {
             Ok(body) => body,
-            Err(error) => {
+            Err(_error) => {
                 let now = now_ms();
                 db::tx::update(|connection| {
                     db::repo::events::insert_audit(
@@ -253,7 +270,7 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
                         "system",
                         "reconcile_fetch_failed",
                         None,
-                        Some(&format!("{error:?}")),
+                        Some("upstream_unavailable"),
                         now,
                     )
                 })
@@ -266,14 +283,14 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
         };
         let now = now_ms();
         for entry in entries {
+            if !creditable_entry(&entry, &address).map_err(&internal)? {
+                continue;
+            }
             let Some(hash) = entry.get("hash").and_then(|value| value.as_str()) else {
                 continue;
             };
-            let Some(usdc) = entry.get("usdc").and_then(|value| value.as_str()) else {
-                continue;
-            };
             // 負値・ゼロ・非十進は入金ではない（送金・出金など）。
-            let Some(amount) = deposit_amount_micros(usdc) else {
+            let Some(amount) = entry.get("usdc").and_then(deposit_amount_micros) else {
                 continue;
             };
             let hash = hash.strip_prefix("0x").unwrap_or(hash);
@@ -284,10 +301,7 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
                 .get("time")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(now);
-            let inserted = db::tx::update(|connection| {
-                credit(connection, &network, &tx_hash, amount, &address, "usdc", at)
-            })
-            .map_err(internal)?;
+            let inserted = credit_journaled(&network, &tx_hash, amount, &address, at).await?;
             if inserted {
                 credited += 1;
             }

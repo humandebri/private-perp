@@ -5,13 +5,14 @@ use api_types::auth::{
 };
 use api_types::error::ErrorCode;
 use api_types::fund::{FundStatus, FundingInstructions};
+use api_types::journal::{RecoveryPayload, RecoveryRecord};
 use api_types::{Blob, Network};
 use candid::Principal;
 use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy, pic, principal, update, update_args,
+    FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy, pic, principal, query, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -72,7 +73,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 #[test]
@@ -112,6 +115,12 @@ fn fetched_deposits_are_credited_once() {
             .as_ref(),
         address.as_slice()
     );
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).unwrap();
+    let guard = guard.unwrap().expect("configured recovery guard");
+    let before_deposits = pic
+        .take_canister_snapshot(vault, Some(controller), None)
+        .expect("snapshot before deposits");
 
     // 取得（replicated outcall＋変換）→ 本人へ計上。
     let first: Result<u32, ErrorCode> = call_with_mocked_outcall(
@@ -131,6 +140,20 @@ fn fetched_deposits_are_credited_once() {
         100_500_000,
         "取得した入金を本人へ計上する"
     );
+    let journal: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_send_journal", ()).expect("journal query");
+    let journal = journal.expect("journal configured").expect("journal id");
+    let evidence: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, vault, "recovery_events", (0u64, 10u32))
+            .expect("recovery events");
+    let evidence = evidence.expect("private evidence");
+    assert!(evidence.iter().any(|record| matches!(
+        &record.event.payload,
+        RecoveryPayload::DepositCredit {
+            amount_micros: 100_500_000,
+            ..
+        }
+    )));
 
     // 同じ入金（同じhash）は二重計上しない。
     let second: Result<u32, ErrorCode> = call_with_mocked_outcall(
@@ -146,6 +169,59 @@ fn fetched_deposits_are_credited_once() {
     let status: Result<FundStatus, ErrorCode> =
         update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
     assert_eq!(status.expect("status").reserve_unallocated, 100_500_000);
+    let after_duplicate: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, vault, "recovery_events", (0u64, 10u32))
+            .expect("recovery events");
+    assert_eq!(
+        after_duplicate.expect("private evidence").len(),
+        evidence.len()
+    );
+
+    // 公式の履歴型と同じ JSON 数値も計上する。指数表記は正確にマイクロUSDCへ変換する。
+    let numeric = br#"[
+        {"time":1758000000001,"hash":"0xab","delta":{"type":"deposit","usdc":0.000001}},
+        {"time":1758000000002,"hash":"0xac","delta":{"type":"deposit","usdc":1e-6}},
+        {"time":1758000000003,"hash":"0xad","delta":{"type":"deposit","usdc":0.0000001}},
+        {"time":1758000000004,"hash":"0xae","delta":{"type":"deposit","usdc":-1}},
+        {"time":1758000000005,"hash":"0xaf","delta":{"type":"deposit","usdc":"0.0000001"}},
+        {"time":1758000000006,"hash":"0xb0","delta":{"type":"deposit","usdc":"18446744073709551616"}},
+        {"time":1758000000007,"hash":"0xb1","delta":{"type":"withdrawal","usdc":"5"}}
+    ]"#;
+    let numeric_result: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        controller,
+        "reconcile_deposits",
+        (blob(&address),),
+        Ok((200, numeric.to_vec())),
+    )
+    .expect("numeric call");
+    assert_eq!(numeric_result.expect("numeric deposits"), 2);
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
+    assert_eq!(status.expect("status").reserve_unallocated, 100_500_002);
+
+    // A new venue event must not change the ledger while its independent
+    // journal is unavailable.
+    pic.stop_canister(journal, Some(controller))
+        .expect("stop journal");
+    let blocked: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        controller,
+        "reconcile_deposits",
+        (blob(&address),),
+        Ok((
+            200,
+            br#"[{"time":1758000000008,"hash":"0xb2","delta":{"type":"deposit","usdc":"10"}}]"#
+                .to_vec(),
+        )),
+    )
+    .expect("blocked call");
+    assert!(blocked.is_err(), "journal outage must block credit");
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
+    assert_eq!(status.expect("status").reserve_unallocated, 100_500_002);
 
     // 非controllerは取り込めない。
     let denied: Result<u32, ErrorCode> = update_args(
@@ -160,4 +236,17 @@ fn fetched_deposits_are_credited_once() {
         matches!(denied, Err(ErrorCode::Unauthenticated { .. })),
         "{denied:?}"
     );
+    pic.start_canister(journal, Some(controller))
+        .expect("restart journal");
+    pic.load_canister_snapshot(vault, Some(controller), before_deposits.id)
+        .expect("restore before deposits");
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, guard, principal(239), "resume_journal", vault).unwrap();
+    assert!(resumed.is_err(), "external validation is still required");
+    let restored: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session).unwrap();
+    assert_eq!(restored.unwrap().reserve_unallocated, 100_500_002);
+    let pending: Result<bool, ErrorCode> =
+        query(&pic, vault, controller, "recovery_replay_pending", ()).unwrap();
+    assert!(pending.unwrap());
 }

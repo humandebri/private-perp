@@ -9,6 +9,8 @@ use crate::crypto;
 use crate::venue::{self, ExchangeOutcome};
 use api_types::error::ErrorCode;
 use api_types::fund::FundRequestState;
+use api_types::journal::{RecoveryEvent, RecoveryPayload};
+use api_types::operations::BudgetClass;
 use db::repo::actions::FundActionRow;
 use db::repo::funds::fund_request;
 use db::repo::ledger::NewCustodyAccount;
@@ -29,8 +31,109 @@ fn internal(message: String) -> ErrorCode {
     ErrorCode::Internal { code: message }
 }
 
+// A POST may have reached HL even when journaling its response fails. Keep the
+// reservation and make the action visible to the normal reconciliation path.
+fn mark_post_unknown(action: &FundActionRow, request_id: &[u8], now: u64) -> Result<(), ErrorCode> {
+    db::tx::update(|connection| {
+        db::repo::actions::mark_unknown(
+            connection,
+            &action.action_id,
+            action.worker_epoch,
+            "result_unknown",
+            now,
+        )?;
+        db::repo::funds::set_request_state(
+            connection,
+            &action.user_id,
+            request_id,
+            FundRequestState::Unknown,
+            now,
+        )
+    })
+    .map_err(|error| map_db(error, None))
+}
+
+fn recovery_settlement_event(
+    action: &FundActionRow,
+    request_id: &[u8],
+    trading_account_id: &[u8; 32],
+    amount_micros: u64,
+    accepted: bool,
+    response: &[u8],
+) -> RecoveryEvent {
+    let mut logical_id = b"recovery_post_result".to_vec();
+    logical_id.extend_from_slice(&action.action_id);
+    RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&logical_id).to_vec().into(),
+        payload: RecoveryPayload::RecoveryPostResult {
+            action_id: action.action_id.to_vec().into(),
+            request_id: request_id.to_vec().into(),
+            user_id: action.user_id.to_vec().into(),
+            trading_account_id: trading_account_id.to_vec().into(),
+            amount_micros,
+            nonce: action.nonce,
+            accepted,
+            evidence_digest: hl_sign::keccak256(response).to_vec().into(),
+            observed_at_ms: crate::clock::now_ms(),
+        },
+    }
+}
+
+fn fund_transfer_result_event(
+    action: &FundActionRow,
+    request: &db::repo::funds::FundRequestRow,
+    request_id: &[u8],
+    source_account_id: &[u8; 32],
+    accepted: bool,
+    response: &[u8],
+) -> Result<RecoveryEvent, ErrorCode> {
+    let destination = match action.kind.as_str() {
+        "allocation" => request
+            .account_id
+            .ok_or(ErrorCode::PolicyUnavailable)?
+            .to_vec(),
+        "withdrawal" => {
+            let address = request
+                .destination
+                .as_deref()
+                .ok_or(ErrorCode::PolicyUnavailable)?;
+            let bytes = hex::decode(address.strip_prefix("0x").unwrap_or(address))
+                .map_err(|_| ErrorCode::PolicyUnavailable)?;
+            if bytes.len() != 20 {
+                return Err(ErrorCode::PolicyUnavailable);
+            }
+            bytes
+        }
+        _ => return Err(ErrorCode::PolicyUnavailable),
+    };
+    let mut logical_id = b"fund_transfer_result".to_vec();
+    logical_id.extend_from_slice(&action.action_id);
+    Ok(RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&logical_id).to_vec().into(),
+        payload: RecoveryPayload::FundTransferResult {
+            action_id: action.action_id.to_vec().into(),
+            request_id: request_id.to_vec().into(),
+            user_id: action.user_id.to_vec().into(),
+            source_account_id: source_account_id.to_vec().into(),
+            destination: destination.into(),
+            kind: action.kind.clone(),
+            amount_micros: request.amount,
+            nonce: action.nonce,
+            accepted,
+            evidence_digest: hl_sign::keccak256(response).to_vec().into(),
+            observed_at_ms: crate::clock::now_ms(),
+        },
+    })
+}
+
 /// 未処理のactionを有界に処理する。
 pub async fn sweep(now: u64) -> Result<u32, ErrorCode> {
+    let _ = crate::cycles::status();
+    crate::recovery::sync_legacy(now).await?;
+    crate::recovery::release_finished(now).await?;
+    crate::recovery::reconcile_recoveries(now).await?;
     let mut processed = 0;
     for _ in 0..MAX_ACTIONS_PER_SWEEP {
         let claimed = db::tx::update(|connection| {
@@ -43,6 +146,7 @@ pub async fn sweep(now: u64) -> Result<u32, ErrorCode> {
         dispatch(&action, now).await?;
         processed += 1;
     }
+    crate::recovery::release_finished(now).await?;
     Ok(processed)
 }
 
@@ -87,6 +191,32 @@ pub(crate) async fn ensure_custody_account(
     let derivation_path = format!("private-perp/{kind_name}/{}", hex::encode(account_id));
     let network = crate::environment::network_name()?;
 
+    // Another call can finish creation while key derivation is awaiting. Only
+    // the call that still needs an insert writes a recovery event.
+    if let Some(existing) =
+        db::tx::query(|connection| db::repo::ledger::custody_account(connection, user_id, kind))
+            .map_err(|error| map_db(error, None))?
+    {
+        return Ok(existing);
+    }
+
+    let mut logical_id = b"custody_account".to_vec();
+    logical_id.extend_from_slice(user_id);
+    logical_id.extend_from_slice(kind_name.as_bytes());
+    let event = RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&logical_id).to_vec().into(),
+        payload: RecoveryPayload::CustodyAccount {
+            user_id: user_id.to_vec().into(),
+            account_id: account_id.to_vec().into(),
+            kind: kind_name.to_string(),
+            derivation_path: derivation_path.clone(),
+            address: address.to_vec().into(),
+            network: network.clone(),
+        },
+    };
+    let ack = journal_client::append_recovery_event("vault", event.clone()).await?;
+
     let account = NewCustodyAccount {
         account_id: &account_id,
         user_id,
@@ -95,8 +225,20 @@ pub(crate) async fn ensure_custody_account(
         master_address: &address,
         network: &network,
     };
-    db::tx::update(|connection| db::repo::ledger::ensure_custody_account(connection, &account, now))
-        .map_err(|error| map_db(error, None))
+    let result = db::tx::update(|connection| {
+        if db::repo::ledger::custody_account(connection, user_id, kind)?.is_some() {
+            return Err(db::error::Error::Conflict);
+        }
+        journal_client::record_recovery_event(connection, &event, &ack)?;
+        db::repo::ledger::ensure_custody_account(connection, &account, now)
+    });
+    match result {
+        Ok(account) => Ok(account),
+        Err(error) => {
+            journal_client::lock()?;
+            Err(map_db(error, None))
+        }
+    }
 }
 
 /// 署名材料（保存済み口座・導出経路・公開鍵）。
@@ -163,13 +305,42 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
         return dispatch_recovery(action, &request, &request_id, now).await;
     }
 
+    let trading_account_id = request
+        .account_id
+        .ok_or_else(|| internal("allocation without trading account".into()))?;
+    if crate::cycles::require_new().is_err() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    if crate::eligibility::require_current(&action.user_id, &trading_account_id).is_err() {
+        db::tx::update(|connection| {
+            db::repo::actions::abort_unsent(
+                connection,
+                &action.action_id,
+                action.worker_epoch,
+                action.dispatch_state,
+                "eligibility_expired",
+                now,
+            )?;
+            db::repo::funds::set_request_state(
+                connection,
+                &action.user_id,
+                &request_id,
+                api_types::fund::FundRequestState::Rejected,
+                now,
+            )?;
+            db::repo::funds::release_reservation(connection, &action.user_id, &request_id, now)
+        })
+        .map_err(|error| map_db(error, None))?;
+        return Ok(());
+    }
+
     // 資金は準備口座から出る。署名者は**準備口座**のmaster鍵で、宛先は受付時に保存した
     // 取引口座アドレス（保存値と一致しなければ下のdigest照合で拒否される）。
     let destination = request
         .destination
         .clone()
         .ok_or_else(|| internal("allocation request without a destination".to_string()))?;
-    let (_reserve, path, public_key) =
+    let (reserve, path, public_key) =
         signer_material(&action.user_id, api_types::AccountKind::Reserve, now).await?;
 
     let payload = venue::UsdSend {
@@ -198,9 +369,53 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
     }
     let signature = crypto::sign_with_key(&digest, path, &public_key).await?;
     let wire_payload = payload.body(&signature)?;
+    let permit = crate::rest_budget::acquire(BudgetClass::NewRisk, 1).await?;
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    if crate::cycles::require_new().is_err() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
 
-    // 署名とpayloadを保存してから dispatching を永続化する（送信前に確定させる）。
+    // The token can expire during signing or while waiting for REST budget.
+    if crate::eligibility::require_current(&action.user_id, &trading_account_id).is_err() {
+        db::tx::update(|connection| {
+            db::repo::actions::abort_unsent(
+                connection,
+                &action.action_id,
+                action.worker_epoch,
+                action.dispatch_state,
+                "eligibility_expired",
+                now,
+            )?;
+            db::repo::funds::set_request_state(
+                connection,
+                &action.user_id,
+                &request_id,
+                api_types::fund::FundRequestState::Rejected,
+                now,
+            )?;
+            db::repo::funds::release_reservation(connection, &action.user_id, &request_id, now)
+        })
+        .map_err(|error| map_db(error, None))?;
+        return Ok(());
+    }
+
+    let intent = journal_client::intent(
+        "allocation",
+        &action.action_id,
+        &reserve.account_id,
+        action.nonce,
+        &action.digest,
+    );
+    let ack = journal_client::append("vault", intent.clone()).await?;
+    // 受領証跡と dispatching を同一transactionで永続化する。
     db::tx::update(|connection| {
+        let current = db::repo::funds::fund_request(connection, &action.user_id, &request_id)?
+            .ok_or(db::error::Error::NotFound)?;
+        if current.state != FundRequestState::Reserved {
+            return Err(db::error::Error::Conflict);
+        }
         db::repo::actions::mark_signed(
             connection,
             &action.action_id,
@@ -208,19 +423,34 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
             &signature.to_bytes65(),
             &wire_payload,
             now,
-        )
-    })
-    .map_err(|error| map_db(error, None))?;
-    db::tx::update(|connection| {
+        )?;
+        journal_client::record(connection, &intent, &ack)?;
         db::repo::actions::mark_dispatching(connection, &action.action_id, action.worker_epoch, now)
     })
     .map_err(|error| map_db(error, None))?;
 
-    match venue::post_usd_send(&payload, &signature).await {
-        Ok((ExchangeOutcome::Accepted, _response)) => {
+    match venue::post_usd_send(&payload, &signature, &permit).await {
+        Ok((ExchangeOutcome::Accepted, response)) => {
+            let result = fund_transfer_result_event(
+                action,
+                &request,
+                &request_id,
+                &reserve.account_id,
+                true,
+                &response,
+            )?;
+            let result_ack =
+                match journal_client::append_recovery_event("vault", result.clone()).await {
+                    Ok(ack) => ack,
+                    Err(_) => {
+                        mark_post_unknown(action, &request_id, now)?;
+                        return Ok(());
+                    }
+                };
             // 共通保管から出た（移動中）。着金の確定は照合で行う。
             let amount = i64::try_from(request.amount).map_err(|_| internal("overflow".into()))?;
             db::tx::update(|connection| {
+                journal_client::record_recovery_event(connection, &result, &result_ack)?;
                 db::repo::ledger::post_journal(
                     connection,
                     "allocation_start",
@@ -268,9 +498,26 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
             })
             .map_err(|error| map_db(error, None))?;
         }
-        Ok((ExchangeOutcome::Rejected { message }, _response)) => {
+        Ok((ExchangeOutcome::Rejected { .. }, response)) => {
+            let result = fund_transfer_result_event(
+                action,
+                &request,
+                &request_id,
+                &reserve.account_id,
+                false,
+                &response,
+            )?;
+            let result_ack =
+                match journal_client::append_recovery_event("vault", result.clone()).await {
+                    Ok(ack) => ack,
+                    Err(_) => {
+                        mark_post_unknown(action, &request_id, now)?;
+                        return Ok(());
+                    }
+                };
             // 取引所が拒否した＝外部効果は無い。予約を解放して終端する。
             db::tx::update(|connection| {
+                journal_client::record_recovery_event(connection, &result, &result_ack)?;
                 db::repo::funds::release_reservation(
                     connection,
                     &action.user_id,
@@ -289,7 +536,7 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
                     "system",
                     "allocation_rejected",
                     None,
-                    Some(&message),
+                    Some("venue_rejected"),
                     now,
                 )?;
                 db::repo::actions::mark_reconciled(
@@ -301,15 +548,15 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
             })
             .map_err(|error| map_db(error, None))?;
         }
-        Err(error) => {
+        Err(_error) => {
             // 送信した可能性がある。再送せず unknown として照合対象に残す。
-            let reason = format!("{error:?}");
+            let reason = "result_unknown";
             db::tx::update(|connection| {
                 db::repo::actions::mark_unknown(
                     connection,
                     &action.action_id,
                     action.worker_epoch,
-                    &reason,
+                    reason,
                     now,
                 )?;
                 db::repo::funds::set_request_state(
@@ -356,7 +603,7 @@ async fn dispatch_withdrawal(
         .clone()
         .ok_or_else(|| internal("withdrawal request without a destination".to_string()))?;
     // 資金は準備口座から出る。署名者は準備口座のmaster鍵（保存済みaccount_idから導出）。
-    let (_reserve, path, public_key) =
+    let (reserve, path, public_key) =
         signer_material(&action.user_id, api_types::AccountKind::Reserve, now).await?;
     let payload = venue::UsdSend {
         destination,
@@ -382,6 +629,18 @@ async fn dispatch_withdrawal(
     }
     let signature = crypto::sign_with_key(&digest, path, &public_key).await?;
     let wire_payload = payload.body(&signature)?;
+    let permit = crate::rest_budget::acquire(BudgetClass::Exit, 1).await?;
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    let intent = journal_client::intent(
+        "withdrawal",
+        &action.action_id,
+        &reserve.account_id,
+        action.nonce,
+        &action.digest,
+    );
+    let ack = journal_client::append("vault", intent.clone()).await?;
     db::tx::update(|connection| {
         db::repo::actions::mark_signed(
             connection,
@@ -390,21 +649,36 @@ async fn dispatch_withdrawal(
             &signature.to_bytes65(),
             &wire_payload,
             now,
-        )
-    })
-    .map_err(|error| map_db(error, None))?;
-    db::tx::update(|connection| {
+        )?;
+        journal_client::record(connection, &intent, &ack)?;
         db::repo::actions::mark_dispatching(connection, &action.action_id, action.worker_epoch, now)
     })
     .map_err(|error| map_db(error, None))?;
 
-    match venue::post_usd_send(&payload, &signature).await {
-        Ok((ExchangeOutcome::Accepted, _response)) => {
+    match venue::post_usd_send(&payload, &signature, &permit).await {
+        Ok((ExchangeOutcome::Accepted, response)) => {
+            let result = fund_transfer_result_event(
+                action,
+                request,
+                request_id,
+                &reserve.account_id,
+                true,
+                &response,
+            )?;
+            let result_ack =
+                match journal_client::append_recovery_event("vault", result.clone()).await {
+                    Ok(ack) => ack,
+                    Err(_) => {
+                        mark_post_unknown(action, request_id, now)?;
+                        return Ok(());
+                    }
+                };
             // 払出しの証跡IDはactionのダイジェストから決定的に作る（実運用では取引所のtx）。
             let mut evidence = b"payout".to_vec();
             evidence.extend_from_slice(&action.digest);
             let event_id = hl_sign::keccak256(&evidence);
             db::tx::update(|connection| {
+                journal_client::record_recovery_event(connection, &result, &result_ack)?;
                 db::repo::ledger::payout_settled(
                     connection,
                     &action.user_id,
@@ -430,8 +704,25 @@ async fn dispatch_withdrawal(
             })
             .map_err(|error| map_db(error, None))?;
         }
-        Ok((ExchangeOutcome::Rejected { message }, _response)) => {
+        Ok((ExchangeOutcome::Rejected { .. }, response)) => {
+            let result = fund_transfer_result_event(
+                action,
+                request,
+                request_id,
+                &reserve.account_id,
+                false,
+                &response,
+            )?;
+            let result_ack =
+                match journal_client::append_recovery_event("vault", result.clone()).await {
+                    Ok(ack) => ack,
+                    Err(_) => {
+                        mark_post_unknown(action, request_id, now)?;
+                        return Ok(());
+                    }
+                };
             db::tx::update(|connection| {
+                journal_client::record_recovery_event(connection, &result, &result_ack)?;
                 db::repo::funds::release_reservation(connection, &action.user_id, request_id, now)?;
                 // 台帳の予約も戻す（受付時の`withdrawal_reserve`の逆仕訳）。
                 db::repo::ledger::withdrawal_release(
@@ -453,7 +744,7 @@ async fn dispatch_withdrawal(
                     "system",
                     "payout_rejected",
                     None,
-                    Some(&message),
+                    Some("venue_rejected"),
                     now,
                 )?;
                 db::repo::actions::mark_reconciled(
@@ -465,14 +756,14 @@ async fn dispatch_withdrawal(
             })
             .map_err(|error| map_db(error, None))?;
         }
-        Err(error) => {
-            let reason = format!("{error:?}");
+        Err(_error) => {
+            let reason = "result_unknown";
             db::tx::update(|connection| {
                 db::repo::actions::mark_unknown(
                     connection,
                     &action.action_id,
                     action.worker_epoch,
-                    &reason,
+                    reason,
                     now,
                 )?;
                 db::repo::funds::set_request_state(
@@ -541,30 +832,123 @@ async fn dispatch_recovery(
             code: "action digest mismatch".to_string(),
         });
     }
+    let fence = match crate::recovery::prepare(
+        &trading_account_id,
+        &action.user_id,
+        &signer.master_address,
+        request_id,
+    )
+    .await
+    {
+        Ok(token) => token,
+        Err(ErrorCode::ReservationConflict) => {
+            db::tx::update(|connection| {
+                db::repo::funds::release_reservation(connection, &action.user_id, request_id, now)?;
+                db::repo::funds::set_request_state(
+                    connection,
+                    &action.user_id,
+                    request_id,
+                    FundRequestState::Rejected,
+                    now,
+                )?;
+                db::repo::actions::abort_unsent(
+                    connection,
+                    &action.action_id,
+                    action.worker_epoch,
+                    api_types::fund::ActionState::Signing,
+                    "account_not_flat",
+                    now,
+                )
+            })
+            .map_err(|error| map_db(error, None))?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    db::tx::update(|connection| {
+        db::repo::actions::record_recovery_fence(
+            connection,
+            &action.action_id,
+            action.worker_epoch,
+            fence.epoch,
+            now,
+        )
+    })
+    .map_err(|error| map_db(error, None))?;
     let signature = crypto::sign_with_key(&digest, path, &public_key).await?;
     let wire_payload = payload.body(&signature)?;
+    let permit = crate::rest_budget::acquire(BudgetClass::Exit, 1).await?;
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    crate::recovery::commit(fence.clone()).await?;
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    let intent = journal_client::intent(
+        "recovery",
+        &action.action_id,
+        &signer.account_id,
+        action.nonce,
+        &action.digest,
+    );
+    let ack = journal_client::append("vault", intent.clone()).await?;
+    let send_now = crate::clock::now_ms();
     db::tx::update(|connection| {
+        let current = db::repo::funds::fund_request(connection, &action.user_id, request_id)?
+            .ok_or(db::error::Error::NotFound)?;
+        if current.state != FundRequestState::Reserved
+            || !db::repo::actions::recovery_lease_valid(
+                connection,
+                &action.action_id,
+                action.worker_epoch,
+                send_now,
+            )?
+        {
+            return Err(db::error::Error::Conflict);
+        }
         db::repo::actions::mark_signed(
             connection,
             &action.action_id,
             action.worker_epoch,
             &signature.to_bytes65(),
             &wire_payload,
-            now,
+            send_now,
+        )?;
+        journal_client::record(connection, &intent, &ack)?;
+        db::repo::actions::mark_dispatching(
+            connection,
+            &action.action_id,
+            action.worker_epoch,
+            send_now,
         )
     })
     .map_err(|error| map_db(error, None))?;
-    db::tx::update(|connection| {
-        db::repo::actions::mark_dispatching(connection, &action.action_id, action.worker_epoch, now)
-    })
-    .map_err(|error| map_db(error, None))?;
 
-    match venue::post_usd_send(&payload, &signature).await {
-        Ok((ExchangeOutcome::Accepted, _response)) => {
-            let mut evidence = b"recovery".to_vec();
-            evidence.extend_from_slice(&action.digest);
-            let event_id = hl_sign::keccak256(&evidence);
+    match venue::post_usd_send(&payload, &signature, &permit).await {
+        Ok((ExchangeOutcome::Accepted, response)) => {
+            let settlement = recovery_settlement_event(
+                action,
+                request_id,
+                &trading_account_id,
+                request.amount,
+                true,
+                &response,
+            );
+            let settlement_ack =
+                match journal_client::append_recovery_event("vault", settlement.clone()).await {
+                    Ok(ack) => ack,
+                    Err(_) => {
+                        mark_post_unknown(action, request_id, now)?;
+                        let _ = crate::recovery::mark_unknown(fence).await;
+                        return Ok(());
+                    }
+                };
+            let mut event_bytes = b"recovery_ack".to_vec();
+            event_bytes.extend_from_slice(&action.action_id);
+            let event_id = hl_sign::keccak256(&event_bytes);
             db::tx::update(|connection| {
+                journal_client::record_recovery_event(connection, &settlement, &settlement_ack)?;
                 db::repo::ledger::recovery_confirm(
                     connection,
                     &action.user_id,
@@ -573,7 +957,6 @@ async fn dispatch_recovery(
                     now,
                     &event_id,
                 )?;
-                // 台帳で資金が動いたので予約も消費する。
                 db::repo::funds::consume_reservation(connection, &action.user_id, request_id)?;
                 db::repo::funds::set_request_state(
                     connection,
@@ -591,8 +974,26 @@ async fn dispatch_recovery(
             })
             .map_err(|error| map_db(error, None))?;
         }
-        Ok((ExchangeOutcome::Rejected { message }, _response)) => {
+        Ok((ExchangeOutcome::Rejected { .. }, response)) => {
+            let settlement = recovery_settlement_event(
+                action,
+                request_id,
+                &trading_account_id,
+                request.amount,
+                false,
+                &response,
+            );
+            let settlement_ack =
+                match journal_client::append_recovery_event("vault", settlement.clone()).await {
+                    Ok(ack) => ack,
+                    Err(_) => {
+                        mark_post_unknown(action, request_id, now)?;
+                        let _ = crate::recovery::mark_unknown(fence).await;
+                        return Ok(());
+                    }
+                };
             db::tx::update(|connection| {
+                journal_client::record_recovery_event(connection, &settlement, &settlement_ack)?;
                 db::repo::funds::release_reservation(connection, &action.user_id, request_id, now)?;
                 db::repo::funds::set_request_state(
                     connection,
@@ -606,7 +1007,7 @@ async fn dispatch_recovery(
                     "system",
                     "recovery_rejected",
                     None,
-                    Some(&message),
+                    Some("venue_rejected"),
                     now,
                 )?;
                 db::repo::actions::mark_reconciled(
@@ -618,14 +1019,14 @@ async fn dispatch_recovery(
             })
             .map_err(|error| map_db(error, None))?;
         }
-        Err(error) => {
-            let reason = format!("{error:?}");
+        Err(_error) => {
+            let reason = "result_unknown";
             db::tx::update(|connection| {
                 db::repo::actions::mark_unknown(
                     connection,
                     &action.action_id,
                     action.worker_epoch,
-                    &reason,
+                    reason,
                     now,
                 )?;
                 db::repo::funds::set_request_state(
@@ -645,6 +1046,7 @@ async fn dispatch_recovery(
                 )
             })
             .map_err(|error| map_db(error, None))?;
+            let _ = crate::recovery::mark_unknown(fence).await;
         }
     }
     Ok(())

@@ -29,6 +29,12 @@ canisters:
       configuration:
         package: trading-core
 
+  - name: send_journal
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: send-journal
+
 networks:
   - name: local
     mode: managed

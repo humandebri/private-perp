@@ -200,7 +200,7 @@ p {
 }
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 .status-grid article {
@@ -246,6 +246,36 @@ p {
   font: 28px monospace;
   color: #b8eedb;
 }
+.trade-overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  border: 1px solid #24333b;
+  border-radius: 6px;
+  background: #101a20;
+}
+.trade-overview > div {
+  display: grid;
+  gap: 6px;
+}
+.trade-overview span {
+  color: #9cb0b9;
+  font-size: 11px;
+}
+.trade-overview strong {
+  color: #b8eedb;
+  font: 16px monospace;
+  overflow-wrap: anywhere;
+}
+.trade-overview a {
+  padding: 10px 12px;
+  border: 1px solid #56756e;
+  border-radius: 6px;
+  color: #b8eedb;
+  text-align: center;
+}
 .state-chip {
   border: 1px solid #33454d;
   border-radius: 999px;
@@ -268,9 +298,12 @@ p {
 }
 .trading-grid {
   display: grid;
-  grid-template-columns: minmax(320px, 2fr) minmax(170px, 0.65fr) minmax(310px, 1fr);
+  grid-template-columns: minmax(0, 2fr) minmax(310px, 1fr);
   gap: 12px;
   align-items: start;
+}
+.market-tape {
+  grid-column: 1 / -1;
 }
 .chart-panel {
   min-height: 420px;
@@ -299,7 +332,7 @@ p {
   margin: 0;
 }
 .panel-title span {
-  color: #687f89;
+  color: #9bb3bd;
   font: 10px monospace;
 }
 .price-chart {
@@ -309,6 +342,18 @@ p {
 }
 .market-tape {
   padding: 14px;
+}
+.market-tape summary {
+  cursor: pointer;
+  color: #b8eedb;
+  font-weight: 600;
+}
+.market-tape summary:focus-visible {
+  outline: 2px solid #8ce3c5;
+  outline-offset: 4px;
+}
+.market-tape[open] summary {
+  margin-bottom: 18px;
 }
 .book-side,
 .trade-tape {
@@ -376,8 +421,12 @@ p {
 .trade-shortcuts a:hover {
   background: #1b302e;
 }
+.mobile-exit-actions {
+  display: none;
+}
 #order-ticket,
 #market-chart,
+#positions,
 #order-status {
   scroll-margin-top: 16px;
 }
@@ -460,6 +509,31 @@ p {
 .table-panel h1 {
   font-size: 18px;
 }
+.eligibility-panel,
+.account-details {
+  border: 1px solid #33454d;
+  border-radius: 6px;
+}
+.eligibility-panel {
+  padding: 10px 12px;
+}
+.account-details {
+  align-self: start;
+}
+.eligibility-panel summary,
+.account-details summary {
+  cursor: pointer;
+  color: #b8eedb;
+  font-weight: 600;
+}
+.eligibility-panel summary:focus-visible,
+.account-details summary:focus-visible {
+  outline: 2px solid #8ce3c5;
+  outline-offset: 4px;
+}
+.account-details[open] summary {
+  margin-bottom: 16px;
+}
 .form-row,
 .action-grid {
   display: grid;
@@ -498,6 +572,18 @@ p {
   color: #f2d47c;
   border-radius: 5px;
 }
+.account-notice summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.account-notice summary:focus-visible {
+  outline: 2px solid #f2d47c;
+  outline-offset: 4px;
+}
+.account-notice p {
+  margin: 10px 0 0;
+  color: inherit;
+}
 .empty-state {
   max-width: 660px;
   margin: 12vh auto;
@@ -509,6 +595,21 @@ p {
   width: 100%;
   border-collapse: collapse;
   min-width: 680px;
+}
+#order-status table {
+  min-width: 560px;
+}
+.order-processing-details {
+  margin-top: 5px;
+  color: #9cb0b9;
+  font-size: 11px;
+}
+.order-processing-details summary {
+  cursor: pointer;
+}
+.order-processing-details span {
+  display: block;
+  margin-top: 4px;
 }
 .table-panel th,
 .table-panel td {
@@ -608,6 +709,15 @@ footer {
   font-size: 10px;
   color: #738d99;
 }
+@media (min-width: 761px) and (max-width: 900px) {
+  .trading-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(310px, 0.8fr);
+  }
+  .order-ticket {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}
 .status-dot {
   display: inline-block;
   width: 6px;
@@ -617,6 +727,75 @@ footer {
   margin-right: 7px;
 }
 @media (max-width: 760px) {
+  .responsive-table,
+  .responsive-table tbody,
+  .responsive-table tr,
+  .responsive-table td {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  .responsive-table thead {
+    display: none;
+  }
+  .responsive-table tr {
+    margin-top: 12px;
+    padding: 8px 12px;
+    border: 1px solid #31454e;
+    border-radius: 6px;
+  }
+  .responsive-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 9px 0;
+    overflow-wrap: anywhere;
+  }
+  .responsive-table td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: #91a5af;
+    font-size: 11px;
+  }
+  .responsive-table td:last-child {
+    display: block;
+    border-bottom: 0;
+  }
+  .responsive-table td:last-child::before {
+    display: block;
+    margin-bottom: 8px;
+  }
+  .position-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    min-width: 0;
+  }
+  .position-actions input {
+    width: 100%;
+    min-width: 0;
+  }
+  .position-actions button {
+    min-width: 0;
+    padding-inline: 4px;
+  }
+  .mobile-exit-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .mobile-exit-actions button,
+  .mobile-exit-actions a {
+    min-width: 0;
+    min-height: 44px;
+    padding: 10px 5px;
+    border: 1px solid #56756e;
+    border-radius: 6px;
+    color: #b8eedb;
+    background: #19312b;
+    text-align: center;
+    font-size: 12px;
+  }
   .topbar {
     height: 60px;
     padding-inline: 14px;
@@ -647,7 +826,13 @@ footer {
     padding-inline: 14px;
   }
   .status-grid {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .trade-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .trade-overview a {
+    grid-column: 1 / -1;
   }
   .two-column,
   .trading-grid,

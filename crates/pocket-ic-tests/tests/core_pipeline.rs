@@ -19,10 +19,11 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, TRADING_CORE_WASM, approve_agent_at_vault, call_with_routed_outcalls,
-    configure_policy, deploy, envelope, fund_trading_account, pic, principal, rotate_hpke_key,
-    update, update_args,
+    FUNDS_VAULT_WASM, TRADING_CORE_WASM, approve_agent_at_vault, call_with_mocked_outcall,
+    call_with_routed_outcalls, configure_policy, deploy, envelope, fund_trading_account, pic,
+    principal, query, rotate_hpke_key, update, update_args,
 };
+use std::cell::Cell;
 
 const ORIGIN: &str = "https://app.example.test";
 const UNIVERSE: &str = r#"[{"name":"SOL","szDecimals":0},{"name":"ETH","szDecimals":5},{"name":"BTC","szDecimals":5}]"#;
@@ -30,7 +31,7 @@ const UNIVERSE: &str = r#"[{"name":"SOL","szDecimals":0},{"name":"ETH","szDecima
 const ACCEPTED: &[u8] =
     br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":4242}}]}}}"#;
 /// 建玉1件の照合応答。
-const POSITIONS: &[u8] = br#"{"marginSummary":{"accountValue":"100"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","liquidationPx":"2000","unrealizedPnl":"1.5","leverage":{"value":3},"marginMode":"cross"},"type":"oneWay"}],"withdrawable":"50"}"#;
+const POSITIONS: &[u8] = br#"{"marginSummary":{"accountValue":"100","totalMarginUsed":"0"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","liquidationPx":"2000","unrealizedPnl":"1.5","leverage":{"value":3},"marginMode":"cross"},"type":"oneWay"}],"withdrawable":"50"}"#;
 /// 約定1件の照合応答。
 const FILLS: &[u8] = br#"[{"tid":9001,"oid":4242,"coin":"ETH","px":"2500","sz":"0.05","fee":120,"time":1700000000000,"dir":"Open Long","users":["0xaa"],"extra":true}]"#;
 /// 注文が約定した状態の照合応答。
@@ -91,7 +92,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 /// 取引可能なユーザー1人分の準備（口座・equity・Agent承認）。
@@ -287,7 +290,7 @@ fn the_pipeline_dispatches_and_reconciles_orders() {
 
     let submitted = submit(&pic, core, &user, b"pipeline-1", "0.05").expect("accepted");
 
-    // 1回のsweepで送信（/exchange）と照合（/infoが3種）が出る。
+    // 照合は新規注文の送信より先に走る。受理したoidは次のsweepで確認する。
     let (swept, captured) =
         call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
             &pic,
@@ -316,6 +319,10 @@ fn the_pipeline_dispatches_and_reconciles_orders() {
         .expect("exchange outcall");
     let body: serde_json::Value = serde_json::from_slice(&exchange.body).expect("json");
     assert_eq!(body["action"]["type"], "order");
+    assert!(
+        body["action"].get("builder").is_none(),
+        "builder fee remains zero"
+    );
     assert_eq!(body["action"]["orders"][0]["s"], "0.05");
     assert!(body["signature"]["r"].as_str().is_some(), "署名が入る");
 
@@ -330,6 +337,20 @@ fn the_pipeline_dispatches_and_reconciles_orders() {
         let query: serde_json::Value = serde_json::from_slice(&call.body).expect("json");
         assert_eq!(query["user"], expected_user, "取引所アドレスで照会する");
     }
+
+    pic.advance_time(std::time::Duration::from_secs(121));
+    pic.tick();
+    let (second, _) =
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, POSITIONS, FILLS, STATUS_FILLED),
+        )
+        .expect("second sweep");
+    assert_eq!(second.expect("second sweep result").reconciled, 1);
 
     // 注文はoidつきで、注文状態の反映（filled）と約定の取り込みが効いている。
     let orders = list_orders(&pic, core, user.caller, &user.session);
@@ -357,6 +378,144 @@ fn the_pipeline_dispatches_and_reconciles_orders() {
         envelope::list_fills(&pic, core, user.caller, &user.session, None::<Blob>, 10)
             .expect("call");
     assert_eq!(fills.expect("fills").items.len(), 1);
+}
+
+/// coreだけを古いsnapshotへ戻しても、独立journalの高水位がPOSTを止める。
+#[test]
+fn restored_core_snapshot_cannot_send_against_newer_journal() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 191, b"restore-alloc");
+    let snapshot = pic
+        .take_canister_snapshot(core, Some(controller), None)
+        .expect("take core snapshot");
+
+    submit(&pic, core, &user, b"sent-after-snapshot", "0.05").expect("accepted");
+    let (first, first_calls) =
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, br#"{"assetPositions":[]}"#, b"[]", STATUS_FILLED),
+        )
+        .expect("first sweep");
+    assert_eq!(first.expect("first result").dispatched, 1);
+    assert!(
+        first_calls
+            .iter()
+            .any(|call| call.url.contains("/exchange"))
+    );
+
+    pic.load_canister_snapshot(core, Some(controller), snapshot.id)
+        .expect("restore core snapshot");
+    let attempted = submit(&pic, core, &user, b"after-restore", "0.05");
+    assert!(
+        matches!(attempted, Err(ErrorCode::PolicyUnavailable)),
+        "the missing account event must stop intake before another POST"
+    );
+    let (_restored, calls) =
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, br#"{"assetPositions":[]}"#, b"[]", STATUS_FILLED),
+        )
+        .expect("restored sweep call");
+    let status: Result<(u64, u64, bool), ErrorCode> =
+        query(&pic, core, controller, "journal_restore_status", ()).unwrap();
+    assert!(status.unwrap().2, "journal mismatch must lock dispatch");
+    assert!(
+        calls.iter().all(|call| !call.url.contains("/exchange")),
+        "no second POST"
+    );
+}
+
+#[test]
+fn journal_outage_blocks_exchange_post() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 192, b"journal-outage-alloc");
+    submit(&pic, core, &user, b"journal-outage-order", "0.05").expect("accepted");
+    let journal: Result<Option<Principal>, ErrorCode> =
+        query(&pic, core, controller, "get_send_journal", ()).unwrap();
+    pic.stop_canister(journal.unwrap().unwrap(), Some(controller))
+        .expect("stop journal");
+    let prior_risk =
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved;
+    let prior_orders = list_orders(&pic, core, user.caller, &user.session).len();
+    assert!(submit(&pic, core, &user, b"journal-down-new-order", "0.05").is_err());
+    assert_eq!(
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved,
+        prior_risk,
+        "journal outage must not create a new risk reservation"
+    );
+    assert_eq!(
+        list_orders(&pic, core, user.caller, &user.session).len(),
+        prior_orders
+    );
+
+    let (result, calls) =
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, br#"{"assetPositions":[]}"#, b"[]", STATUS_FILLED),
+        )
+        .expect("sweep call");
+    assert!(result.is_err());
+    assert!(
+        calls.iter().all(|call| !call.url.contains("/exchange")),
+        "journal outage must stop all POSTs"
+    );
+}
+
+#[test]
+fn journal_outage_after_leverage_post_keeps_order_unknown() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 193, b"result-outage-alloc");
+    let submitted = submit(&pic, core, &user, b"result-outage-order", "0.05").expect("accepted");
+    let journal: Result<Option<Principal>, ErrorCode> =
+        query(&pic, core, controller, "get_send_journal", ()).expect("journal query");
+    let journal = journal.expect("configured journal").expect("principal");
+    let stopped = Cell::new(false);
+    let normal = route(ACCEPTED, POSITIONS, FILLS, STATUS_FILLED);
+    let (result, calls) = call_with_routed_outcalls::<
+        (),
+        Result<api_types::order::SweepOutcome, ErrorCode>,
+        _,
+    >(&pic, core, controller, "test_sweep_now", (), |call| {
+        if call.url.contains("/exchange") && !stopped.get() {
+            pic.stop_canister(journal, Some(controller))
+                .expect("stop journal after exchange POST");
+            stopped.set(true);
+        }
+        normal(call)
+    })
+    .expect("sweep call");
+    assert_eq!(result.expect("sweep").dispatched, 1);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.url.contains("/exchange"))
+            .count(),
+        1
+    );
+    let order = list_orders(&pic, core, user.caller, &user.session)
+        .into_iter()
+        .find(|order| order.order_id == submitted.order_id)
+        .expect("order");
+    assert_eq!(order.state, OrderState::Unknown);
+    assert!(account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved > 0);
 }
 
 /// 拒否はリスク予約を解放し、結果不明は再送しない。
@@ -549,4 +708,65 @@ fn only_a_controller_can_sweep_manually() {
     // 送信も取消も対象が無ければ0件（無害に完了する）。
     let allowed = allowed.expect("sweep");
     assert_eq!((allowed.dispatched, allowed.cancels), (0, 0));
+}
+
+#[test]
+fn pending_order_prevents_recovery_before_any_transfer_post() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 190, b"fence-pending-alloc");
+    let allocated: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        controller,
+        "test_sweep_now",
+        (),
+        Ok((
+            200,
+            br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+        )),
+    )
+    .expect("allocation sweep");
+    assert_eq!(allocated.expect("allocation"), 1);
+    submit(&pic, core, &user, b"fence-pending-order", "0.05").expect("pending order");
+    let accepted: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update_args(
+        &pic,
+        vault,
+        user.caller,
+        "request_recovery",
+        (user.session.clone(), blob(b"fence-recovery"), 1_000_000u64),
+    )
+    .expect("recovery request");
+    accepted.expect("reserved recovery");
+    let swept: Result<u32, ErrorCode> =
+        update_args(&pic, vault, controller, "test_sweep_now", ()).expect("recovery sweep");
+    assert_eq!(swept.expect("blocked recovery"), 1);
+    let status: Result<api_types::fund::FundStatus, ErrorCode> = update(
+        &pic,
+        vault,
+        user.caller,
+        "get_fund_status",
+        user.session.clone(),
+    )
+    .expect("status");
+    let status = status.expect("fund status");
+    assert!(status.recovery_fence.is_none());
+    assert_eq!(status.trading_equity, 5_000_000_000);
+    let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        user.caller,
+        "list_fund_events",
+        (user.session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("events");
+    assert_eq!(
+        events.expect("fund events").items[0].state,
+        api_types::fund::FundRequestState::Rejected
+    );
+    assert_eq!(
+        list_orders(&pic, core, user.caller, &user.session)[0].state,
+        OrderState::Pending
+    );
 }

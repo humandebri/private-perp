@@ -11,6 +11,7 @@ use api_types::fund::{
     AllocationRequest, Destination, FundRequestAccepted, FundRequestState, FundStatus,
     WithdrawalRequest,
 };
+use api_types::journal::{RecoveryPayload, RecoveryRecord};
 use api_types::{AccountKind, AssetId, Blob, Network};
 use candid::Principal;
 use hl_sign::private_perp;
@@ -77,7 +78,9 @@ fn open_session(
         },
     )
     .expect("open_session call");
-    (session.expect("session"), eoa)
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    (session, eoa)
 }
 
 fn credit(
@@ -172,6 +175,41 @@ fn allocation_is_idempotent_and_bounded_by_the_balance() {
     assert_eq!(status.reserve_unallocated, 1_000_000);
     assert_eq!(status.withdrawable, 600_000);
 
+    let controller = pic.get_controllers(vault).first().copied().unwrap();
+    let journal: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, vault, controller, "get_send_journal", ()).unwrap();
+    let journal = journal.unwrap().unwrap();
+    let events: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, vault, "recovery_events", (0u64, 100u32)).unwrap();
+    let allocation_events: Vec<_> = events
+        .unwrap()
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.event.payload,
+                RecoveryPayload::AllocationAccepted { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        allocation_events.len(),
+        1,
+        "duplicate must not append again"
+    );
+    match &allocation_events[0].event.payload {
+        RecoveryPayload::AllocationAccepted {
+            request_id,
+            amount_micros,
+            nonce,
+            ..
+        } => {
+            assert_eq!(request_id.as_ref(), b"alloc-2");
+            assert_eq!(*amount_micros, 400_000);
+            assert!(*nonce > 0);
+        }
+        _ => unreachable!(),
+    }
+
     // 残高を超える配分は拒否する。
     let error = allocation(&pic, vault, caller, &session, b"alloc-3", 700_000)
         .expect_err("must reject over the balance");
@@ -179,6 +217,29 @@ fn allocation_is_idempotent_and_bounded_by_the_balance() {
         matches!(error, ErrorCode::InsufficientFunds { .. }),
         "{error:?}"
     );
+}
+
+#[test]
+fn allocation_does_not_reserve_when_journal_is_unavailable() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(29);
+    let key = secret(209);
+    let (session, _eoa) = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 29);
+
+    let controller = pic.get_controllers(vault).first().copied().unwrap();
+    let journal: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, vault, controller, "get_send_journal", ()).unwrap();
+    pic.stop_canister(journal.unwrap().unwrap(), Some(controller))
+        .unwrap();
+
+    assert!(allocation(&pic, vault, caller, &session, b"journal-down", 400_000).is_err());
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session).unwrap();
+    let status = status.unwrap();
+    assert_eq!(status.reserve_unallocated, 1_000_000);
+    assert_eq!(status.withdrawable, 1_000_000);
 }
 
 #[test]
@@ -264,6 +325,56 @@ fn withdrawal_requires_a_valid_intent_signature() {
     .expect("call");
     let accepted = accepted.expect("accepted");
     assert_eq!(accepted.state, FundRequestState::Reserved);
+    let repeated: Result<FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_withdrawal",
+        signed(&intent, &key),
+    )
+    .unwrap();
+    assert_eq!(repeated.unwrap().request_id, accepted.request_id);
+    let controller = pic.get_controllers(vault).first().copied().unwrap();
+    let journal: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, vault, controller, "get_send_journal", ()).unwrap();
+    let events: Result<Vec<RecoveryRecord>, ErrorCode> = update_args(
+        &pic,
+        journal.unwrap().unwrap(),
+        vault,
+        "recovery_events",
+        (0u64, 100u32),
+    )
+    .unwrap();
+    let withdrawal_events: Vec<_> = events
+        .unwrap()
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.event.payload,
+                RecoveryPayload::WithdrawalAccepted { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        withdrawal_events.len(),
+        1,
+        "duplicate must not append again"
+    );
+    match &withdrawal_events[0].event.payload {
+        RecoveryPayload::WithdrawalAccepted {
+            request_id,
+            destination,
+            amount_micros,
+            intent_nonce,
+            ..
+        } => {
+            assert_eq!(request_id.as_ref(), b"wd-1");
+            assert_eq!(destination.as_ref(), eoa);
+            assert_eq!(*amount_micros, 250_000);
+            assert_eq!(*intent_nonce, 1);
+        }
+        _ => unreachable!(),
+    }
 
     // 期限切れintentは拒否する。
     let mut expired = intent.clone();
@@ -287,6 +398,67 @@ fn withdrawal_requires_a_valid_intent_signature() {
         ),
         "{expired_error:?}"
     );
+}
+
+#[test]
+fn withdrawal_does_not_reserve_when_journal_is_unavailable() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(30);
+    let key = secret(210);
+    let (session, eoa) = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 30);
+    let provisioned: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .unwrap();
+    provisioned.unwrap();
+    let controller = pic.get_controllers(vault).first().copied().unwrap();
+    let journal: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, vault, controller, "get_send_journal", ()).unwrap();
+    pic.stop_canister(journal.unwrap().unwrap(), Some(controller))
+        .unwrap();
+
+    let now = pic.get_time().as_nanos_since_unix_epoch() / 1_000_000;
+    let intent = private_perp::Withdrawal {
+        eoa,
+        amount: 250_000,
+        asset: "usdc".to_string(),
+        destination: format!("0x{}", hex::encode(eoa)),
+        network: "local".to_string(),
+        nonce: 8,
+        expires_at: now + 600_000,
+        canister: vault.as_slice().to_vec(),
+    };
+    let request = WithdrawalRequest {
+        session: session.clone(),
+        client_request_id: request_id(b"withdraw-journal-down"),
+        amount: intent.amount,
+        asset: AssetId::Usdc,
+        destination: Destination::AuthenticatedEoaHlAccount,
+        network: Network::Local,
+        nonce: intent.nonce,
+        expires_at: intent.expires_at,
+        intent_signature: intent
+            .sign_for_tests(&key)
+            .unwrap()
+            .to_bytes65()
+            .to_vec()
+            .into(),
+    };
+    let rejected: Result<FundRequestAccepted, ErrorCode> =
+        update(&pic, vault, caller, "request_withdrawal", request).unwrap();
+    assert!(rejected.is_err());
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session).unwrap();
+    let status = status.unwrap();
+    assert_eq!(status.reserve_unallocated, 1_000_000);
+    assert_eq!(status.reserved_for_withdrawal, 0);
+    assert_eq!(status.withdrawable, 1_000_000);
 }
 
 #[test]

@@ -16,6 +16,7 @@ pub mod keccak;
 pub mod private_perp;
 pub mod signature;
 pub mod typed_data;
+pub mod usd_send;
 pub mod user_signed;
 
 pub use eip712::Domain;

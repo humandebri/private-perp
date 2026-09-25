@@ -15,11 +15,13 @@ function useSessionValue() {
   const store = useMemo(() => new SessionStore(gateway), [gateway])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const [now, setNow] = useState(0)
+  const [wallNow, setWallNow] = useState(0)
   useEffect(() => {
     let last = -Infinity
     const tick = () => {
       const current = performance.now()
       setNow(current)
+      setWallNow(Date.now())
       const interval = document.visibilityState === 'visible' ? 2_000 : 30_000
       if (current - last >= interval) {
         last = current
@@ -40,7 +42,8 @@ function useSessionValue() {
     store,
     fresh: effectiveAge(state, now) <= 10_000 && !state.refreshError,
     age: effectiveAge(state, now),
-    orderBlockReason: orderBlockReason(state, now),
+    wallNow,
+    orderBlockReason: orderBlockReason(state, now, wallNow),
     login: store.login,
     logout: store.logout,
     refresh: store.refresh,

@@ -1,8 +1,21 @@
 import { Principal } from '@icp-sdk/core/principal'
-import type { FundStatus, Paged as FundEvents, SessionHandle } from './candid/funds_vault.did.js'
-import type { AgentStatus, SubmitOrderResult } from './candid/trading_core.did.js'
+import type {
+  CyclesStatus as VaultCycles,
+  EligibilityStatus,
+  FundStatus,
+  Paged as FundEvents,
+  SessionHandle,
+} from './candid/funds_vault.did.js'
+import type {
+  AgentStatus,
+  CyclesStatus as CoreCycles,
+  MarketStatus,
+} from './candid/trading_core.did.js'
 import {
   codec,
+  corePrivateCodec,
+  type SubmitOrderResult,
+  vaultPrivateCodec,
   type Fill,
   type OrderSummary,
   type Page,
@@ -12,7 +25,13 @@ import {
 import { EnvelopeClient, envelopeAad, newRequestId } from './envelope'
 import { createClients, type CanisterClients } from './ic'
 import { CanisterError, SubmissionNotSentError, unwrap } from './result'
-import { connectWallet, hexToBytes, signTypedData, withdrawalTypedData } from './wallet'
+import {
+  connectWallet,
+  hexToBytes,
+  signPersonalBytes,
+  signTypedData,
+  withdrawalTypedData,
+} from './wallet'
 
 const nowMs = () => BigInt(Date.now())
 export const requestId = () => crypto.getRandomValues(new Uint8Array(32))
@@ -31,11 +50,29 @@ export type LiveData = {
   orders?: Page<OrderSummary>
   fills?: Page<Fill>
   fundEvents: FundEvents
+  eligibility?: EligibilityStatus
+  vaultCycles?: VaultCycles
+  coreCycles?: CoreCycles
+  btcMarket?: MarketStatus
+  ethMarket?: MarketStatus
+  vaultJournal?: [boolean, boolean]
+  coreJournal?: [boolean, boolean]
   issues: LiveDataIssue[]
 }
 
 export type LiveDataIssue = {
-  source: 'agent' | 'snapshot' | 'orders' | 'fills'
+  source:
+    | 'agent'
+    | 'snapshot'
+    | 'orders'
+    | 'fills'
+    | 'eligibility'
+    | 'vaultCycles'
+    | 'coreCycles'
+    | 'btcMarket'
+    | 'ethMarket'
+    | 'vaultJournal'
+    | 'coreJournal'
   message: string
 }
 
@@ -89,7 +126,12 @@ export class LocalGateway {
     )
     const envelope = await EnvelopeClient.create()
     if (generation !== this.generation) {
-      await clients.vault.revoke_session(session).catch(() => undefined)
+      await this.sealedVault(
+        'revoke_session',
+        vaultPrivateCodec.session(session),
+        vaultPrivateCodec.empty,
+        { address, session, clients, envelope },
+      ).catch(() => undefined)
       throw new Error('セッションは破棄されました')
     }
     this.active = { address, session, clients, envelope }
@@ -100,7 +142,13 @@ export class LocalGateway {
     this.generation++
     const active = this.active
     this.active = undefined
-    if (active) await active.clients.vault.revoke_session(active.session).catch(() => undefined)
+    if (active)
+      await this.sealedVault(
+        'revoke_session',
+        vaultPrivateCodec.session(active.session),
+        vaultPrivateCodec.empty,
+        active,
+      ).catch(() => undefined)
   }
 
   private require(): SessionData {
@@ -149,6 +197,94 @@ export class LocalGateway {
     return decode(await active.envelope.open(aad, new Uint8Array(response.ciphertext)))
   }
 
+  private async sealedVault<T>(
+    method:
+      | 'revoke_session'
+      | 'approve_agent_generation'
+      | 'request_allocation'
+      | 'request_withdrawal'
+      | 'provision_reserve_account'
+      | 'prepare_trading_account'
+      | 'request_recovery'
+      | 'eligibility_signing_claims'
+      | 'register_eligibility'
+      | 'builder_fee_signing_claims'
+      | 'register_builder_fee_mock_consent',
+    plaintext: Uint8Array,
+    decode: (bytes: Uint8Array) => T,
+    active: SessionData = this.require(),
+  ): Promise<T> {
+    const serverKey = new Uint8Array(unwrap(await active.clients.vault.get_hpke_public_key()))
+    const id = newRequestId()
+    const expiresAt = nowMs() + 60_000n
+    const canister = Principal.fromText(active.clients.config.fundsVault)
+    const aad = envelopeAad(
+      'local',
+      canister.toUint8Array(),
+      method,
+      active.clients.principal.toUint8Array(),
+      id,
+      expiresAt,
+    )
+    const response = unwrap(
+      await active.clients.vault.private_call({
+        key_id: serverKey,
+        network: { Local: null },
+        canister,
+        method,
+        request_id: id,
+        expires_at: expiresAt,
+        client_public_key: active.envelope.publicKey,
+        aad,
+        ciphertext: await active.envelope.seal(serverKey, aad, plaintext),
+      }),
+    )
+    if (!id.every((byte, index) => byte === response.request_id[index]))
+      throw new Error('応答request_idが一致しません')
+    return decode(await active.envelope.open(aad, new Uint8Array(response.ciphertext)))
+  }
+
+  private async sealedCoreWrite<T>(
+    method:
+      | 'submit_order'
+      | 'close_position'
+      | 'close_all'
+      | 'request_agent_generation'
+      | 'cancel_all',
+    plaintext: Uint8Array,
+    decode: (bytes: Uint8Array) => T,
+  ): Promise<T> {
+    const active = this.require()
+    const serverKey = new Uint8Array(unwrap(await active.clients.core.get_hpke_public_key()))
+    const id = newRequestId()
+    const expiresAt = nowMs() + 60_000n
+    const canister = Principal.fromText(active.clients.config.tradingCore)
+    const aad = envelopeAad(
+      'local',
+      canister.toUint8Array(),
+      method,
+      active.clients.principal.toUint8Array(),
+      id,
+      expiresAt,
+    )
+    const response = unwrap(
+      await active.clients.core.private_call({
+        key_id: serverKey,
+        network: { Local: null },
+        canister,
+        method,
+        request_id: id,
+        expires_at: expiresAt,
+        client_public_key: active.envelope.publicKey,
+        aad,
+        ciphertext: await active.envelope.seal(serverKey, aad, plaintext),
+      }),
+    )
+    if (!id.every((byte, index) => byte === response.request_id[index]))
+      throw new Error('応答request_idが一致しません')
+    return decode(await active.envelope.open(aad, new Uint8Array(response.ciphertext)))
+  }
+
   async refresh(): Promise<LiveData> {
     const active = this.require()
     const { session, clients } = active
@@ -161,6 +297,13 @@ export class LocalGateway {
       this.sealed('get_account_snapshot', codec.snapshotQuery(session), codec.snapshot),
       this.listOrders(),
       this.listFills(),
+      clients.vault.eligibility_status(session).then(unwrap),
+      clients.vault.get_cycles_status().then(unwrap),
+      clients.core.get_cycles_status().then(unwrap),
+      clients.core.get_market_status('BTC').then(unwrap),
+      clients.core.get_market_status('ETH').then(unwrap),
+      clients.vault.get_journal_send_status().then(unwrap),
+      clients.core.get_journal_send_status().then(unwrap),
     ])
     const issues: LiveDataIssue[] = []
     for (const result of optional) {
@@ -178,6 +321,13 @@ export class LocalGateway {
       snapshot: optionalValue(optional[1], 'snapshot', issues),
       orders: optionalValue(optional[2], 'orders', issues),
       fills: optionalValue(optional[3], 'fills', issues),
+      eligibility: optionalValue(optional[4], 'eligibility', issues),
+      vaultCycles: optionalValue(optional[5], 'vaultCycles', issues),
+      coreCycles: optionalValue(optional[6], 'coreCycles', issues),
+      btcMarket: optionalValue(optional[7], 'btcMarket', issues),
+      ethMarket: optionalValue(optional[8], 'ethMarket', issues),
+      vaultJournal: optionalValue(optional[9], 'vaultJournal', issues),
+      coreJournal: optionalValue(optional[10], 'coreJournal', issues),
       issues,
     }
   }
@@ -210,12 +360,69 @@ export class LocalGateway {
 
   async fundingInstructions() {
     const { session, clients } = this.require()
+    await this.prepareTradingAccount()
     try {
       return unwrap(await clients.vault.get_funding_instructions(session))
-    } catch {
-      unwrap(await clients.vault.provision_reserve_account(session))
+    } catch (cause) {
+      if (!(cause instanceof CanisterError) || cause.code !== 'NotAllowed') throw cause
+      await this.sealedVault(
+        'provision_reserve_account',
+        vaultPrivateCodec.session(session),
+        vaultPrivateCodec.account,
+      )
       return unwrap(await clients.vault.get_funding_instructions(session))
     }
+  }
+
+  async prepareTradingAccount(): Promise<Uint8Array> {
+    const { session } = this.require()
+    return this.sealedVault(
+      'prepare_trading_account',
+      vaultPrivateCodec.session(session),
+      vaultPrivateCodec.account,
+    )
+  }
+
+  async eligibilitySigningClaims(): Promise<Uint8Array> {
+    const { session } = this.require()
+    await this.prepareTradingAccount()
+    return this.sealedVault(
+      'eligibility_signing_claims',
+      vaultPrivateCodec.eligibilitySigningQuery(session, nowMs() + 24n * 60n * 60n * 1_000n),
+      vaultPrivateCodec.eligibilityClaims,
+    )
+  }
+
+  async registerEligibility(claimsCandidHex: string, signatureHex: string) {
+    const { session } = this.require()
+    return this.sealedVault(
+      'register_eligibility',
+      vaultPrivateCodec.eligibilityRegister(
+        session,
+        hexToBytes(claimsCandidHex),
+        hexToBytes(signatureHex, 65),
+      ),
+      vaultPrivateCodec.eligibilityStatus,
+    )
+  }
+
+  async approveZeroBuilderFeeMock(builderAddress: string) {
+    const { session, address } = this.require()
+    const target = await this.sealedVault(
+      'builder_fee_signing_claims',
+      vaultPrivateCodec.builderFeeSigningQuery(
+        session,
+        hexToBytes(builderAddress, 20),
+        nowMs() + 24n * 60n * 60n * 1_000n,
+      ),
+      vaultPrivateCodec.builderFeeTarget,
+    )
+    const signature = await signPersonalBytes(address, new Uint8Array(target[1]))
+    return this.sealedVault(
+      'register_builder_fee_mock_consent',
+      vaultPrivateCodec.builderFeeRegister(session, target[0], signature),
+      vaultPrivateCodec.builderFeeStatus,
+    )
   }
 
   async seedDeposit(amount: string): Promise<void> {
@@ -234,32 +441,34 @@ export class LocalGateway {
   }
 
   async allocate(amount: bigint) {
-    const { session, clients } = this.require()
-    return unwrap(
-      await clients.vault.request_allocation({
-        session,
-        client_request_id: requestId(),
-        amount,
-        target: { Trading: null },
-        intent_signature: [],
-      }),
+    const { session } = this.require()
+    return this.sealedVault(
+      'request_allocation',
+      vaultPrivateCodec.allocation(session, requestId(), amount),
+      vaultPrivateCodec.fund,
     )
   }
 
   async recover(amount: bigint) {
-    const { session, clients } = this.require()
-    return unwrap(await clients.vault.request_recovery(session, requestId(), amount))
+    const { session } = this.require()
+    return this.sealedVault(
+      'request_recovery',
+      vaultPrivateCodec.recovery(session, requestId(), amount),
+      vaultPrivateCodec.fund,
+    )
   }
 
   async approveAgent() {
-    const { session, clients } = this.require()
-    const generation = unwrap(await clients.core.request_agent_generation(session))
-    return unwrap(
-      await clients.vault.approve_agent_generation(
-        session,
-        generation.generation,
-        generation.agent_address,
-      ),
+    const { session } = this.require()
+    const generation = await this.sealedCoreWrite(
+      'request_agent_generation',
+      corePrivateCodec.session(session),
+      corePrivateCodec.agent,
+    )
+    return this.sealedVault(
+      'approve_agent_generation',
+      vaultPrivateCodec.approveAgent(session, generation.generation, generation.agent_address),
+      vaultPrivateCodec.agent,
     )
   }
 
@@ -290,8 +499,9 @@ export class LocalGateway {
         throw cause
       throw new SubmissionNotSentError(errorMessage(cause))
     }
-    return unwrap(
-      await clients.core.submit_order(session, {
+    return this.sealedCoreWrite(
+      'submit_order',
+      corePrivateCodec.submit(session, {
         session,
         account_id: account,
         client_request_id: args.clientRequestId ?? requestId(),
@@ -314,6 +524,7 @@ export class LocalGateway {
           : [],
         expires_after: [nowMs() + 60_000n],
       }),
+      corePrivateCodec.submitResult,
     )
   }
 
@@ -323,20 +534,30 @@ export class LocalGateway {
   }
 
   async cancelAll(): Promise<bigint> {
-    const { session, clients } = this.require()
-    return unwrap(await clients.core.cancel_all(session))
+    const { session } = this.require()
+    return this.sealedCoreWrite(
+      'cancel_all',
+      corePrivateCodec.session(session),
+      corePrivateCodec.count,
+    )
   }
 
   async closePosition(position: Position, ratioBps: number): Promise<SubmitOrderResult> {
-    const { session, clients } = this.require()
-    return unwrap(
-      await clients.core.close_position(session, requestId(), position.market, ratioBps, []),
+    const { session } = this.require()
+    return this.sealedCoreWrite(
+      'close_position',
+      corePrivateCodec.closePosition(session, requestId(), position.market, ratioBps, []),
+      corePrivateCodec.submitResult,
     )
   }
 
   async closeAll() {
-    const { session, clients } = this.require()
-    return unwrap(await clients.core.close_all(session, requestId()))
+    const { session } = this.require()
+    return this.sealedCoreWrite(
+      'close_all',
+      corePrivateCodec.closeAll(session, requestId()),
+      corePrivateCodec.closeOutcome,
+    )
   }
 
   async protectPosition(
@@ -368,8 +589,9 @@ export class LocalGateway {
       canister: Principal.fromText(clients.config.fundsVault),
     })
     const signature = await signTypedData(address, typedData)
-    return unwrap(
-      await clients.vault.request_withdrawal({
+    return this.sealedVault(
+      'request_withdrawal',
+      vaultPrivateCodec.withdrawal({
         session,
         client_request_id: requestId(),
         amount,
@@ -380,6 +602,7 @@ export class LocalGateway {
         expires_at: expiresAt,
         intent_signature: signature,
       }),
+      vaultPrivateCodec.fund,
     )
   }
 }

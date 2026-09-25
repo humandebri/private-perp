@@ -76,15 +76,18 @@ export POCKET_IC_WASM_DIR="$test_venue_target/wasm32-unknown-unknown/release"
 
 echo "pocket-ic-test: 本番feature無しのwasmをビルドします（デプロイ成果物の検査用）"
 CARGO_TARGET_DIR="$production_target" run_step cargo build --locked --release --target wasm32-unknown-unknown \
-  -p policy -p funds-vault -p control-guard -p trading-core
+  -p policy -p funds-vault -p control-guard -p trading-core -p send-journal
 
 echo "pocket-ic-test: test-venue付きのwasmをビルドします（POCKET_IC_WASM_DIR=${POCKET_IC_WASM_DIR}）"
 CARGO_TARGET_DIR="$test_venue_target" run_step cargo build --locked --release --target wasm32-unknown-unknown \
-  -p policy -p control-guard
+  -p policy -p control-guard -p send-journal
 CARGO_TARGET_DIR="$test_venue_target" run_step cargo build --locked --release --target wasm32-unknown-unknown \
   -p funds-vault -p trading-core \
   --features funds-vault/test-venue,trading-core/test-venue
 
 echo "pocket-ic-test: 試験を実行します"
+# 20人/100人のPocketIC負荷試験を同一プロセスで並行実行すると、サーバが
+# instanceを削除して試験自体が失敗する。各binary内の試験も既定で直列化する。
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 run_step cargo test --locked -p pocket-ic-tests "$@"
 echo "pocket-ic-test: all requested tests completed successfully (exit=0)"

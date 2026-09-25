@@ -35,6 +35,85 @@ pub fn client(seed: u8) -> EnvelopeClient {
 }
 
 impl EnvelopeClient {
+    /// テストヘルパ用。既存の平文引数を同じ公開HPKE入口へ包んで送る。
+    pub fn call_encoded<R: CandidType + DeserializeOwned>(
+        &self,
+        pic: &PocketIc,
+        canister: Principal,
+        caller: Principal,
+        method: &str,
+        plaintext: &[u8],
+    ) -> Result<R, String> {
+        let (envelope, aad) = self.prepare_encoded(pic, canister, caller, method, plaintext)?;
+        let response: Result<HpkeResponse, ErrorCode> =
+            crate::update(pic, canister, caller, "private_call", envelope.clone())?;
+        self.decode_encoded(response, &envelope, &aad)
+    }
+
+    pub fn prepare_encoded(
+        &self,
+        pic: &PocketIc,
+        canister: Principal,
+        caller: Principal,
+        method: &str,
+        plaintext: &[u8],
+    ) -> Result<(HpkeRequest, Vec<u8>), String> {
+        let public: Result<api_types::Blob, ErrorCode> =
+            crate::query(pic, canister, caller, "get_hpke_public_key", ())?;
+        let public = match public {
+            Ok(public) => public,
+            Err(ErrorCode::PolicyUnavailable) => {
+                let controller = pic
+                    .get_controllers(canister)
+                    .into_iter()
+                    .next()
+                    .ok_or("missing controller for test key rotation")?;
+                let rotated: Result<api_types::Blob, ErrorCode> =
+                    crate::update(pic, canister, controller, "rotate_hpke_key", ())?;
+                rotated.map_err(|e| format!("rotate_hpke_key: {e:?}"))?
+            }
+            Err(error) => return Err(format!("get_hpke_public_key: {error:?}")),
+        };
+        let request_id = self.next_request_id(method, caller);
+        let expires_at = now_ms(pic) + DEFAULT_TTL_MS;
+        let aad = hpke_envelope::envelope_aad(
+            &self.network,
+            canister.as_slice(),
+            method,
+            caller.as_slice(),
+            &request_id,
+            expires_at,
+        );
+        let ciphertext =
+            hpke_envelope::seal(public.as_ref(), ENVELOPE_INFO, &aad, plaintext, &request_id)
+                .map_err(|e| format!("seal request: {e}"))?;
+        let envelope = HpkeRequest {
+            key_id: public,
+            network: network_of(&self.network),
+            canister,
+            method: method.into(),
+            request_id: request_id.to_vec().into(),
+            expires_at,
+            client_public_key: self.public.to_vec().into(),
+            aad: aad.clone().into(),
+            ciphertext: ciphertext.into(),
+        };
+        Ok((envelope, aad))
+    }
+
+    pub fn decode_encoded<R: CandidType + DeserializeOwned>(
+        &self,
+        response: Result<HpkeResponse, ErrorCode>,
+        request: &HpkeRequest,
+        aad: &[u8],
+    ) -> Result<R, String> {
+        let response = response.map_err(|e| format!("private_call {}: {e:?}", request.method))?;
+        if response.request_id != request.request_id {
+            return Err("private response request ID mismatch".into());
+        }
+        let plaintext = self.open(aad, response.ciphertext.as_ref())?;
+        candid::decode_one(&plaintext).map_err(|e| format!("decode private response: {e}"))
+    }
     /// 決定的なクライアント鍵を持つクライアントを作る。
     pub fn new(seed: u8, network: &str) -> Self {
         let (secret, public) = hpke_envelope::derive_keypair(&[seed; 32]);

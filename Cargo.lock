@@ -615,6 +615,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
+name = "eligibility-issuer"
+version = "0.1.0"
+dependencies = [
+ "api-types",
+ "candid",
+ "hex",
+ "hl-sign",
+]
+
+[[package]]
 name = "elliptic-curve"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -733,6 +743,7 @@ dependencies = [
  "ic-cdk-management-canister",
  "ic-cdk-timers",
  "ic-sqlite-vfs",
+ "journal-client",
  "serde",
  "serde_json",
 ]
@@ -905,6 +916,7 @@ dependencies = [
 name = "hl-sign"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "hl-types",
  "k256",
  "serde",
@@ -1422,6 +1434,21 @@ checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
+]
+
+[[package]]
+name = "journal-client"
+version = "0.1.0"
+dependencies = [
+ "api-types",
+ "candid",
+ "db",
+ "hex",
+ "hl-sign",
+ "hl-types",
+ "ic-cdk",
+ "ic-sqlite-vfs",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -2211,6 +2238,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "send-journal"
+version = "0.1.0"
+dependencies = [
+ "api-types",
+ "candid",
+ "db",
+ "hex",
+ "ic-cdk",
+ "ic-sqlite-vfs",
+ "sha2 0.11.0",
+ "sha3",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2843,6 +2884,7 @@ dependencies = [
  "ic-cdk-management-canister",
  "ic-cdk-timers",
  "ic-sqlite-vfs",
+ "journal-client",
  "serde",
  "serde_json",
 ]

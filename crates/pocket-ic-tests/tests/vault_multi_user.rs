@@ -18,7 +18,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy, pic, principal, update, update_args,
+    FUNDS_VAULT_WASM, TRADING_CORE_WASM, call_with_mocked_outcall, call_with_routed_outcalls,
+    configure_policy, deploy, pic, principal, update, update_args,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -78,7 +79,9 @@ fn open_session(
         },
     )
     .expect("call");
-    (session.expect("session"), eoa)
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    (session, eoa)
 }
 
 fn status(
@@ -279,6 +282,34 @@ fn two_users_run_the_full_funds_flow() {
     let (session_a, eoa_a) = open_session(&pic, vault, caller_a, &key_a);
     let (session_b, eoa_b) = open_session(&pic, vault, caller_b, &key_b);
 
+    // 送金前に取引口座を準備でき、本人以外のセッションでは準備できない。
+    let prepared_a: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller_a,
+        "prepare_trading_account",
+        session_a.clone(),
+    )
+    .expect("prepare account");
+    let prepared_b: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller_b,
+        "prepare_trading_account",
+        session_b.clone(),
+    )
+    .expect("prepare account");
+    assert_ne!(prepared_a.as_ref().unwrap(), prepared_b.as_ref().unwrap());
+    let other: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller_b,
+        "prepare_trading_account",
+        session_a.clone(),
+    )
+    .expect("foreign account call");
+    assert!(other.is_err());
+
     // 口座作成（以前は2人目がUNIQUE違反で失敗した）。
     let reserve_a = provision(&pic, vault, caller_a, &session_a);
     let reserve_b = provision(&pic, vault, caller_b, &session_b);
@@ -325,10 +356,44 @@ fn two_users_run_the_full_funds_flow() {
     )
     .expect("call");
     recovered.expect("recovery accepted");
-    sweep(&pic, vault, caller_a);
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let configured: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).expect("call");
+    configured.expect("vault principal");
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    let (swept, calls): (Result<u32, ErrorCode>, _) =
+        call_with_routed_outcalls(&pic, vault, caller_a, "test_sweep_now", (), |call| {
+            let request: serde_json::Value = serde_json::from_slice(&call.body).expect("request");
+            if call.url.ends_with("/info") {
+                match request["type"].as_str() {
+                    Some("openOrders") => Ok((200, b"[]".to_vec())),
+                    Some("clearinghouseState") => Ok((200, br#"{"assetPositions":[]}"#.to_vec())),
+                    other => panic!("unexpected info request: {other:?}"),
+                }
+            } else {
+                Ok((200, ACCEPTED.to_vec()))
+            }
+        })
+        .expect("recovery call");
+    assert_eq!(swept.expect("recovery sweep"), 1);
+    let send = calls
+        .iter()
+        .find(|call| call.url.ends_with("/exchange"))
+        .expect("send");
+    let payload: serde_json::Value = serde_json::from_slice(&send.body).expect("send body");
+    assert_eq!(payload["action"]["type"], "usdSend");
     assert_eq!(
         status(&pic, vault, caller_a, &session_a).reserve_unallocated,
         1_000_000
+    );
+    assert_eq!(
+        status(&pic, vault, caller_b, &session_b).reserve_unallocated,
+        1_600_000
     );
 
     let withdrawn = withdraw(

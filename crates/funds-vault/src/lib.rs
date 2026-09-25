@@ -10,15 +10,22 @@
 //! S2の2B時点で実装しているのは認証（challenge・セッション）である。資金API・outboxの
 //! 署名送信・HPKEは後続の段階で追加する。
 
+mod amount;
 mod auth;
+mod builder_fee;
 mod clock;
 mod config;
 mod crypto;
+mod cycles;
 mod deposits;
+mod eligibility;
 mod environment;
 mod fund;
 mod outbox;
+mod private_api;
 mod random;
+mod recovery;
+mod rest_budget;
 mod venue;
 
 /// HPKE封筒は共有クレートへ移設した（`trading_core`も同じ封筒を使う）。
@@ -57,7 +64,6 @@ async fn open_session(request: OpenSessionRequest) -> Result<SessionHandle, Erro
 }
 
 /// セッションを失効させる。
-#[ic_cdk::update]
 fn revoke_session(session: SessionHandle) -> Result<(), ErrorCode> {
     auth::revoke_session(&session, ic_cdk::api::msg_caller())
 }
@@ -191,7 +197,7 @@ fn test_aad(expires_at: u64) -> Vec<u8> {
     let caller = ic_cdk::api::msg_caller();
     hpke::envelope_aad(
         "local",
-        &ic_cdk::api::canister_self().as_slice().to_vec(),
+        ic_cdk::api::canister_self().as_slice(),
         "test_hpke",
         caller.as_slice(),
         &[],
@@ -250,6 +256,128 @@ fn set_ecdsa_key_id(key_id: String) -> Result<(), ErrorCode> {
     db::tx::update(|connection| db::repo::vault_config::set_ecdsa_key_id(connection, &key_id, now))
         .map_err(|error| auth::map_db(error, None))?;
     Ok(())
+}
+
+/// 共有REST予算のpolicy principal（controllerのみ）。
+#[ic_cdk::update]
+fn set_policy_principal(policy: Principal) -> Result<(), ErrorCode> {
+    require_controller("only a controller can set the policy principal")?;
+    let bytes = policy.as_slice();
+    if policy == Principal::anonymous() || bytes.is_empty() || bytes.len() > 29 {
+        return Err(ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "invalid policy principal".to_string(),
+        });
+    }
+    db::tx::update(|connection| {
+        db::repo::vault_config::set_policy_principal(connection, bytes, clock::now_ms())
+    })
+    .map_err(|error| auth::map_db(error, None))
+}
+
+#[ic_cdk::query]
+fn get_policy_principal() -> Option<Principal> {
+    db::tx::query(db::repo::vault_config::policy_principal)
+        .ok()
+        .flatten()
+        .map(|bytes| Principal::from_slice(&bytes))
+}
+
+#[ic_cdk::update]
+fn set_send_journal(principal: Principal) -> Result<(), ErrorCode> {
+    require_controller("only a controller can configure the send journal")?;
+    journal_client::configure(principal)
+}
+
+#[ic_cdk::update]
+fn set_journal_guard(principal: Principal) -> Result<(), ErrorCode> {
+    require_controller("only a controller can configure the journal guard")?;
+    journal_client::set_guard(principal)
+}
+
+#[ic_cdk::update]
+async fn resume_journal() -> Result<(), ErrorCode> {
+    journal_client::resume("vault").await
+}
+
+#[ic_cdk::query]
+fn get_send_journal() -> Result<Option<Principal>, ErrorCode> {
+    journal_client::configured()
+}
+
+#[ic_cdk::query]
+fn get_journal_send_status() -> Result<(bool, bool), ErrorCode> {
+    journal_client::public_status()
+}
+
+#[ic_cdk::query]
+fn get_journal_guard() -> Result<Option<Principal>, ErrorCode> {
+    require_controller("only a controller can inspect the journal guard")?;
+    journal_client::guard()
+}
+
+#[ic_cdk::query]
+fn journal_restore_status() -> Result<(u64, u64, bool), ErrorCode> {
+    require_controller("only a controller can inspect journal restore")?;
+    journal_client::status()
+}
+
+#[ic_cdk::query]
+fn recovery_stage_status() -> Result<(u64, bool), ErrorCode> {
+    require_controller("only a controller can inspect journal restore")?;
+    journal_client::recovery_stage_status()
+}
+
+#[ic_cdk::query]
+fn recovery_replay_pending() -> Result<bool, ErrorCode> {
+    require_controller("only a controller can inspect journal restore")?;
+    journal_client::replay_pending_validation()
+}
+
+#[ic_cdk::update]
+fn set_core_principal(core: Principal) -> Result<(), ErrorCode> {
+    require_controller("only a controller can set the core principal")?;
+    let bytes = core.as_slice();
+    if core == Principal::anonymous() || bytes.is_empty() || bytes.len() > 29 {
+        return Err(ErrorCode::BadRequest {
+            code: api_types::error::BadRequestCode::MalformedPayload,
+            detail: "invalid core principal".to_string(),
+        });
+    }
+    db::tx::update(|connection| {
+        let previous = db::repo::vault_config::core_principal(connection)?;
+        if previous.is_some()
+            && previous.as_deref() != Some(bytes)
+            && db::repo::actions::active_recovery_exists(connection)?
+        {
+            return Err(db::error::Error::Conflict);
+        }
+        db::repo::vault_config::set_core_principal(connection, bytes, clock::now_ms())
+    })
+    .map_err(|error| auth::map_db(error, None))
+}
+
+#[ic_cdk::query]
+fn get_core_principal() -> Option<Principal> {
+    db::tx::query(db::repo::vault_config::core_principal)
+        .ok()
+        .flatten()
+        .map(|bytes| Principal::from_slice(&bytes))
+}
+
+#[ic_cdk::update]
+fn set_recovery_history_verified(verified: bool) -> Result<(), ErrorCode> {
+    require_controller("only a controller can confirm recovery history completeness")?;
+    db::tx::update(|connection| {
+        db::repo::vault_config::set_recovery_history_verified(connection, verified, clock::now_ms())
+    })
+    .map_err(|error| auth::map_db(error, None))
+}
+
+#[ic_cdk::query]
+fn get_recovery_history_verified() -> Result<bool, ErrorCode> {
+    db::tx::query(db::repo::vault_config::recovery_history_verified)
+        .map_err(|error| auth::map_db(error, None))
 }
 
 /// 現在の環境設定（診断用・公開）。秘密は含まない。
@@ -345,11 +473,17 @@ fn get_trading_account(session: SessionHandle) -> Result<Option<api_types::Blob>
     Ok(account.map(|account| account.account_id.to_vec().into()))
 }
 
+/// 入金・配分前に本人の取引口座を確定する。秘密の口座対応はvault内に保持する。
+async fn prepare_trading_account(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    let account = outbox::ensure_trading_account(&verified.user_id, clock::now_ms()).await?;
+    Ok(account.account_id.to_vec().into())
+}
+
 /// 渡されたAgentアドレスを世代へ承認する（master鍵で署名して送信し、結果を永続化する）。
 ///
 /// `generation` は `trading_core` が採番した世代を渡す。承認はvaultの
 /// `agent_generations` に保存され、取引所の応答が不明な場合は `active` にしない。
-#[ic_cdk::update]
 async fn approve_agent_generation(
     session: SessionHandle,
     generation: u64,
@@ -397,7 +531,131 @@ fn get_funding_instructions(
     session: SessionHandle,
 ) -> Result<api_types::fund::FundingInstructions, ErrorCode> {
     let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    cycles::require_new()?;
+    let account = db::tx::query(|c| {
+        db::repo::ledger::custody_account(c, &verified.user_id, api_types::AccountKind::Trading)
+    })
+    .map_err(|e| auth::map_db(e, None))?
+    .ok_or(ErrorCode::PolicyUnavailable)?;
+    eligibility::require(
+        &verified.user_id,
+        ic_cdk::api::msg_caller(),
+        &account.account_id,
+    )?;
     fund::funding_instructions(&verified)
+}
+
+#[ic_cdk::update]
+fn configure_cycles(daily_floor: u128, exit_reserve: u128) -> Result<(), ErrorCode> {
+    cycles::configure(daily_floor, exit_reserve)
+}
+
+#[ic_cdk::update]
+fn get_cycles_status() -> Result<api_types::operations_status::CyclesStatus, ErrorCode> {
+    cycles::status()
+}
+
+#[ic_cdk::update]
+fn configure_eligibility(
+    terms_version: u64,
+    issuer_address: api_types::Blob,
+    mock_issuer: bool,
+) -> Result<(), ErrorCode> {
+    eligibility::configure(terms_version, issuer_address, mock_issuer)
+}
+
+#[ic_cdk::query]
+fn get_eligibility_configuration() -> Result<Option<(u64, api_types::Blob)>, ErrorCode> {
+    db::tx::query(db::repo::eligibility::config)
+        .map(|config| {
+            config.map(|config| (config.terms_version, config.issuer_address.to_vec().into()))
+        })
+        .map_err(|e| auth::map_db(e, None))
+}
+
+#[ic_cdk::query]
+fn eligibility_status(
+    session: SessionHandle,
+) -> Result<api_types::eligibility::EligibilityStatus, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    let account = db::tx::query(|c| {
+        db::repo::ledger::custody_account(c, &verified.user_id, api_types::AccountKind::Trading)
+    })
+    .map_err(|e| auth::map_db(e, None))?
+    .ok_or(ErrorCode::PolicyUnavailable)?;
+    eligibility::status(
+        &verified.user_id,
+        ic_cdk::api::msg_caller(),
+        &account.account_id,
+    )
+}
+
+#[ic_cdk::query]
+fn builder_fee_mock_status(
+    session: SessionHandle,
+) -> Result<api_types::builder_fee::BuilderFeeMockStatus, ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    let account = db::tx::query(|c| {
+        db::repo::ledger::custody_account(c, &verified.user_id, api_types::AccountKind::Trading)
+    })
+    .map_err(|e| auth::map_db(e, None))?
+    .ok_or(ErrorCode::PolicyUnavailable)?;
+    builder_fee::status(
+        &verified.user_id,
+        ic_cdk::api::msg_caller(),
+        &account.account_id,
+    )
+}
+
+/// Core-only admission check. Core must separately bind the session principal to its caller.
+#[ic_cdk::update]
+fn check_eligibility_for_core(
+    session: SessionHandle,
+    account_id: api_types::Blob,
+) -> Result<(), ErrorCode> {
+    let configured_core = db::tx::query(db::repo::vault_config::core_principal)
+        .map_err(|e| auth::map_db(e, None))?
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    if ic_cdk::api::msg_caller().as_slice() != configured_core.as_slice() {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "configured core required".into(),
+        });
+    }
+    let status = auth::session_status(&session)?;
+    let user_id: [u8; 32] = status
+        .user_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let account_id: [u8; 32] = account_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    eligibility::require(&user_id, status.principal, &account_id)
+}
+
+#[ic_cdk::update]
+fn check_eligibility_account_for_core(
+    user_id: api_types::Blob,
+    account_id: api_types::Blob,
+) -> Result<(), ErrorCode> {
+    let configured_core = db::tx::query(db::repo::vault_config::core_principal)
+        .map_err(|e| auth::map_db(e, None))?
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    if ic_cdk::api::msg_caller().as_slice() != configured_core.as_slice() {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "configured core required".into(),
+        });
+    }
+    let user_id: [u8; 32] = user_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let account_id: [u8; 32] = account_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    eligibility::require_current(&user_id, &account_id)
 }
 
 /// 資金状態（認証済みセッションが必要）。
@@ -419,7 +677,6 @@ fn list_fund_events(
 }
 
 /// 配分を要求する（受付＋予約）。
-#[ic_cdk::update]
 async fn request_allocation(
     request: api_types::fund::AllocationRequest,
 ) -> Result<api_types::fund::FundRequestAccepted, ErrorCode> {
@@ -428,7 +685,6 @@ async fn request_allocation(
 }
 
 /// 出金を要求する（本人署名の検証＋受付＋予約）。
-#[ic_cdk::update]
 async fn request_withdrawal(
     request: api_types::fund::WithdrawalRequest,
 ) -> Result<api_types::fund::FundRequestAccepted, ErrorCode> {
@@ -535,7 +791,8 @@ fn caller_principal() -> Principal {
     ic_cdk::api::msg_caller()
 }
 
-/// 取引所の入金を本人へ計上する（controllerのみ。宛先が導出口座の場合）。
+/// ローカル試験専用の入金注入。実運用はHL履歴の照合を経由する。
+#[cfg(feature = "test-venue")]
 #[ic_cdk::update]
 fn credit_venue_deposit(
     tx_hash: api_types::Blob,
@@ -564,6 +821,9 @@ fn credit_venue_deposit(
         })?;
     let now = deposits::now_ms();
     let network = environment::network_name()?;
+    if asset != "usdc" {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
     db::tx::update(|connection| {
         deposits::credit(
             connection,
@@ -571,7 +831,7 @@ fn credit_venue_deposit(
             tx_hash.as_ref(),
             amount,
             &address,
-            &asset,
+            "usdc",
             now,
         )
     })
@@ -583,7 +843,7 @@ fn credit_venue_deposit(
 /// `credit` がsuspenseへ計上したイベントだけを対象にする（既に本人へ計上済みの
 /// イベントを再計上しない）。同一イベントの二重請求は仕訳の要求IDで拒否する。
 #[ic_cdk::update]
-fn claim_unmatched_deposit(
+async fn claim_unmatched_deposit(
     event_id: api_types::Blob,
     user_id: api_types::Blob,
 ) -> Result<(), ErrorCode> {
@@ -609,16 +869,52 @@ fn claim_unmatched_deposit(
         })?;
     let now = clock::now_ms();
     let network = environment::network_name()?;
-    db::tx::update(|connection| {
+    let amount = db::tx::query(|connection| {
+        if db::repo::auth::identity_by_user(connection, &user_id)?.is_none() {
+            return Err(db::error::Error::NotFound);
+        }
         let event = db::repo::events::find_external_event(connection, &network, &event_id)?
             .ok_or(db::error::Error::NotFound)?;
         let kind = db::repo::ledger::journal_kind_by_external_event(connection, &event_id)?
             .ok_or(db::error::Error::Invariant("event was not credited"))?;
-        if kind != "deposit_unmatched" {
+        if kind != "deposit_unmatched"
+            || db::repo::ledger::unmatched_deposit_claimed(connection, &event_id)?
+        {
             return Err(db::error::Error::Invariant(
                 "event is not an unmatched deposit",
             ));
         }
+        Ok(event.amount)
+    })
+    .map_err(|error| auth::map_db(error, None))?;
+    let mut logical_id = b"deposit_claim".to_vec();
+    logical_id.extend_from_slice(&event_id);
+    let recovery_event = api_types::journal::RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&logical_id).to_vec().into(),
+        payload: api_types::journal::RecoveryPayload::DepositClaim {
+            event_id: event_id.to_vec().into(),
+            user_id: user_id.to_vec().into(),
+            amount_micros: amount,
+            claimed_at_ms: now,
+        },
+    };
+    let ack = journal_client::append_recovery_event("vault", recovery_event.clone()).await?;
+    let result = db::tx::update(|connection| {
+        if db::repo::auth::identity_by_user(connection, &user_id)?.is_none() {
+            return Err(db::error::Error::NotFound);
+        }
+        let event = db::repo::events::find_external_event(connection, &network, &event_id)?
+            .ok_or(db::error::Error::NotFound)?;
+        let kind = db::repo::ledger::journal_kind_by_external_event(connection, &event_id)?
+            .ok_or(db::error::Error::Invariant("event was not credited"))?;
+        if kind != "deposit_unmatched"
+            || event.amount != amount
+            || db::repo::ledger::unmatched_deposit_claimed(connection, &event_id)?
+        {
+            return Err(db::error::Error::Conflict);
+        }
+        journal_client::record_recovery_event(connection, &recovery_event, &ack)?;
         db::repo::ledger::claim_unmatched_deposit(
             connection,
             &user_id,
@@ -631,15 +927,20 @@ fn claim_unmatched_deposit(
             "controller",
             "claim_unmatched_deposit",
             None,
-            Some(&hex::encode(user_id)),
+            Some("matched_user"),
             now,
         )
-    })
-    .map_err(|error| auth::map_db(error, None))
+    });
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            journal_client::lock()?;
+            Err(auth::map_db(error, None))
+        }
+    }
 }
 
 /// 入金先（準備口座）を用意する。`get_funding_instructions` の前提を作る。
-#[ic_cdk::update]
 async fn provision_reserve_account(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
     let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
     let now = clock::now_ms();
@@ -675,14 +976,16 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
     let network = environment::network_name()?;
     let mut credited = 0;
     for entry in entries {
+        if !deposits::creditable_entry(&entry, &address)
+            .map_err(|error| auth::map_db(error, None))?
+        {
+            continue;
+        }
         let Some(hash) = entry.get("hash").and_then(|value| value.as_str()) else {
             continue;
         };
-        let Some(usdc) = entry.get("usdc").and_then(|value| value.as_str()) else {
-            continue;
-        };
         // 負値・ゼロ・非十進は入金ではない（送金・出金など）ため読み飛ばす。
-        let Some(amount) = deposits::deposit_amount_micros(usdc) else {
+        let Some(amount) = entry.get("usdc").and_then(deposits::deposit_amount_micros) else {
             continue;
         };
         let hash = hash.strip_prefix("0x").unwrap_or(hash);
@@ -693,10 +996,7 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
             .get("time")
             .and_then(|value| value.as_u64())
             .unwrap_or(now);
-        let inserted = db::tx::update(|connection| {
-            deposits::credit(connection, &network, &tx_hash, amount, &address, "usdc", at)
-        })
-        .map_err(|error| auth::map_db(error, None))?;
+        let inserted = deposits::credit_journaled(&network, &tx_hash, amount, &address, at).await?;
         if inserted {
             credited += 1;
         }
@@ -706,14 +1006,13 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
 
 /// 不明なactionを「未実行」として解消する（controllerのみ）。
 ///
-/// 取引所が実行済みと確認できた場合の消込は、証跡（tx）を伴う別経路で行うため
-/// ここでは受け付けない（`OperationNotAvailable`）。`unknown` と `dispatching` の
-/// どちらも対象にするが、**取引所へ照会した証跡**を `evidence` として必須にする。
+/// 未確認の外部送信を自由文の申告だけで「未実行」と確定してはならない。
+/// 取引所履歴との照合による証明経路ができるまで手動解消を停止する。
 #[ic_cdk::update]
 fn resolve_unknown_action(
-    action_id: api_types::Blob,
-    executed: bool,
-    evidence: String,
+    _action_id: api_types::Blob,
+    _executed: bool,
+    _evidence: String,
 ) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -721,83 +1020,129 @@ fn resolve_unknown_action(
             reason: "only a controller can resolve unknown actions".to_string(),
         });
     }
-    if executed {
-        return Err(ErrorCode::NotAllowed {
-            code: api_types::error::NotAllowedCode::OperationNotAvailable,
-        });
-    }
-    if evidence.trim().is_empty() {
-        return Err(ErrorCode::BadRequest {
-            code: api_types::error::BadRequestCode::MissingField,
-            detail: "evidence is required to resolve an action as not executed".to_string(),
-        });
-    }
-    let action_id: [u8; 32] = action_id
-        .as_ref()
-        .try_into()
-        .map_err(|_| ErrorCode::BadRequest {
-            code: api_types::error::BadRequestCode::MalformedPayload,
-            detail: "action_id must be 32 bytes".to_string(),
-        })?;
-    let now = clock::now_ms();
-    db::tx::update(|connection| {
-        let (user_id, request_id, epoch, kind) =
-            db::repo::actions::action_owner(connection, &action_id)?
-                .ok_or(db::error::Error::NotFound)?;
-        let state = db::repo::actions::action_state(connection, &action_id)?
-            .ok_or(db::error::Error::NotFound)?;
-        // `unknown`（応答が不明）に加えて `dispatching`（POST直前に停止し、送信の有無を
-        // 自動では判定できない）も、運用者が取引所へ照会して未実行を確認した場合だけ
-        // 解消できる。`executed = true` を受け付けないのは従来どおり。
-        if state != api_types::fund::ActionState::Unknown
-            && state != api_types::fund::ActionState::Dispatching
-        {
-            return Err(db::error::Error::Invariant(
-                "action is neither unknown nor dispatching",
-            ));
-        }
-        let request_id = request_id.ok_or(db::error::Error::Invariant("action without request"))?;
-        let request = db::repo::funds::fund_request(connection, &user_id, &request_id)?
-            .ok_or(db::error::Error::NotFound)?;
-        db::repo::funds::release_reservation(connection, &user_id, &request_id, now)?;
-        if kind == "withdrawal" {
-            db::repo::ledger::withdrawal_release(
-                connection,
-                &user_id,
-                request.amount,
-                now,
-                &request_id,
-            )?;
-        }
-        db::repo::funds::set_request_state(
-            connection,
-            &user_id,
-            &request_id,
-            api_types::fund::FundRequestState::Rejected,
-            now,
-        )?;
-        db::repo::actions::mark_resolved(connection, &action_id, epoch, now)?;
-        db::repo::events::insert_audit(
-            connection,
-            "controller",
-            "resolve_unknown_action",
-            None,
-            Some(&format!("not_executed: {evidence}")),
-            now,
-        )
+    Err(ErrorCode::NotAllowed {
+        code: api_types::error::NotAllowedCode::OperationNotAvailable,
     })
-    .map_err(|error| auth::map_db(error, None))
 }
 
 /// 回収（trading口座→準備口座）を要求する。
-#[ic_cdk::update]
 async fn request_recovery(
     session: SessionHandle,
     client_request_id: api_types::Blob,
     amount: u64,
 ) -> Result<api_types::fund::FundRequestAccepted, ErrorCode> {
     let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
-    fund::request_recovery(&verified, client_request_id.as_ref(), amount).await
+    fund::request_recovery(&verified, &session, client_request_id.as_ref(), amount).await
+}
+
+/// 個人向け書込みの唯一の公開入口。エラーを含む業務結果も暗号化して返す。
+#[ic_cdk::update]
+async fn private_call(
+    envelope: api_types::envelope::HpkeRequest,
+) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
+    use api_types::error::BadRequestCode;
+    if !matches!(
+        envelope.method.as_str(),
+        "revoke_session"
+            | "approve_agent_generation"
+            | "request_allocation"
+            | "request_withdrawal"
+            | "provision_reserve_account"
+            | "prepare_trading_account"
+            | "eligibility_signing_claims"
+            | "register_eligibility"
+            | "builder_fee_signing_claims"
+            | "register_builder_fee_mock_consent"
+            | "request_recovery"
+    ) {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "unknown private method".into(),
+        });
+    }
+    let (plaintext, request_id, caller) = private_api::open(&envelope).await?;
+    let bad_payload = || ErrorCode::BadRequest {
+        code: BadRequestCode::MalformedPayload,
+        detail: "cannot decode private payload".into(),
+    };
+    match envelope.method.as_str() {
+        "revoke_session" => {
+            let session =
+                candid::decode_one::<SessionHandle>(&plaintext).map_err(|_| bad_payload())?;
+            let result = revoke_session(session);
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "approve_agent_generation" => {
+            let (session, generation, address) =
+                candid::decode_args::<(SessionHandle, u64, api_types::Blob)>(&plaintext)
+                    .map_err(|_| bad_payload())?;
+            let result = approve_agent_generation(session, generation, address).await;
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "request_allocation" => {
+            let request = candid::decode_one::<api_types::fund::AllocationRequest>(&plaintext)
+                .map_err(|_| bad_payload())?;
+            let result = request_allocation(request).await;
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "request_withdrawal" => {
+            let request = candid::decode_one::<api_types::fund::WithdrawalRequest>(&plaintext)
+                .map_err(|_| bad_payload())?;
+            let result = request_withdrawal(request).await;
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "provision_reserve_account" => {
+            let session =
+                candid::decode_one::<SessionHandle>(&plaintext).map_err(|_| bad_payload())?;
+            let result = provision_reserve_account(session).await;
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "prepare_trading_account" => {
+            let session =
+                candid::decode_one::<SessionHandle>(&plaintext).map_err(|_| bad_payload())?;
+            let result = prepare_trading_account(session).await;
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "eligibility_signing_claims" => {
+            let (session, expires_at) = candid::decode_args::<(SessionHandle, u64)>(&plaintext)
+                .map_err(|_| bad_payload())?;
+            let result = eligibility::signing_claims(&session, expires_at).await;
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "register_eligibility" => {
+            let (session, token) = candid::decode_args::<(
+                SessionHandle,
+                api_types::eligibility::EligibilityToken,
+            )>(&plaintext)
+            .map_err(|_| bad_payload())?;
+            let result = eligibility::register(&session, token);
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "builder_fee_signing_claims" => {
+            let (session, builder_address, expires_at) =
+                candid::decode_args::<(SessionHandle, api_types::Blob, u64)>(&plaintext)
+                    .map_err(|_| bad_payload())?;
+            let result = builder_fee::signing_claims(&session, builder_address, expires_at).await;
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "register_builder_fee_mock_consent" => {
+            let (session, consent) = candid::decode_args::<(
+                SessionHandle,
+                api_types::builder_fee::BuilderFeeConsent,
+            )>(&plaintext)
+            .map_err(|_| bad_payload())?;
+            let result = builder_fee::register(&session, consent);
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "request_recovery" => {
+            let (session, request_id_inner, amount) =
+                candid::decode_args::<(SessionHandle, api_types::Blob, u64)>(&plaintext)
+                    .map_err(|_| bad_payload())?;
+            let result = request_recovery(session, request_id_inner, amount).await;
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        _ => unreachable!(),
+    }
 }
 
 fn init_db() {
@@ -816,6 +1161,9 @@ fn init() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     init_db();
+    if let Err(error) = journal_client::lock() {
+        ic_cdk::trap(format!("send journal lock failed: {error:?}"));
+    }
     // グローバルtimerはアップグレードで失われるため予約し直す。
     #[cfg(not(feature = "test-venue"))]
     schedule_sweep();

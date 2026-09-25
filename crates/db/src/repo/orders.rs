@@ -83,9 +83,10 @@ pub fn insert_pending_order(
                (order_id, user_id, account_id, client_request_id, cloid, market, asset_index,
                 side, kind, price, quantity, reduce_only, trigger_kind, trigger_price,
                 trigger_is_market, effective_leverage, slippage_tolerance_bps, expires_after,
-                state, filled_quantity, cancel_requested, created_at, updated_at)
+                state, filled_quantity, cancel_requested, created_at, updated_at,
+                preflight_state)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, 'pending', '0', 0, ?19, ?19)",
+                     ?17, ?18, 'pending', '0', 0, ?19, ?19, ?20)",
             params![
                 order.order_id.as_slice(),
                 order.user_id.as_slice(),
@@ -105,7 +106,12 @@ pub fn insert_pending_order(
                 order.effective_leverage as i64,
                 slippage,
                 expires_after,
-                now as i64
+                now as i64,
+                if order.reduce_only {
+                    "reconciled"
+                } else {
+                    "queued"
+                },
             ],
         )
         .map_err(sql)
@@ -579,6 +585,17 @@ pub fn dispatch_blocker(
     worker_epoch: u64,
     now: u64,
 ) -> Result<Option<&'static str>, Error> {
+    if crate::repo::recovery_fences::migration_locked(connection)? {
+        let reduce_only = connection
+            .query_optional_scalar::<i64>(
+                "SELECT reduce_only FROM orders WHERE order_id = ?1",
+                params![order_id.as_slice()],
+            )
+            .map_err(sql)?;
+        if reduce_only == Some(0) {
+            return Ok(Some("recovery migration is pending"));
+        }
+    }
     let row = connection
         .query_optional(
             "SELECT state, dispatch_state, worker_epoch, cancel_requested, expires_after,
@@ -587,7 +604,10 @@ pub fn dispatch_blocker(
                         SELECT 1 FROM risk_reservations r
                          WHERE r.account_id = orders.account_id
                            AND r.client_request_id = orders.client_request_id
-                           AND r.state = 'held')
+                           AND r.state = 'held'),
+                    EXISTS(
+                        SELECT 1 FROM recovery_fences f
+                         WHERE f.account_id = orders.account_id AND f.state != 'released')
                FROM orders WHERE order_id = ?1",
             params![order_id.as_slice()],
             |row| {
@@ -599,6 +619,7 @@ pub fn dispatch_blocker(
                     row.get::<Option<i64>>(4)?,
                     row.get::<i64>(5)?,
                     row.get::<i64>(6)?,
+                    row.get::<i64>(7)?,
                 ))
             },
         )
@@ -615,6 +636,9 @@ pub fn dispatch_blocker(
     }
     if row.5 == 0 && row.6 == 0 {
         return Ok(Some("risk reservation is no longer held"));
+    }
+    if row.5 == 0 && row.7 != 0 {
+        return Ok(Some("account recovery fence is active"));
     }
     Ok(None)
 }
@@ -641,6 +665,29 @@ pub fn abort_before_dispatch(
         "claim lost",
     )?;
     release_risk_for_order(connection, order_id, now)
+}
+
+/// Journaled acceptance whose admission expired before the local commit.
+/// The request remains idempotently visible, but this order can never be sent.
+pub fn reject_queued_acceptance(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders SET state = 'rejected', dispatch_state = 'aborted',
+                    last_error = 'admission_expired', updated_at = ?2
+              WHERE order_id = ?1 AND state = 'pending'
+                AND dispatch_state IN ('queued', 'reconciled')",
+            params![order_id.as_slice(), now as i64],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "queued acceptance",
+        "acceptance changed",
+    )
 }
 
 /// 署名とpayloadを保存して`dispatching`へ（送信前に確定させる）。
@@ -810,10 +857,99 @@ pub struct NewFill<'a> {
     pub filled_at: u64,
 }
 
+/// Returns the matching order only while the external fill has not already
+/// been applied. HL oids are scoped to an account, including for one user who
+/// owns multiple trading accounts.
+pub fn pending_fill_order(
+    connection: &Connection,
+    user_id: &[u8; 32],
+    account_id: &[u8; 32],
+    tid: u64,
+    hl_oid: u64,
+    market: &str,
+) -> Result<Option<[u8; 32]>, Error> {
+    let tid = i64::try_from(tid).map_err(|_| Error::Overflow)?;
+    let hl_oid = i64::try_from(hl_oid).map_err(|_| Error::Overflow)?;
+    let row = connection
+        .query_optional_scalar::<Vec<u8>>(
+            "SELECT order_id FROM orders
+             WHERE hl_oid = ?1 AND user_id = ?2 AND account_id = ?3 AND market = ?4
+               AND NOT EXISTS (SELECT 1 FROM fills WHERE tid = ?5)
+             LIMIT 1",
+            params![
+                hl_oid,
+                user_id.as_slice(),
+                account_id.as_slice(),
+                market,
+                tid
+            ],
+        )
+        .map_err(sql)?;
+    row.map(|bytes| {
+        bytes
+            .try_into()
+            .map_err(|_| Error::Invariant("bad order id"))
+    })
+    .transpose()
+}
+
+fn decimal_parts(value: &str) -> Result<(u128, u32), Error> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if (whole.is_empty() && fraction.is_empty())
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 18
+    {
+        return Err(Error::Invariant("invalid fill quantity"));
+    }
+    let scale = u32::try_from(fraction.len()).map_err(|_| Error::Overflow)?;
+    let factor = 10_u128.checked_pow(scale).ok_or(Error::Overflow)?;
+    let integer = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u128>().map_err(|_| Error::Overflow)?
+    };
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u128>().map_err(|_| Error::Overflow)?
+    };
+    let units = integer
+        .checked_mul(factor)
+        .and_then(|value| value.checked_add(fraction))
+        .ok_or(Error::Overflow)?;
+    if units == 0 {
+        return Err(Error::Invariant("zero fill quantity"));
+    }
+    Ok((units, scale))
+}
+
+fn at_scale(units: u128, from: u32, to: u32) -> Result<u128, Error> {
+    let factor = 10_u128.checked_pow(to - from).ok_or(Error::Overflow)?;
+    units.checked_mul(factor).ok_or(Error::Overflow)
+}
+
+fn format_decimal(units: u128, scale: u32) -> String {
+    if scale == 0 {
+        return units.to_string();
+    }
+    let factor = 10_u128.pow(scale);
+    let mut fraction = format!("{:0width$}", units % factor, width = scale as usize);
+    while fraction.ends_with('0') {
+        fraction.pop();
+    }
+    if fraction.is_empty() {
+        (units / factor).to_string()
+    } else {
+        format!("{}.{fraction}", units / factor)
+    }
+}
+
 /// 約定を取り込む（同じ`tid`は二重計上しない）。注文は`hl_oid`で解決する。
 pub fn ingest_fill(
     connection: &mut UpdateConnection<'_>,
     user_id: &[u8; 32],
+    account_id: &[u8; 32],
     fill: &NewFill<'_>,
 ) -> Result<bool, Error> {
     let NewFill {
@@ -827,10 +963,16 @@ pub fn ingest_fill(
     } = *fill;
     let order = connection
         .query_optional(
-            // 注文の所有者と一致する場合だけ取り込む（取引所のoidは口座ごとに採番される
-            // ため、oidだけで引くと他人の注文へ約定を計上し得る）。
-            "SELECT order_id, quantity FROM orders WHERE hl_oid = ?1 AND user_id = ?2 LIMIT 1",
-            params![hl_oid as i64, user_id.as_slice()],
+            // HLのoidは口座ごとに採番される。同じ本人の別口座も含めて
+            // oidだけでは注文を特定できない。
+            "SELECT order_id, quantity FROM orders
+             WHERE hl_oid = ?1 AND user_id = ?2 AND account_id = ?3 AND market = ?4 LIMIT 1",
+            params![
+                hl_oid as i64,
+                user_id.as_slice(),
+                account_id.as_slice(),
+                market
+            ],
             |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<String>(1)?)),
         )
         .map_err(sql)?;
@@ -862,17 +1004,45 @@ pub fn ingest_fill(
             ],
         )
         .map_err(sql)?;
-    // 累積約定量の厳密な合算は照合段階で行う。ここでは注文数量と一致する約定を
-    // 「約定済み」、それ以外を「一部約定」とする。
-    let state = if quantity == ordered_quantity {
+    let quantities = connection
+        .query_all(
+            "SELECT quantity FROM fills WHERE order_id = ?1",
+            params![order_id.as_slice()],
+            |row| row.get::<String>(0),
+        )
+        .map_err(sql)?;
+    let (order_units, order_scale) = decimal_parts(&ordered_quantity)?;
+    let parsed: Vec<_> = quantities
+        .iter()
+        .map(|value| decimal_parts(value))
+        .collect::<Result<_, _>>()?;
+    let scale = parsed
+        .iter()
+        .map(|(_, scale)| *scale)
+        .max()
+        .unwrap_or(0)
+        .max(order_scale);
+    let total = parsed.iter().try_fold(0_u128, |sum, (units, from)| {
+        sum.checked_add(at_scale(*units, *from, scale)?)
+            .ok_or(Error::Overflow)
+    })?;
+    let ordered = at_scale(order_units, order_scale, scale)?;
+    if total > ordered {
+        return Err(Error::Invariant("fills exceed order quantity"));
+    }
+    let filled_quantity = format_decimal(total, scale);
+    let state = if total == ordered {
         "filled"
     } else {
         "partially_filled"
     };
     connection
         .execute(
-            "UPDATE orders SET state = ?2, filled_quantity = ?3, updated_at = ?4 WHERE order_id = ?1",
-            params![order_id.as_slice(), state, quantity, filled_at as i64],
+            "UPDATE orders SET
+                 state = CASE WHEN state IN ('filled', 'cancelled', 'rejected') THEN state ELSE ?2 END,
+                 filled_quantity = CASE WHEN state = 'filled' THEN quantity ELSE ?3 END,
+                 updated_at = ?4 WHERE order_id = ?1",
+            params![order_id.as_slice(), state, filled_quantity, filled_at as i64],
         )
         .map_err(sql)?;
     if state == "filled" {
@@ -886,6 +1056,36 @@ pub fn ingest_fill(
 ///
 /// 取引所のoidは口座ごとに採番されるため、oidだけで更新すると他人の注文の状態を
 /// 書き換え得る。
+pub fn order_status_target(
+    connection: &Connection,
+    account_id: &[u8; 32],
+    hl_oid: u64,
+) -> Result<Option<([u8; 32], String)>, Error> {
+    let oid = i64::try_from(hl_oid).map_err(|_| Error::Overflow)?;
+    let matches = connection
+        .query_all(
+            "SELECT order_id, state FROM orders
+             WHERE account_id = ?1 AND hl_oid = ?2 LIMIT 2",
+            params![account_id.as_slice(), oid],
+            |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<String>(1)?)),
+        )
+        .map_err(sql)?;
+    if matches.len() > 1 {
+        return Err(Error::Invariant("duplicate venue oid for account"));
+    }
+    matches
+        .into_iter()
+        .next()
+        .map(|(id, state)| {
+            Ok((
+                id.try_into()
+                    .map_err(|_| Error::Invariant("bad order id"))?,
+                state,
+            ))
+        })
+        .transpose()
+}
+
 pub fn apply_order_status(
     connection: &mut UpdateConnection<'_>,
     account_id: &[u8; 32],
@@ -895,7 +1095,8 @@ pub fn apply_order_status(
 ) -> Result<bool, Error> {
     connection
         .execute(
-            "UPDATE orders SET state = ?3, updated_at = ?4
+            "UPDATE orders SET state = ?3, updated_at = ?4,
+               filled_quantity = CASE WHEN ?3 = 'filled' THEN quantity ELSE filled_quantity END
               WHERE hl_oid = ?1 AND account_id = ?2",
             params![hl_oid as i64, account_id.as_slice(), state, now as i64],
         )

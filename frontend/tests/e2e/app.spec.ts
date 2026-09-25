@@ -7,6 +7,9 @@ import { createClients } from '../../src/client/ic'
 import { resolveConfig } from '../../src/client/config'
 import { hexToBytes } from '../../src/client/wallet'
 import { unwrap } from '../../src/client/result'
+import { Principal } from '@icp-sdk/core/principal'
+import { vaultPrivateCodec } from '../../src/client/candid-codec'
+import { EnvelopeClient, envelopeAad, newRequestId } from '../../src/client/envelope'
 
 test('SSR exposes a local-only shell and refuses writes', async ({ request }) => {
   for (const path of ['/', '/trade', '/funds', '/history', '/fallback']) {
@@ -35,6 +38,7 @@ test('order ticket explains blocked actions and fits a mobile viewport', async (
   await page.goto('/trade')
   await expect(page.getByRole('button', { name: '注文を受付' })).toBeDisabled()
   await expect(page.locator('#order-guidance')).toContainText('MetaMaskで接続')
+  await expect(page.getByLabel('注文価格')).toHaveValue('')
   await page.getByLabel('銘柄').selectOption('ETH')
   await expect(page.getByLabel('注文価格')).toHaveValue('')
   await page.getByLabel('売買').selectOption('sell')
@@ -44,6 +48,18 @@ test('order ticket explains blocked actions and fits a mobile viewport', async (
   const ticket = await page.locator('#order-ticket').boundingBox()
   const chart = await page.locator('#market-chart').boundingBox()
   expect(ticket!.y).toBeLessThan(chart!.y)
+  const tape = page.getByText('板・公開約定を見る')
+  await expect(tape).toBeVisible()
+  await expect(page.getByText('公開約定', { exact: true })).toBeHidden()
+  await tape.click()
+  await expect(page.getByText('公開約定', { exact: true })).toBeVisible()
+  const exits = page.getByRole('navigation', { name: '退出操作' })
+  await expect(exits.getByRole('button', { name: '全取消' })).toBeVisible()
+  await expect(exits.getByRole('button', { name: '全決済' })).toBeVisible()
+  await expect(exits.getByRole('link', { name: '回収・出金' })).toBeVisible()
+  await exits.getByRole('link', { name: '回収・出金' }).click()
+  await expect(page).toHaveURL(/\/funds$/)
+  await expect(page.getByRole('button', { name: 'MetaMaskで接続' })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
 })
 
@@ -94,6 +110,16 @@ test.describe('real local canister flow', () => {
     await page.goto('/funds')
     await page.getByRole('button', { name: 'MetaMaskで接続' }).click()
     await expect(page.getByText(`${address.slice(0, 10)}…${address.slice(-6)}`)).toBeVisible()
+    await page.getByRole('button', { name: '署名対象を取得' }).click()
+    const claims = await page.getByRole('textbox', { name: /issuerへ渡すCandid/ }).inputValue()
+    const issuer = resolve(process.cwd(), '../target/debug/eligibility-issuer')
+    const eligibilitySignature = execFileSync(issuer, [], {
+      input: claims,
+      encoding: 'utf8',
+    }).trim()
+    await page.getByRole('textbox', { name: 'issuerが返した署名' }).fill(eligibilitySignature)
+    await page.getByRole('button', { name: '受付資格を登録' }).click()
+    await expect(page.getByText('受付資格：登録済み')).toBeVisible({ timeout: 30_000 })
     await page.getByLabel('金額').fill('100')
     const seedButton = page.getByRole('button', { name: 'LOCAL MOCK 入金seed' })
     await seedButton.click()
@@ -129,6 +155,11 @@ test.describe('real local canister flow', () => {
     await expect(submitButton).toBeDisabled()
     await expect(page.locator('#order-guidance')).toContainText('数量は0より大きい')
     await page.getByLabel('数量').fill('0.0001')
+    await expect(submitButton).toBeDisabled()
+    await expect(page.locator('#order-guidance')).toContainText('現在の参考価格')
+    const referencePrice = page.getByRole('button', { name: '現在の参考価格を入力' })
+    await expect(referencePrice).toBeEnabled({ timeout: 30_000 })
+    await referencePrice.click()
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
     await submitButton.click()
     await expect(submitButton).toBeEnabled({ timeout: 15_000 })
@@ -155,6 +186,15 @@ test.describe('real local canister flow', () => {
       .toBe(1)
     await page.getByLabel('BTC Stop Loss').fill('55000')
     await page.getByLabel('BTC Take Profit').fill('65000')
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(page.getByRole('button', { name: '100%決済' })).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+    page.once('dialog', (dialog) => dialog.dismiss())
+    await page
+      .getByRole('navigation', { name: '退出操作' })
+      .getByRole('button', { name: '全決済' })
+      .click()
+    await expect(page.getByRole('button', { name: '100%決済' })).toBeVisible()
     await page.getByRole('button', { name: 'SL/TP設定' }).click()
     await expect(page.getByRole('button', { name: 'SL/TP設定' })).toBeEnabled({ timeout: 30_000 })
     await page.getByLabel('種別').selectOption('limit')
@@ -176,6 +216,12 @@ test.describe('real local canister flow', () => {
         { timeout: 30_000 },
       )
       .toBe(true)
+    page.once('dialog', (dialog) => dialog.dismiss())
+    await page
+      .getByRole('navigation', { name: '退出操作' })
+      .getByRole('button', { name: '全取消' })
+      .click()
+    await expect(cancelButton).toBeEnabled()
     await cancelButton.click()
     await expect
       .poll(
@@ -188,7 +234,7 @@ test.describe('real local canister flow', () => {
       )
       .toBeGreaterThan(0)
 
-    await page.getByRole('link', { name: '資金' }).click()
+    await page.getByRole('link', { name: '資金', exact: true }).click()
     await page.getByLabel('金額').fill('5')
     await page.getByRole('button', { name: 'reserveへ回収' }).click()
     await page.getByRole('button', { name: 'MetaMask署名で出金' }).click()
@@ -199,6 +245,9 @@ test.describe('real local canister flow', () => {
     ).toContainText('Settled')
     await expect(page.getByRole('cell', { name: 'BTC' }).first()).toBeVisible()
     await page.getByRole('link', { name: '取引', exact: true }).click()
+    await expect(page.getByLabel('注文価格')).toHaveValue('')
+    await expect(referencePrice).toBeEnabled({ timeout: 30_000 })
+    await referencePrice.click()
     // 通信失敗は口座表示を保持しても、新規注文をfail-closedにする。
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
     await page.route('http://127.0.0.1:18100/**', (route) => route.abort('connectionreset'))
@@ -253,11 +302,11 @@ test.describe('real local canister flow', () => {
     await started
     await page.getByRole('button', { name: 'ログアウト' }).click()
     release()
-    await expect(page.getByTestId('account-balances')).toHaveCount(0)
+    await expect(page.getByTestId('trade-overview')).toHaveCount(0)
     await page.unroute('http://127.0.0.1:18100/**')
     await expect(page.getByRole('button', { name: 'MetaMaskで接続' })).toBeVisible()
     await page.getByRole('button', { name: 'MetaMaskで接続' }).click()
-    await expect(page.getByTestId('account-balances')).toBeVisible()
+    await expect(page.getByTestId('trade-overview')).toBeVisible()
     // ページ境界を超える実際の資金履歴を用意し、追加ページを読み込む。
     const clients = await createClients(resolveConfig(parseEnv(readFileSync('.env.local', 'utf8'))))
     const challenge = unwrap(
@@ -279,24 +328,99 @@ test.describe('real local canister flow', () => {
         eoa_signature: hexToBytes(signature),
       }),
     )
+    const envelope = await EnvelopeClient.create()
+    const canister = Principal.fromText(clients.config.fundsVault)
+    const serverKey = new Uint8Array(unwrap(await clients.vault.get_hpke_public_key()))
+    const privateCall = async (
+      method:
+        | 'request_allocation'
+        | 'revoke_session'
+        | 'prepare_trading_account'
+        | 'eligibility_signing_claims'
+        | 'register_eligibility',
+      plaintext: Uint8Array,
+    ) => {
+      const id = newRequestId()
+      const expiresAt = BigInt(Date.now() + 60_000)
+      const aad = envelopeAad(
+        'local',
+        canister.toUint8Array(),
+        method,
+        clients.principal.toUint8Array(),
+        id,
+        expiresAt,
+      )
+      const response = unwrap(
+        await clients.vault.private_call({
+          key_id: serverKey,
+          network: { Local: null },
+          canister,
+          method,
+          request_id: id,
+          expires_at: expiresAt,
+          client_public_key: envelope.publicKey,
+          aad,
+          ciphertext: await envelope.seal(serverKey, aad, plaintext),
+        }),
+      )
+      expect([...response.request_id]).toEqual([...id])
+      return envelope.open(aad, new Uint8Array(response.ciphertext))
+    }
     try {
-      for (let batch = 0; batch < 11; batch++) {
-        await Promise.all(
-          Array.from({ length: 10 }, async () =>
-            unwrap(
-              await clients.vault.request_allocation({
-                session: fixtureSession,
-                client_request_id: crypto.getRandomValues(new Uint8Array(32)),
-                amount: 1n,
-                target: { Trading: null },
-                intent_signature: [],
-              }),
-            ),
+      vaultPrivateCodec.account(
+        await privateCall('prepare_trading_account', vaultPrivateCodec.session(fixtureSession)),
+      )
+      const fixtureClaims = vaultPrivateCodec.eligibilityClaims(
+        await privateCall(
+          'eligibility_signing_claims',
+          vaultPrivateCodec.eligibilitySigningQuery(
+            fixtureSession,
+            BigInt(Date.now() + 24 * 60 * 60 * 1_000),
           ),
-        )
+        ),
+      )
+      const fixtureSignature = execFileSync(issuer, [], {
+        input: Buffer.from(fixtureClaims).toString('hex'),
+        encoding: 'utf8',
+      }).trim()
+      vaultPrivateCodec.eligibilityStatus(
+        await privateCall(
+          'register_eligibility',
+          vaultPrivateCodec.eligibilityRegister(
+            fixtureSession,
+            fixtureClaims,
+            hexToBytes(fixtureSignature),
+          ),
+        ),
+      )
+      // This fixture creates enough entries for history pagination. The
+      // journal intentionally serializes writes for one vault worker.
+      for (let entry = 0; entry < 110; entry++) {
+        const allocationId = newRequestId()
+        for (let attempt = 0; attempt < 20; attempt++) {
+          try {
+            vaultPrivateCodec.fund(
+              await privateCall(
+                'request_allocation',
+                vaultPrivateCodec.allocation(fixtureSession, allocationId, 1n),
+              ),
+            )
+            break
+          } catch (error) {
+            if (!(error instanceof Error) || !error.message.startsWith('PolicyUnavailable:'))
+              throw error
+            if (attempt === 19)
+              throw new Error(`history fixture allocation ${entry} remained unavailable`, {
+                cause: error,
+              })
+            await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)))
+          }
+        }
       }
     } finally {
-      await clients.vault.revoke_session(fixtureSession)
+      vaultPrivateCodec.empty(
+        await privateCall('revoke_session', vaultPrivateCodec.session(fixtureSession)),
+      )
     }
     await page.getByRole('link', { name: '履歴', exact: true }).click()
     await expect(page.getByRole('button', { name: '資金履歴をさらに表示' })).toBeVisible({

@@ -14,6 +14,8 @@ use crate::{
     agent_approval, agent_derivation_path, bad, bad_decimal, ecdsa_key_id, internal, map_db,
 };
 use api_types::error::{BadRequestCode, ErrorCode};
+use api_types::journal::{RecoveryEvent, RecoveryPayload};
+use api_types::operations::BudgetClass;
 use ic_cdk_management_canister::{
     EcdsaPublicKeyArgs, SignWithEcdsaArgs, ecdsa_public_key, sign_with_ecdsa,
 };
@@ -30,6 +32,36 @@ const RETRY_DELAY_MS: u64 = 5_000;
 const PAYLOAD_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
 const DETAIL_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const PRUNE_PER_SWEEP: u32 = 100;
+
+fn order_action_event(
+    order: &db::repo::orders::SignableOrder,
+    order_id: &[u8; 32],
+    kind: &str,
+    outcome: &ExchangeOutcome,
+    now: u64,
+) -> RecoveryEvent {
+    let mut logical_id = b"order_action_result".to_vec();
+    logical_id.extend_from_slice(kind.as_bytes());
+    logical_id.extend_from_slice(order_id);
+    let (accepted, hl_oid, filled) = match outcome {
+        ExchangeOutcome::Accepted { oid, filled } => (true, *oid, *filled),
+        ExchangeOutcome::Rejected { .. } => (false, None, false),
+    };
+    RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&logical_id).to_vec().into(),
+        payload: RecoveryPayload::OrderActionResult {
+            order_id: order_id.to_vec().into(),
+            account_id: order.account_id.to_vec().into(),
+            client_request_id: order.client_request_id.clone().into(),
+            kind: kind.to_string(),
+            accepted,
+            hl_oid,
+            filled,
+            observed_at_ms: now,
+        },
+    }
+}
 /// 自動sweep（heartbeat）の間隔（ミリ秒）。建玉の鮮度（10秒）より短くし、
 /// 新規リスクの受付を止めない。試験ビルドは自動sweepを行わないため定数も持たない。
 #[cfg(not(feature = "test-venue"))]
@@ -37,12 +69,20 @@ pub const SWEEP_INTERVAL_MS: u64 = 5_000;
 
 /// 1回のsweep（送信・取消・照合）。件数の内訳を返す。
 pub async fn sweep_once(now: u64) -> Result<api_types::order::SweepOutcome, ErrorCode> {
+    let _ = crate::cycles::status();
     db::tx::update(|connection| db::repo::orders::recover_expired_dispatches(connection, now))
         .map_err(map_db)?;
+    // Preserve capacity for exits and evidence gathering before new risk.
+    let cancels = dispatch_cancels(now).await?;
+    let reconciled = reconcile_accounts(now).await?;
+    // Market polling consumes reconciliation budget after exit work. A failed
+    // observation closes new risk through the stored reason/age, not exits.
+    let _ = crate::market::poll_if_due(now).await;
+    let dispatched = dispatch_queued(now).await?;
     let outcome = api_types::order::SweepOutcome {
-        dispatched: dispatch_queued(now).await?,
-        cancels: dispatch_cancels(now).await?,
-        reconciled: reconcile_accounts(now).await?,
+        dispatched,
+        cancels,
+        reconciled,
     };
     db::tx::update(|connection| {
         db::repo::orders::prune_terminal_history(
@@ -102,23 +142,95 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
                     continue;
                 }
             };
-            if !revalidate_before_post(&order, &order_id, worker_epoch, now).await? {
+            let permit = match crate::rest_budget::acquire(BudgetClass::NewRisk, 1).await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    retry_order(&order_id, worker_epoch, &error, now)?;
+                    continue;
+                }
+            };
+            let current = ic_cdk::api::time() / 1_000_000;
+            if !revalidate_before_post(&order, &order_id, worker_epoch, current).await? {
                 continue;
             }
-            db::tx::update(|connection| {
+            if !permit.valid_now() {
+                retry_order(
+                    &order_id,
+                    worker_epoch,
+                    &ErrorCode::PolicyUnavailable,
+                    current,
+                )?;
+                continue;
+            }
+            let intent = journal_client::intent(
+                "leverage",
+                &order_id,
+                &order.account_id,
+                order.preflight_nonce,
+                &hl_sign::keccak256(&preflight.1),
+            );
+            let ack = journal_client::append("core", intent.clone()).await?;
+            let send_now = ic_cdk::api::time() / 1_000_000;
+            let operational = permit.valid_now()
+                && (order.reduce_only
+                    || (crate::cycles::require_new().is_ok()
+                        && crate::market::require(&order.market).is_ok()));
+            let should_send = db::tx::update(|connection| {
+                journal_client::record(connection, &intent, &ack)?;
+                let blocker = db::repo::orders::dispatch_blocker(
+                    connection,
+                    &order_id,
+                    worker_epoch,
+                    send_now,
+                )?;
+                if !operational || blocker.is_some() {
+                    db::repo::orders::abort_before_dispatch(
+                        connection,
+                        &order_id,
+                        worker_epoch,
+                        blocker.unwrap_or("send permit or market admission expired"),
+                        send_now,
+                    )?;
+                    return Ok(false);
+                }
                 db::repo::orders::mark_preflight_dispatching(
                     connection,
                     &order_id,
                     worker_epoch,
                     &preflight.1,
                     &preflight.0.to_bytes65(),
-                    now,
-                )
+                    send_now,
+                )?;
+                Ok(true)
             })
             .map_err(map_db)?;
-            match venue::post_exchange(&preflight.1).await {
-                Ok(ExchangeOutcome::Accepted { .. }) => {
+            if !should_send {
+                continue;
+            }
+            match venue::post_exchange(&preflight.1, &permit).await {
+                Ok(outcome @ ExchangeOutcome::Accepted { .. }) => {
+                    let result = order_action_event(&order, &order_id, "leverage", &outcome, now);
+                    let result_ack =
+                        match journal_client::append_recovery_event("core", result.clone()).await {
+                            Ok(ack) => ack,
+                            Err(_) => {
+                                db::tx::update(|connection| {
+                                    db::repo::orders::stop_after_preflight(
+                                        connection,
+                                        &order_id,
+                                        worker_epoch,
+                                        false,
+                                        "result_unknown",
+                                        now,
+                                    )
+                                })
+                                .map_err(map_db)?;
+                                processed += 1;
+                                continue;
+                            }
+                        };
                     db::tx::update(|connection| {
+                        journal_client::record_recovery_event(connection, &result, &result_ack)?;
                         db::repo::orders::mark_preflight_applied(
                             connection,
                             &order_id,
@@ -128,14 +240,35 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
                     })
                     .map_err(map_db)?;
                 }
-                Ok(ExchangeOutcome::Rejected { message }) => {
+                Ok(outcome @ ExchangeOutcome::Rejected { .. }) => {
+                    let result = order_action_event(&order, &order_id, "leverage", &outcome, now);
+                    let result_ack =
+                        match journal_client::append_recovery_event("core", result.clone()).await {
+                            Ok(ack) => ack,
+                            Err(_) => {
+                                db::tx::update(|connection| {
+                                    db::repo::orders::stop_after_preflight(
+                                        connection,
+                                        &order_id,
+                                        worker_epoch,
+                                        false,
+                                        "result_unknown",
+                                        now,
+                                    )
+                                })
+                                .map_err(map_db)?;
+                                processed += 1;
+                                continue;
+                            }
+                        };
                     db::tx::update(|connection| {
+                        journal_client::record_recovery_event(connection, &result, &result_ack)?;
                         db::repo::orders::stop_after_preflight(
                             connection,
                             &order_id,
                             worker_epoch,
                             true,
-                            &message,
+                            "venue_rejected",
                             now,
                         )
                     })
@@ -143,14 +276,14 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
                     processed += 1;
                     continue;
                 }
-                Err(error) => {
+                Err(_error) => {
                     db::tx::update(|connection| {
                         db::repo::orders::stop_after_preflight(
                             connection,
                             &order_id,
                             worker_epoch,
                             false,
-                            &format!("{error:?}"),
+                            "result_unknown",
                             now,
                         )
                     })
@@ -168,30 +301,111 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
                 continue;
             }
         };
-        if !revalidate_before_post(&order, &order_id, worker_epoch, now).await? {
+        let class = if order.reduce_only {
+            BudgetClass::Exit
+        } else {
+            BudgetClass::NewRisk
+        };
+        let permit = match crate::rest_budget::acquire(class, 1).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                retry_order(&order_id, worker_epoch, &error, now)?;
+                continue;
+            }
+        };
+        let current = ic_cdk::api::time() / 1_000_000;
+        if !revalidate_before_post(&order, &order_id, worker_epoch, current).await? {
             continue;
         }
-        db::tx::update(|connection| {
+        if !permit.valid_now() {
+            retry_order(
+                &order_id,
+                worker_epoch,
+                &ErrorCode::PolicyUnavailable,
+                current,
+            )?;
+            continue;
+        }
+        let intent = journal_client::intent(
+            "order",
+            &order_id,
+            &order.account_id,
+            order.order_nonce,
+            &hl_sign::keccak256(&body),
+        );
+        let ack = journal_client::append("core", intent.clone()).await?;
+        let send_now = ic_cdk::api::time() / 1_000_000;
+        let operational = permit.valid_now()
+            && (order.reduce_only
+                || (crate::cycles::require_new().is_ok()
+                    && crate::market::require(&order.market).is_ok()));
+        let should_send = db::tx::update(|connection| {
+            journal_client::record(connection, &intent, &ack)?;
+            let blocker =
+                db::repo::orders::dispatch_blocker(connection, &order_id, worker_epoch, send_now)?;
+            if !operational || blocker.is_some() {
+                db::repo::orders::abort_before_dispatch(
+                    connection,
+                    &order_id,
+                    worker_epoch,
+                    blocker.unwrap_or("send permit or market admission expired"),
+                    send_now,
+                )?;
+                return Ok(false);
+            }
             db::repo::orders::mark_dispatching(
                 connection,
                 &order_id,
                 &body,
                 &signature.to_bytes65(),
                 worker_epoch,
-                now,
-            )
+                send_now,
+            )?;
+            Ok(true)
         })
         .map_err(map_db)?;
+        if !should_send {
+            continue;
+        }
 
-        match venue::post_exchange(&body).await {
+        match venue::post_exchange(&body, &permit).await {
             Ok(ExchangeOutcome::Accepted { oid, filled }) => {
+                let outcome = ExchangeOutcome::Accepted { oid, filled };
+                let result = order_action_event(&order, &order_id, "order", &outcome, now);
+                let result_ack =
+                    match journal_client::append_recovery_event("core", result.clone()).await {
+                        Ok(ack) => ack,
+                        Err(_) => {
+                            db::tx::update(|connection| {
+                                db::repo::orders::mark_unknown(connection, &order_id, now)
+                            })
+                            .map_err(map_db)?;
+                            processed += 1;
+                            continue;
+                        }
+                    };
                 db::tx::update(|connection| {
+                    journal_client::record_recovery_event(connection, &result, &result_ack)?;
                     db::repo::orders::mark_venue_accepted(connection, &order_id, oid, filled, now)
                 })
                 .map_err(map_db)?;
             }
-            Ok(ExchangeOutcome::Rejected { .. }) => {
+            Ok(outcome @ ExchangeOutcome::Rejected { .. }) => {
+                let result = order_action_event(&order, &order_id, "order", &outcome, now);
+                let result_ack =
+                    match journal_client::append_recovery_event("core", result.clone()).await {
+                        Ok(ack) => ack,
+                        Err(_) => {
+                            db::tx::update(|connection| {
+                                db::repo::orders::mark_unknown(connection, &order_id, now)
+                            })
+                            .map_err(map_db)?;
+                            processed += 1;
+                            continue;
+                        }
+                    };
                 db::tx::update(|connection| {
+                    journal_client::record_recovery_event(connection, &result, &result_ack)?;
                     db::repo::orders::mark_venue_rejected(connection, &order_id, now)?;
                     db::repo::orders::release_risk(
                         connection,
@@ -220,7 +434,7 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
 fn retry_order(
     order_id: &[u8; 32],
     worker_epoch: u64,
-    error: &ErrorCode,
+    _error: &ErrorCode,
     now: u64,
 ) -> Result<(), ErrorCode> {
     db::tx::update(|connection| {
@@ -228,7 +442,7 @@ fn retry_order(
             connection,
             order_id,
             worker_epoch,
-            &format!("{error:?}"),
+            "retry_before_dispatch",
             now.saturating_add(RETRY_DELAY_MS),
             now,
         )
@@ -242,15 +456,50 @@ async fn revalidate_before_post(
     worker_epoch: u64,
     now: u64,
 ) -> Result<bool, ErrorCode> {
-    if let Err(error) = crate::require_not_stopped().await {
+    if !order.reduce_only && crate::cycles::require_new().is_err() {
+        retry_order(order_id, worker_epoch, &ErrorCode::PolicyUnavailable, now)?;
+        return Ok(false);
+    }
+    if !order.reduce_only && crate::market::require(&order.market).is_err() {
+        retry_order(order_id, worker_epoch, &ErrorCode::PolicyUnavailable, now)?;
+        return Ok(false);
+    }
+    let account_user = db::tx::query(|c| db::repo::accounts::identity(c, &order.account_id))
+        .map_err(map_db)?
+        .ok_or(ErrorCode::PolicyUnavailable)?
+        .0;
+    if !order.reduce_only
+        && crate::vault_eligibility_account(&account_user, &order.account_id)
+            .await
+            .is_err()
+    {
+        db::tx::update(|connection| {
+            db::repo::orders::abort_before_dispatch(
+                connection,
+                order_id,
+                worker_epoch,
+                "eligibility_expired",
+                now,
+            )
+        })
+        .map_err(map_db)?;
+        return Ok(false);
+    }
+    if !order.reduce_only
+        && let Err(error) = crate::require_not_stopped().await
+    {
         retry_order(order_id, worker_epoch, &error, now)?;
         return Ok(false);
     }
-    let allowed = match crate::policy_markets().await {
-        Ok(markets) => markets.iter().any(|market| market == &order.market),
-        Err(error) => {
-            retry_order(order_id, worker_epoch, &error, now)?;
-            return Ok(false);
+    let allowed = if order.reduce_only {
+        true
+    } else {
+        match crate::policy_markets().await {
+            Ok(markets) => markets.iter().any(|market| market == &order.market),
+            Err(error) => {
+                retry_order(order_id, worker_epoch, &error, now)?;
+                return Ok(false);
+            }
         }
     };
     if !allowed {
@@ -322,13 +571,13 @@ async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCod
     let digest = hl_sign::hash::signing_digest(action_hash, false);
     let signature = match sign_with_agent_key(&account_id, digest).await {
         Ok(signature) => signature,
-        Err(error) => {
+        Err(_error) => {
             db::tx::update(|connection| {
                 db::repo::orders::retry_cancel_before_dispatch(
                     connection,
                     order_id,
                     worker_epoch,
-                    &format!("{error:?}"),
+                    "agent_signing_unavailable",
                     now,
                 )
             })
@@ -350,7 +599,35 @@ async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCod
         },
     });
     let body = serde_json::to_vec(&body).map_err(|error| internal(error.to_string()))?;
+    let permit = match crate::rest_budget::acquire(BudgetClass::Exit, 1).await {
+        Ok(permit) => permit,
+        Err(_error) => {
+            db::tx::update(|connection| {
+                db::repo::orders::retry_cancel_before_dispatch(
+                    connection,
+                    order_id,
+                    worker_epoch,
+                    "rest_budget_unavailable",
+                    now,
+                )
+            })
+            .map_err(map_db)?;
+            return Ok(false);
+        }
+    };
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    let intent = journal_client::intent(
+        "cancel",
+        order_id,
+        &account_id,
+        nonce,
+        &hl_sign::keccak256(&body),
+    );
+    let ack = journal_client::append("core", intent.clone()).await?;
     db::tx::update(|connection| {
+        journal_client::record(connection, &intent, &ack)?;
         db::repo::orders::mark_cancel_dispatching(
             connection,
             order_id,
@@ -361,16 +638,61 @@ async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCod
         )
     })
     .map_err(map_db)?;
+    let order = db::tx::query(|connection| db::repo::orders::signable(connection, order_id))
+        .map_err(map_db)?
+        .ok_or(ErrorCode::PolicyUnavailable)?;
 
-    match venue::post_exchange(&body).await {
-        Ok(ExchangeOutcome::Accepted { .. }) => {
+    match venue::post_exchange(&body, &permit).await {
+        Ok(outcome @ ExchangeOutcome::Accepted { .. }) => {
+            let result = order_action_event(&order, order_id, "cancel", &outcome, now);
+            let result_ack =
+                match journal_client::append_recovery_event("core", result.clone()).await {
+                    Ok(ack) => ack,
+                    Err(_) => {
+                        db::tx::update(|connection| {
+                            db::repo::orders::mark_cancel_unknown(
+                                connection,
+                                order_id,
+                                worker_epoch,
+                                now,
+                            )
+                        })
+                        .map_err(map_db)?;
+                        return Ok(true);
+                    }
+                };
             db::tx::update(|connection| {
+                journal_client::record_recovery_event(connection, &result, &result_ack)?;
                 db::repo::orders::mark_cancel_sent(connection, order_id, worker_epoch, now)
             })
             .map_err(map_db)?;
         }
-        Ok(ExchangeOutcome::Rejected { .. }) | Err(_) => {
-            // 拒否・不明のいずれも「送ったか不明」として保持する（再送しない）。
+        Ok(outcome @ ExchangeOutcome::Rejected { .. }) => {
+            let result = order_action_event(&order, order_id, "cancel", &outcome, now);
+            let result_ack =
+                match journal_client::append_recovery_event("core", result.clone()).await {
+                    Ok(ack) => ack,
+                    Err(_) => {
+                        db::tx::update(|connection| {
+                            db::repo::orders::mark_cancel_unknown(
+                                connection,
+                                order_id,
+                                worker_epoch,
+                                now,
+                            )
+                        })
+                        .map_err(map_db)?;
+                        return Ok(true);
+                    }
+                };
+            db::tx::update(|connection| {
+                journal_client::record_recovery_event(connection, &result, &result_ack)?;
+                db::repo::orders::mark_cancel_unknown(connection, order_id, worker_epoch, now)
+            })
+            .map_err(map_db)?;
+        }
+        Err(_) => {
+            // 応答不明は「送ったか不明」として保持する（再送しない）。
             db::tx::update(|connection| {
                 db::repo::orders::mark_cancel_unknown(connection, order_id, worker_epoch, now)
             })
@@ -382,6 +704,18 @@ async fn dispatch_cancel(order_id: &[u8; 32], now: u64) -> Result<bool, ErrorCod
 
 /// 有効な口座を巡回し、建玉・約定・注文状態を取り込む。
 async fn reconcile_accounts(now: u64) -> Result<u32, ErrorCode> {
+    let urgent_cursor =
+        db::tx::query(db::repo::accounts::priority_reconcile_cursor).map_err(map_db)?;
+    let urgent = db::tx::query(|connection| {
+        db::repo::accounts::urgent_reconcile_candidate(connection, urgent_cursor.as_ref())
+    })
+    .map_err(map_db)?;
+    let urgent = if urgent.is_none() && urgent_cursor.is_some() {
+        db::tx::query(|connection| db::repo::accounts::urgent_reconcile_candidate(connection, None))
+            .map_err(map_db)?
+    } else {
+        urgent
+    };
     let cursor = db::tx::query(db::repo::accounts::reconcile_cursor).map_err(map_db)?;
     let mut candidates = db::tx::query(|connection| {
         db::repo::accounts::reconcile_candidates(
@@ -398,16 +732,44 @@ async fn reconcile_accounts(now: u64) -> Result<u32, ErrorCode> {
         })
         .map_err(map_db)?;
     }
+    let mut scheduled = Vec::new();
+    if let Some(account) = urgent.as_ref() {
+        scheduled.push(account.clone());
+    }
+    scheduled.extend(
+        candidates
+            .into_iter()
+            .filter(|account| {
+                urgent
+                    .as_ref()
+                    .is_none_or(|u| u.account_id != account.account_id)
+            })
+            .take(MAX_RECONCILE_PER_SWEEP as usize - scheduled.len()),
+    );
     let mut processed = 0;
-    for account in candidates {
+    for account in scheduled {
         // 1口座の失敗で巡回全体を止めない（次のsweepで再試行する）。
         if reconcile_account(&account, now).await.is_ok() {
             processed += 1;
         }
-        db::tx::update(|connection| {
-            db::repo::accounts::set_reconcile_cursor(connection, &account.account_id, now)
-        })
-        .map_err(map_db)?;
+        if urgent
+            .as_ref()
+            .is_some_and(|u| u.account_id == account.account_id)
+        {
+            db::tx::update(|connection| {
+                db::repo::accounts::set_priority_reconcile_cursor(
+                    connection,
+                    &account.account_id,
+                    now,
+                )
+            })
+            .map_err(map_db)?;
+        } else {
+            db::tx::update(|connection| {
+                db::repo::accounts::set_reconcile_cursor(connection, &account.account_id, now)
+            })
+            .map_err(map_db)?;
+        }
     }
     Ok(processed)
 }
@@ -426,10 +788,20 @@ async fn reconcile_account(
     })
     .map_err(map_db)?;
 
-    // 約定は`tid`で冪等に取り込む。
-    let fills = venue::user_fills(&address).await?;
-    db::tx::update(|connection| ingest_fills_json(connection, &account.user_id, &fills, now))
+    // userFills has a large variable weight. Poll active accounts at most every
+    // two minutes, idle accounts every ten minutes; the schedule survives upgrade.
+    if db::tx::query(|connection| {
+        db::repo::accounts::fills_due(connection, &account.account_id, now)
+    })
+    .map_err(map_db)?
+    {
+        let fills = venue::user_fills(&address).await?;
+        ingest_fills_json(&account.user_id, &account.account_id, &fills, now).await?;
+        db::tx::update(|connection| {
+            db::repo::accounts::mark_fills_checked(connection, &account.account_id, now)
+        })
         .map_err(map_db)?;
+    }
 
     // 未終端でoidが分かっている注文の状態を問い合わせる。
     let oids = db::tx::query(|connection| {
@@ -442,10 +814,7 @@ async fn reconcile_account(
     .map_err(map_db)?;
     for oid in oids {
         let status = venue::order_status(&address, oid).await?;
-        db::tx::update(|connection| {
-            apply_order_status_json(connection, &account.account_id, &status, now)
-        })
-        .map_err(map_db)?;
+        apply_order_status_json(&account.account_id, &status, now).await?;
     }
     Ok(())
 }
@@ -462,35 +831,34 @@ pub fn ingest_positions_json(
     let entries = value
         .get("assetPositions")
         .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
+        .ok_or(db::error::Error::Invariant("missing assetPositions"))?;
     let mut observed = Vec::new();
     for entry in entries {
-        let Some(position) = entry.get("position") else {
-            continue;
-        };
-        let Some(coin) = position.get("coin").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        // 未実現損益はUSD建ての十進文字列。ローカルではf64で近似する（厳密な桁は照合段階の課題）。
-        let unrealized_pnl = position
-            .get("unrealizedPnl")
+        let position = entry
+            .get("position")
+            .ok_or(db::error::Error::Invariant("missing position"))?;
+        let coin = position
+            .get("coin")
             .and_then(|value| value.as_str())
-            .and_then(|text| text.parse::<f64>().ok())
-            .map(|value| (value * 1_000_000.0).round() as i64)
-            .unwrap_or(0);
+            .ok_or(db::error::Error::Invariant("missing position coin"))?;
+        let size = position
+            .get("szi")
+            .and_then(|value| value.as_str())
+            .ok_or(db::error::Error::Invariant("missing position size"))?;
+        let entry_price = position
+            .get("entryPx")
+            .and_then(|value| value.as_str())
+            .ok_or(db::error::Error::Invariant("missing entry price"))?;
+        let unrealized_pnl = parse_signed_usdc_micros(
+            position
+                .get("unrealizedPnl")
+                .and_then(|value| value.as_str())
+                .ok_or(db::error::Error::Invariant("missing unrealized pnl"))?,
+        )?;
         observed.push(api_types::order::PositionView {
             market: coin.to_string(),
-            size: position
-                .get("szi")
-                .and_then(|value| value.as_str())
-                .unwrap_or("0")
-                .to_string(),
-            entry_price: position
-                .get("entryPx")
-                .and_then(|value| value.as_str())
-                .unwrap_or("0")
-                .to_string(),
+            size: size.to_string(),
+            entry_price: entry_price.to_string(),
             liquidation_price: position
                 .get("liquidationPx")
                 .and_then(|value| value.as_str())
@@ -511,31 +879,22 @@ pub fn ingest_positions_json(
             take_profit: None,
         });
     }
-    let count = u32::try_from(observed.len()).unwrap_or(u32::MAX);
-    db::repo::positions::replace_all(connection, account_id, &observed, now)?;
-    let decimal_to_micros = |text: Option<&str>| -> u64 {
-        text.and_then(|value| value.parse::<f64>().ok())
-            .map(|value| (value.max(0.0) * 1_000_000.0).round() as u64)
-            .unwrap_or(0)
+    let margin_used = match value
+        .get("marginSummary")
+        .and_then(|summary| summary.get("totalMarginUsed"))
+        .and_then(|value| value.as_str())
+    {
+        Some(text) => parse_unsigned_usdc_micros(text)?,
+        None if observed.is_empty() => 0,
+        None => return Err(db::error::Error::Invariant("missing margin used")),
     };
-    let margin_used = decimal_to_micros(
-        value
-            .get("marginSummary")
-            .and_then(|summary| summary.get("totalMarginUsed"))
-            .and_then(|value| value.as_str()),
-    );
-    let total_unrealized = observed
-        .iter()
-        .try_fold(0i64, |total, position| {
-            total.checked_add(position.unrealized_pnl)
-        })
-        .unwrap_or(
-            if observed.iter().any(|position| position.unrealized_pnl < 0) {
-                i64::MIN
-            } else {
-                i64::MAX
-            },
-        );
+    let count = u32::try_from(observed.len()).map_err(|_| db::error::Error::Overflow)?;
+    db::repo::positions::replace_all(connection, account_id, &observed, now)?;
+    let total_unrealized = observed.iter().try_fold(0i64, |total, position| {
+        total
+            .checked_add(position.unrealized_pnl)
+            .ok_or(db::error::Error::Overflow)
+    })?;
     db::repo::positions::set_account_metrics(
         connection,
         account_id,
@@ -546,15 +905,61 @@ pub fn ingest_positions_json(
     Ok(count)
 }
 
+fn parse_unsigned_usdc_micros(text: &str) -> Result<u64, db::error::Error> {
+    let (integer, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if integer.is_empty()
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 6
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(db::error::Error::Invariant("invalid usdc decimal"));
+    }
+    let whole = integer
+        .parse::<u64>()
+        .map_err(|_| db::error::Error::Overflow)?;
+    let fraction_value = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u64>()
+            .map_err(|_| db::error::Error::Invariant("invalid usdc decimal"))?
+    };
+    let scale =
+        10u64.pow(6 - u32::try_from(fraction.len()).map_err(|_| db::error::Error::Overflow)?);
+    whole
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(fraction_value * scale))
+        .ok_or(db::error::Error::Overflow)
+}
+
+fn parse_signed_usdc_micros(text: &str) -> Result<i64, db::error::Error> {
+    let (negative, magnitude) = match text.strip_prefix('-') {
+        Some(magnitude) => (true, magnitude),
+        None => (false, text),
+    };
+    let magnitude = parse_unsigned_usdc_micros(magnitude)?;
+    if negative {
+        if magnitude == i64::MAX as u64 + 1 {
+            Ok(i64::MIN)
+        } else {
+            let value = i64::try_from(magnitude).map_err(|_| db::error::Error::Overflow)?;
+            Ok(-value)
+        }
+    } else {
+        i64::try_from(magnitude).map_err(|_| db::error::Error::Overflow)
+    }
+}
+
 /// 約定の一覧を取り込む（`userFills`の本文。テスト専用フックと共用）。
-pub fn ingest_fills_json(
-    connection: &mut ic_sqlite_vfs::db::UpdateConnection<'_>,
+/// V2の独立記録を先に確定し、受領番号と約定・リスク更新を同じDB transactionへ入れる。
+pub async fn ingest_fills_json(
     user_id: &[u8; 32],
+    account_id: &[u8; 32],
     body: &str,
     now: u64,
-) -> Result<u32, db::error::Error> {
+) -> Result<u32, ErrorCode> {
     let fills: Vec<serde_json::Value> =
-        serde_json::from_str(body).map_err(|_| db::error::Error::Invariant("invalid json"))?;
+        serde_json::from_str(body).map_err(|_| internal("invalid fills json".into()))?;
     let mut ingested = 0;
     for fill in fills {
         let tid = fill
@@ -575,11 +980,21 @@ pub fn ingest_fills_json(
             .and_then(|value| value.as_str())
             .unwrap_or("0")
             .to_string();
+        let parsed_price = hl_types::decimal::Decimal::parse(&price)
+            .map_err(|_| internal("invalid fill price".into()))?;
+        if parsed_price.as_str() == "0" || parsed_price.as_str().starts_with('-') {
+            return Err(internal("invalid fill price".into()));
+        }
         let quantity = fill
             .get("sz")
             .and_then(|value| value.as_str())
             .unwrap_or("0")
             .to_string();
+        let size = hl_types::decimal::Decimal::parse(&quantity)
+            .map_err(|_| internal("invalid fill size".into()))?;
+        if size.as_str() == "0" || size.as_str().starts_with('-') || size.scale() > 18 {
+            return Err(internal("invalid fill size".into()));
+        }
         let fee = fill
             .get("fee")
             .and_then(|value| value.as_u64())
@@ -588,35 +1003,75 @@ pub fn ingest_fills_json(
             .get("time")
             .and_then(|value| value.as_u64())
             .unwrap_or(now);
-        let inserted = db::repo::orders::ingest_fill(
-            connection,
-            user_id,
-            &db::repo::orders::NewFill {
+        let order_id = db::tx::query(|connection| {
+            db::repo::orders::pending_fill_order(connection, user_id, account_id, tid, oid, &coin)
+        })
+        .map_err(map_db)?;
+        let Some(order_id) = order_id else {
+            continue;
+        };
+        let mut logical = b"fill_observed".to_vec();
+        logical.extend_from_slice(account_id);
+        logical.extend_from_slice(&tid.to_be_bytes());
+        let event = RecoveryEvent {
+            version: 1,
+            logical_id: hl_sign::keccak256(&logical).to_vec().into(),
+            payload: RecoveryPayload::FillObserved {
                 tid,
                 hl_oid: oid,
-                market: &coin,
-                price: &price,
-                quantity: &quantity,
+                user_id: user_id.to_vec().into(),
+                order_id: order_id.to_vec().into(),
+                account_id: account_id.to_vec().into(),
+                market: coin.clone(),
+                quantity: quantity.clone(),
+                price: price.clone(),
                 fee,
-                filled_at: at,
+                filled_at_ms: at,
             },
-        )?;
-        if inserted {
-            ingested += 1;
+        };
+        let ack = journal_client::append_recovery_event("core", event.clone()).await?;
+        let saved = db::tx::update(|connection| {
+            journal_client::record_recovery_event(connection, &event, &ack)?;
+            if db::repo::orders::pending_fill_order(
+                connection, user_id, account_id, tid, oid, &coin,
+            )? != Some(order_id)
+                || !db::repo::orders::ingest_fill(
+                    connection,
+                    user_id,
+                    account_id,
+                    &db::repo::orders::NewFill {
+                        tid,
+                        hl_oid: oid,
+                        market: &coin,
+                        price: &price,
+                        quantity: &quantity,
+                        fee,
+                        filled_at: at,
+                    },
+                )?
+            {
+                return Err(db::error::Error::Conflict);
+            }
+            Ok(())
+        });
+        if let Err(error) = saved {
+            journal_client::lock()?;
+            return Err(map_db(error));
         }
+        ingested += 1;
     }
     Ok(ingested)
 }
 
 /// `orderStatus`の本文を注文へ反映する（テスト専用フックと共用）。
-pub fn apply_order_status_json(
-    connection: &mut ic_sqlite_vfs::db::UpdateConnection<'_>,
+/// 終端状態がリスク予約を解放する前に、非公開の独立証跡を記録する。
+pub async fn apply_order_status_json(
     account_id: &[u8; 32],
     body: &str,
     now: u64,
-) -> Result<bool, db::error::Error> {
+) -> Result<bool, ErrorCode> {
     let value: serde_json::Value =
-        serde_json::from_str(body).map_err(|_| db::error::Error::Invariant("invalid json"))?;
+        serde_json::from_str(body).map_err(|_| internal("invalid order status json".into()))?;
     let status = value
         .get("status")
         .and_then(|status| status.as_str())
@@ -626,7 +1081,7 @@ pub fn apply_order_status_json(
         .get("order")
         .and_then(|order| order.get("oid"))
         .and_then(|oid| oid.as_u64())
-        .ok_or(db::error::Error::Invariant("orderStatus without oid"))?;
+        .ok_or_else(|| internal("orderStatus without oid".into()))?;
     // 取引所の語彙をこちらの状態へ写す（未知はunknownとして保持）。
     let state = match status.as_str() {
         "open" => "open",
@@ -635,7 +1090,57 @@ pub fn apply_order_status_json(
         "rejected" => "rejected",
         _ => "unknown",
     };
-    db::repo::orders::apply_order_status(connection, account_id, oid, state, now)
+    // An unrecognized venue status is not evidence for replacing an existing
+    // state. In particular it cannot release a risk hold.
+    if state == "unknown" {
+        return Ok(false);
+    }
+    let target = db::tx::query(|connection| {
+        db::repo::orders::order_status_target(connection, account_id, oid)
+    })
+    .map_err(map_db)?;
+    let Some((order_id, prior_state)) = target else {
+        return Ok(false);
+    };
+    if matches!(prior_state.as_str(), "filled" | "cancelled" | "rejected")
+        || prior_state == state
+        || (state == "open" && !matches!(prior_state.as_str(), "pending" | "unknown"))
+    {
+        return Ok(false);
+    }
+    let mut logical = b"order_status_observed".to_vec();
+    logical.extend_from_slice(&order_id);
+    logical.extend_from_slice(state.as_bytes());
+    let event = RecoveryEvent {
+        version: 1,
+        logical_id: hl_sign::keccak256(&logical).to_vec().into(),
+        payload: RecoveryPayload::OrderStatusObserved {
+            order_id: order_id.to_vec().into(),
+            account_id: account_id.to_vec().into(),
+            hl_oid: oid,
+            state: state.into(),
+            evidence_digest: hl_sign::keccak256(body.as_bytes()).to_vec().into(),
+            observed_at_ms: now,
+        },
+    };
+    let ack = journal_client::append_recovery_event("core", event.clone()).await?;
+    let saved = db::tx::update(|connection| {
+        journal_client::record_recovery_event(connection, &event, &ack)?;
+        if db::repo::orders::order_status_target(connection, account_id, oid)?
+            != Some((order_id, prior_state.clone()))
+            || !db::repo::orders::apply_order_status(connection, account_id, oid, state, now)?
+        {
+            return Err(db::error::Error::Conflict);
+        }
+        Ok(true)
+    });
+    match saved {
+        Ok(applied) => Ok(applied),
+        Err(error) => {
+            journal_client::lock()?;
+            Err(map_db(error))
+        }
+    }
 }
 
 /// 注文の署名actionを組み立てる（通常注文・トリガ注文の共通経路）。

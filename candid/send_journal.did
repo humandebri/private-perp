@@ -1,0 +1,297 @@
+// 入力不正の理由コード。
+type BadRequestCode = variant {
+  NonceReused;
+  UnsupportedMarket;
+  TooLarge;
+  NetworkMismatch;
+  MalformedPayload;
+  InvalidSignature;
+  QuantityOutOfRange;
+  ChallengeExpired;
+  ExpiredIntent;
+  AmountZero;
+  PrecisionExceeded;
+  OriginMismatch;
+  ChallengeReused;
+  DestinationNotAllowed;
+  MissingField;
+  PriceOutOfRange;
+  UnsupportedAsset;
+};
+// API全体のエラー。
+type ErrorCode = variant {
+  Internal : record { code : text };
+  DuplicateIgnored : record { request_id : blob };
+  SigningQueueFull;
+  NotAllowed : record { code : NotAllowedCode };
+  UpstreamUnavailable : record { venue : text };
+  UnknownPending : record { action_id : blob };
+  ReservationConflict;
+  StaleAccountState : record { max_age_ms : nat64; observed_at : nat64 };
+  IdempotencyConflict : record { request_id : blob };
+  UpstreamRejected : record { code : text; retryable : bool };
+  NotEligible : record { policy_version : nat64 };
+  VenueRateLimited : record { retry_after_ms : opt nat64 };
+  RiskLimitExceeded : record { limit : nat64 };
+  SessionRevoked;
+  BadRequest : record { code : BadRequestCode; detail : text };
+  PolicyUnavailable;
+  SessionExpired;
+  InsufficientFunds : record { requested : nat64; available : nat64 };
+  Unauthenticated : record { reason : text };
+};
+type JournalHead = record { hash : blob; sequence : nat64 };
+type JournalRecord = record {
+  hash : blob;
+  previous_hash : blob;
+  intent : SendIntent;
+  sequence : nat64;
+};
+// 権限・状態に起因する拒否の理由コード。
+type NotAllowedCode = variant {
+  UpgradeContentMismatch;
+  AssetNotAllowed;
+  SessionIssuedByUnregisteredVault;
+  UpgradeTooEarly;
+  AccountNotOwned;
+  OrderNotFound;
+  CallerMismatch;
+  OrderNotCancellable;
+  UpgradeAlreadyExecuted;
+  OperationNotAvailable;
+  UpgradeNotScheduled;
+};
+type RecoveryEvent = record {
+  logical_id : blob;
+  version : nat16;
+  payload : RecoveryPayload;
+};
+// V2 recovery stream. The payload is private to its registered worker.
+// No signing key, signed exchange request or plaintext order body belongs here.
+type RecoveryPayload = variant {
+  CustodyAccount : record {
+    account_id : blob;
+    kind : text;
+    derivation_path : text;
+    network : text;
+    user_id : blob;
+    address : blob;
+  };
+  OrderRisk : record {
+    account_id : blob;
+    user_id : blob;
+    state : text;
+    risk_micros : nat64;
+    order_id : blob;
+  };
+  WithdrawalAccepted : record {
+    request_id : blob;
+    action_id : blob;
+    destination : blob;
+    body_hash : blob;
+    intent_expires_at_ms : nat64;
+    user_id : blob;
+    amount_micros : nat64;
+    nonce : nat64;
+    accepted_at_ms : nat64;
+    reserve_account_id : blob;
+    intent_nonce : nat64;
+  };
+  Fill : record {
+    account_id : blob;
+    fill_id : blob;
+    size_micros : nat64;
+    order_id : blob;
+    price_micros : nat64;
+  };
+  RecoveryAccepted : record {
+    request_id : blob;
+    action_id : blob;
+    destination : blob;
+    body_hash : blob;
+    trading_account_id : blob;
+    user_id : blob;
+    amount_micros : nat64;
+    nonce : nat64;
+    accepted_at_ms : nat64;
+    reserve_account_id : blob;
+  };
+  OrderActionResult : record {
+    account_id : blob;
+    hl_oid : opt nat64;
+    client_request_id : blob;
+    kind : text;
+    observed_at_ms : nat64;
+    filled : bool;
+    order_id : blob;
+    accepted : bool;
+  };
+  IdentityRegistration : record {
+    owner : principal;
+    network : text;
+    user_id : blob;
+    eoa_address : blob;
+  };
+  Reservation : record {
+    account_id : blob;
+    request_id : blob;
+    user_id : blob;
+    amount_micros : nat64;
+    state : text;
+  };
+  // Venue-observed order state; terminal states release the risk hold.
+  OrderStatusObserved : record {
+    account_id : blob;
+    hl_oid : nat64;
+    observed_at_ms : nat64;
+    state : text;
+    evidence_digest : blob;
+    order_id : blob;
+  };
+  AllocationAccepted : record {
+    account_id : blob;
+    request_id : blob;
+    action_id : blob;
+    destination : blob;
+    body_hash : blob;
+    user_id : blob;
+    amount_micros : nat64;
+    nonce : nat64;
+    accepted_at_ms : nat64;
+  };
+  // A history-derived recovery outcome. Its digest alone cannot prove a
+  // complete history scan, so replay also needs the persisted HL proof.
+  // The signed usdSend body and key material are excluded.
+  RecoverySettlement : record {
+    request_id : blob;
+    action_id : blob;
+    observed_at_ms : nat64;
+    trading_account_id : blob;
+    user_id : blob;
+    amount_micros : nat64;
+    evidence_digest : blob;
+    nonce : nat64;
+    accepted : bool;
+  };
+  // Pending order identity and its risk hold. The signed venue body and
+  // plaintext order fields are deliberately excluded from this record.
+  OrderAccepted : record {
+    account_id : blob;
+    request_id : blob;
+    body_hash : blob;
+    reduce_only : bool;
+    cloid : blob;
+    user_id : blob;
+    risk_micros : nat64;
+    accepted_at_ms : nat64;
+    order_id : blob;
+  };
+  IdentityAccount : record {
+    account_id : blob;
+    owner : principal;
+    user_id : blob;
+    address : blob;
+  };
+  FundTransferResult : record {
+    request_id : blob;
+    action_id : blob;
+    destination : blob;
+    kind : text;
+    observed_at_ms : nat64;
+    user_id : blob;
+    amount_micros : nat64;
+    evidence_digest : blob;
+    nonce : nat64;
+    source_account_id : blob;
+    accepted : bool;
+  };
+  ExternalOutcome : record {
+    account_id : blob;
+    request_id : blob;
+    kind : text;
+    state : text;
+    evidence_digest : blob;
+  };
+  DepositClaim : record {
+    claimed_at_ms : nat64;
+    user_id : blob;
+    amount_micros : nat64;
+    event_id : blob;
+  };
+  Baseline : record { state_digest : blob };
+  LedgerPosting : record {
+    account_id : blob;
+    user_id : blob;
+    amount_micros : int64;
+    category : text;
+    posting_id : blob;
+  };
+  // Full venue fill evidence for replay. Kept separate from the legacy
+  // placeholder variant so older journal payloads remain decodable.
+  FillObserved : record {
+    fee : nat64;
+    tid : nat64;
+    account_id : blob;
+    hl_oid : nat64;
+    filled_at_ms : nat64;
+    user_id : blob;
+    quantity : text;
+    market : text;
+    order_id : blob;
+    price : text;
+  };
+  // Explicit response to the original usdSend POST. Historical matching
+  // remains RecoverySettlement and needs its separate persisted proof.
+  RecoveryPostResult : record {
+    request_id : blob;
+    action_id : blob;
+    observed_at_ms : nat64;
+    trading_account_id : blob;
+    user_id : blob;
+    amount_micros : nat64;
+    evidence_digest : blob;
+    nonce : nat64;
+    accepted : bool;
+  };
+  DepositCredit : record {
+    observed_at_ms : nat64;
+    network : text;
+    amount_micros : nat64;
+    address : blob;
+    tx_hash : blob;
+  };
+};
+type RecoveryRecord = record {
+  hash : blob;
+  event : RecoveryEvent;
+  previous_hash : blob;
+  sequence : nat64;
+};
+type Result = variant { Ok : JournalHead; Err : ErrorCode };
+type Result_1 = variant { Ok : opt JournalRecord; Err : ErrorCode };
+type Result_2 = variant { Ok : vec JournalRecord; Err : ErrorCode };
+type Result_3 = variant { Ok : opt RecoveryRecord; Err : ErrorCode };
+type Result_4 = variant { Ok : vec RecoveryRecord; Err : ErrorCode };
+type Result_5 = variant { Ok; Err : ErrorCode };
+type SendIntent = record {
+  account_id : blob;
+  request_id : blob;
+  kind : text;
+  nonce : nat64;
+  digest : blob;
+};
+service : () -> {
+  append : (SendIntent) -> (Result);
+  append_recovery_event : (RecoveryEvent) -> (Result);
+  head : () -> (Result);
+  // Idempotency lookup for a response lost after the append committed.
+  intent_record : (text, blob) -> (Result_1);
+  // 復元照合用の範囲取得。呼出元自身の記録だけを返す。
+  records : (nat64, nat32) -> (Result_2);
+  recovery_event : (blob) -> (Result_3);
+  // Only the registered worker can read its own private recovery events.
+  recovery_events : (nat64, nat32) -> (Result_4);
+  recovery_head : () -> (Result);
+  register_worker : (text, principal) -> (Result_5);
+  version : () -> (text) query;
+}

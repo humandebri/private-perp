@@ -78,7 +78,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 /// controller・vault・core・セッションを用意する（HPKE鍵は生成しない）。
@@ -158,10 +160,30 @@ fn personal_apis_require_a_valid_envelope() {
     let caller = principal(161);
     let client = envelope::client(1);
 
-    // 鍵が無いうちは公開鍵を配布しない（機密性の前提が欠けているためfail-closed）。
-    let unset: Result<Vec<u8>, ErrorCode> =
+    let candid = include_str!("../../../candid/trading_core.did");
+    for method in [
+        "submit_order",
+        "close_position",
+        "close_all",
+        "request_agent_generation",
+        "cancel_all",
+    ] {
+        assert!(
+            !candid
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("{method} :"))),
+            "old plaintext method remains: {method}"
+        );
+        assert!(
+            pic.update_call(core, caller, method, vec![]).is_err(),
+            "plaintext method exposed: {method}"
+        );
+    }
+
+    // setup の最初の暗号化書込みで鍵が生成される。
+    let existing: Result<Vec<u8>, ErrorCode> =
         pocket_ic_tests::query(&pic, core, caller, "get_hpke_public_key", ()).expect("call");
-    assert!(unset.is_err(), "{unset:?}");
+    assert_eq!(existing.expect("setup key").len(), 32);
 
     // 生成はcontrollerのみ。
     let denied: Result<Vec<u8>, ErrorCode> =

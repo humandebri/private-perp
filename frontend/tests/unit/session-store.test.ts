@@ -15,10 +15,17 @@ const deferred = <T>() => {
 }
 const data = () =>
   ({
-    funds: { revision: 0n },
+    funds: { revision: 0n, recovery_fence: [] },
     fundEvents: { items: [], next_cursor: [] },
     snapshot: { data_age_ms: 0n, account_id: new Uint8Array([1]), revision: 0n },
-    agent: { current: [{ state: { Active: null } }] },
+    agent: { current: [{ state: { Active: null }, expires_at: [] }] },
+    eligibility: { eligible: true, terms_version: 1n, expires_at: [100000n] },
+    vaultCycles: { new_risk_stopped: false },
+    coreCycles: { new_risk_stopped: false },
+    btcMarket: { market: 'BTC', eligible_for_new_risk: true },
+    ethMarket: { market: 'ETH', eligible_for_new_risk: true },
+    vaultJournal: [false, false],
+    coreJournal: [false, false],
     orders: { items: [], next_cursor: [] },
     issues: [],
   }) as unknown as LiveData
@@ -38,7 +45,9 @@ function fixture() {
   const gateway = {
     login: vi.fn(async () => ({ address: 'user-a' }) as SessionData),
     logout: vi.fn(async () => {}),
-    fundingInstructions: vi.fn<LocalGateway['fundingInstructions']>(),
+    prepareTradingAccount: vi.fn<LocalGateway['prepareTradingAccount']>(
+      async () => new Uint8Array(32),
+    ),
     refresh: vi.fn(async () => data()),
     lookupOrder: vi.fn<LocalGateway['lookupOrder']>(async () => undefined),
     submitOrder: vi.fn<LocalGateway['submitOrder']>(async (args) => ({
@@ -58,6 +67,33 @@ function fixture() {
   }
 }
 describe('session lifecycle and order reconciliation', () => {
+  it('blocks orders while a restored journal needs reconciliation', async () => {
+    const { store, gateway } = fixture()
+    await store.login()
+    gateway.refresh.mockResolvedValueOnce({ ...data(), coreJournal: [true, true] })
+    await store.refresh()
+    expect(orderBlockReason(store.getSnapshot(), 0)).toContain('復元した記録')
+    await store.submit(input)
+    expect(gateway.submitOrder).not.toHaveBeenCalled()
+  })
+  it('blocks new risk when recovery is fenced or Agent approval expired', async () => {
+    const { store, gateway } = fixture()
+    await store.login()
+    gateway.refresh.mockResolvedValueOnce({
+      ...data(),
+      funds: { ...data().funds, recovery_fence: [{ Preparing: null }] },
+    })
+    await store.refresh()
+    expect(orderBlockReason(store.getSnapshot(), 0, 1_000)).toContain('回収フェンス')
+    await store.submit(input)
+    expect(gateway.submitOrder).not.toHaveBeenCalled()
+    gateway.refresh.mockResolvedValueOnce({
+      ...data(),
+      agent: { ...data().agent!, current: [{ ...data().agent!.current[0]!, expires_at: [999n] }] },
+    })
+    await store.refresh()
+    expect(orderBlockReason(store.getSnapshot(), 0, 1_000)).toContain('期限')
+  })
   it('does not send invalid input and clears tracked requests on logout', async () => {
     const { store, gateway } = fixture()
     await store.login()

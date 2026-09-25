@@ -18,7 +18,7 @@ fi
 
 echo "extract-candid: 本番feature無しのwasmをビルドします"
 cargo build --release --target wasm32-unknown-unknown \
-  -p policy -p funds-vault -p control-guard -p trading-core
+  -p policy -p funds-vault -p control-guard -p trading-core -p send-journal
 
 wasm_dir="target/wasm32-unknown-unknown/release"
 out_dir="candid"
@@ -26,7 +26,8 @@ mkdir -p "$out_dir"
 
 # canister名（icp.yaml）: wasmファイル名: package名
 for trio in "funds_vault:funds_vault:funds-vault" "trading_core:trading_core:trading-core" \
-            "policy_registry:policy:policy" "control_guard:control_guard:control-guard"; do
+            "policy_registry:policy:policy" "control_guard:control_guard:control-guard" \
+            "send_journal:send_journal:send-journal"; do
   canister="${trio%%:*}"
   rest="${trio#*:}"
   wasm="${rest%%:*}"

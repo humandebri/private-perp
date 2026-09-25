@@ -1,11 +1,11 @@
 // 生成物: `bash scripts/generate-frontend-bindings.sh`（元: candid/trading_core.did）
 // 手で編集しない。契約（`crates/api-types`）を変えたら .did と本ファイルを再生成する。
 export const idlFactory = ({ IDL }) => {
-  const SessionHandle = IDL.Record({
-    session_id: IDL.Vec(IDL.Nat8),
-    expires_at: IDL.Nat64,
-    vault_principal: IDL.Principal,
-    revocation_generation: IDL.Nat64,
+  const RecoveryFenceToken = IDL.Record({
+    account_id: IDL.Vec(IDL.Nat8),
+    request_id: IDL.Vec(IDL.Nat8),
+    user_id: IDL.Vec(IDL.Nat8),
+    epoch: IDL.Nat64,
   })
   const NotAllowedCode = IDL.Variant({
     UpgradeContentMismatch: IDL.Null,
@@ -69,7 +69,7 @@ export const idlFactory = ({ IDL }) => {
     }),
     Unauthenticated: IDL.Record({ reason: IDL.Text }),
   })
-  const Result = IDL.Variant({ Ok: IDL.Nat64, Err: ErrorCode })
+  const Result = IDL.Variant({ Ok: IDL.Null, Err: ErrorCode })
   const Network = IDL.Variant({
     Mainnet: IDL.Null,
     Local: IDL.Null,
@@ -93,19 +93,19 @@ export const idlFactory = ({ IDL }) => {
     observed_at: IDL.Nat64,
   })
   const Result_1 = IDL.Variant({ Ok: HpkeResponse, Err: ErrorCode })
-  const SubmitOrderResult = IDL.Record({
-    request_id: IDL.Vec(IDL.Nat8),
-    cloid: IDL.Vec(IDL.Nat8),
-    accepted_at: IDL.Nat64,
-    order_id: IDL.Vec(IDL.Nat8),
+  const MarketThreshold = IDL.Record({
+    max_spread_bps: IDL.Nat32,
+    min_day_notional_usdc: IDL.Nat64,
+    expected_index: IDL.Nat32,
+    market: IDL.Text,
+    min_each_side_depth_usdc: IDL.Nat64,
   })
-  const CloseFailure = IDL.Record({ error: ErrorCode, market: IDL.Text })
-  const CloseAllOutcome = IDL.Record({
-    submitted: IDL.Vec(SubmitOrderResult),
-    failed: IDL.Vec(CloseFailure),
+  const SessionHandle = IDL.Record({
+    session_id: IDL.Vec(IDL.Nat8),
+    expires_at: IDL.Nat64,
+    vault_principal: IDL.Principal,
+    revocation_generation: IDL.Nat64,
   })
-  const Result_2 = IDL.Variant({ Ok: CloseAllOutcome, Err: ErrorCode })
-  const Result_3 = IDL.Variant({ Ok: SubmitOrderResult, Err: ErrorCode })
   const AgentState = IDL.Variant({
     Failed: IDL.Null,
     Active: IDL.Null,
@@ -128,56 +128,68 @@ export const idlFactory = ({ IDL }) => {
     current: IDL.Opt(AgentGeneration),
     observed_at: IDL.Nat64,
   })
-  const Result_4 = IDL.Variant({ Ok: AgentStatus, Err: ErrorCode })
+  const Result_2 = IDL.Variant({ Ok: AgentStatus, Err: ErrorCode })
+  const CyclesStatus = IDL.Record({
+    warning: IDL.Bool,
+    observed_daily_burn: IDL.Nat,
+    balance: IDL.Nat,
+    refill_target: IDL.Opt(IDL.Nat),
+    exit_reserve: IDL.Opt(IDL.Nat),
+    configured_daily_floor: IDL.Opt(IDL.Nat),
+    estimated_days: IDL.Opt(IDL.Nat64),
+    new_risk_stopped: IDL.Bool,
+    observed_at: IDL.Nat64,
+  })
+  const Result_3 = IDL.Variant({ Ok: CyclesStatus, Err: ErrorCode })
   const EnvironmentView = IDL.Record({
     ecdsa_key_id: IDL.Text,
     info_url: IDL.Text,
     network: Network,
     exchange_url: IDL.Text,
   })
-  const Result_5 = IDL.Variant({ Ok: EnvironmentView, Err: ErrorCode })
-  const Result_6 = IDL.Variant({ Ok: IDL.Vec(IDL.Nat8), Err: ErrorCode })
-  const Result_7 = IDL.Variant({ Ok: AgentGeneration, Err: ErrorCode })
+  const Result_4 = IDL.Variant({ Ok: EnvironmentView, Err: ErrorCode })
+  const Result_5 = IDL.Variant({ Ok: IDL.Vec(IDL.Nat8), Err: ErrorCode })
+  const MarketStatus = IDL.Record({
+    eligible_for_new_risk: IDL.Bool,
+    market: IDL.Text,
+    reason_code: IDL.Opt(IDL.Text),
+    observed_at: IDL.Opt(IDL.Nat64),
+  })
+  const Result_6 = IDL.Variant({ Ok: MarketStatus, Err: ErrorCode })
+  const Result_7 = IDL.Variant({
+    Ok: IDL.Opt(IDL.Principal),
+    Err: ErrorCode,
+  })
+  const Result_8 = IDL.Variant({
+    Ok: IDL.Tuple(IDL.Nat64, IDL.Nat64, IDL.Bool),
+    Err: ErrorCode,
+  })
+  const Result_13 = IDL.Variant({ Ok: IDL.Tuple(IDL.Bool, IDL.Bool), Err: ErrorCode })
+  const PrepareRecovery = IDL.Record({
+    account_id: IDL.Vec(IDL.Nat8),
+    request_id: IDL.Vec(IDL.Nat8),
+    user_id: IDL.Vec(IDL.Nat8),
+    master_address: IDL.Vec(IDL.Nat8),
+  })
+  const Result_9 = IDL.Variant({
+    Ok: RecoveryFenceToken,
+    Err: ErrorCode,
+  })
+  const Result_10 = IDL.Variant({ Ok: IDL.Bool, Err: ErrorCode })
   const PreflightResolution = IDL.Variant({
     Applied: IDL.Null,
     Rejected: IDL.Null,
-  })
-  const Result_8 = IDL.Variant({ Ok: IDL.Null, Err: ErrorCode })
-  const TriggerKind = IDL.Variant({
-    TakeProfit: IDL.Null,
-    StopLoss: IDL.Null,
-  })
-  const Trigger = IDL.Record({
-    kind: TriggerKind,
-    is_market: IDL.Bool,
-    trigger_price: IDL.Text,
-  })
-  const OrderKind = IDL.Variant({
-    LimitGtc: IDL.Null,
-    MarketIoc: IDL.Null,
-  })
-  const Side = IDL.Variant({ Buy: IDL.Null, Sell: IDL.Null })
-  const SubmitOrderArgs = IDL.Record({
-    account_id: IDL.Vec(IDL.Nat8),
-    limit_price: IDL.Opt(IDL.Text),
-    trigger: IDL.Opt(Trigger),
-    leverage: IDL.Opt(IDL.Nat32),
-    client_request_id: IDL.Vec(IDL.Nat8),
-    reduce_only: IDL.Bool,
-    kind: OrderKind,
-    side: Side,
-    slippage_tolerance_bps: IDL.Opt(IDL.Nat32),
-    session: SessionHandle,
-    quantity: IDL.Text,
-    market: IDL.Text,
-    expires_after: IDL.Opt(IDL.Nat64),
   })
   const SweepOutcome = IDL.Record({
     reconciled: IDL.Nat32,
     dispatched: IDL.Nat32,
     cancels: IDL.Nat32,
   })
-  const Result_9 = IDL.Variant({ Ok: SweepOutcome, Err: ErrorCode })
+  const Result_11 = IDL.Variant({ Ok: SweepOutcome, Err: ErrorCode })
+  const Result_12 = IDL.Variant({
+    Ok: IDL.Tuple(IDL.Nat64, IDL.Bool),
+    Err: ErrorCode,
+  })
   const HttpHeader = IDL.Record({ value: IDL.Text, name: IDL.Text })
   const HttpRequestResult = IDL.Record({
     status: IDL.Nat,
@@ -189,41 +201,58 @@ export const idlFactory = ({ IDL }) => {
     response: HttpRequestResult,
   })
   return IDL.Service({
-    cancel_all: IDL.Func([SessionHandle], [Result], []),
+    abort_recovery: IDL.Func([RecoveryFenceToken], [Result], []),
+    begin_recovery_migration: IDL.Func([], [Result], []),
     cancel_order: IDL.Func([HpkeRequest], [Result_1], []),
-    close_all: IDL.Func([SessionHandle, IDL.Vec(IDL.Nat8)], [Result_2], []),
-    close_position: IDL.Func(
-      [SessionHandle, IDL.Vec(IDL.Nat8), IDL.Text, IDL.Nat32, IDL.Opt(IDL.Text)],
-      [Result_3],
-      [],
-    ),
+    commit_recovery: IDL.Func([RecoveryFenceToken], [Result], []),
+    configure_cycles: IDL.Func([IDL.Nat, IDL.Nat], [Result], []),
+    configure_market_threshold: IDL.Func([MarketThreshold], [Result], []),
+    finish_recovery: IDL.Func([RecoveryFenceToken], [Result], []),
+    finish_recovery_migration: IDL.Func([], [Result], []),
     get_account_snapshot: IDL.Func([HpkeRequest], [Result_1], []),
-    get_agent_status: IDL.Func([SessionHandle], [Result_4], []),
-    get_environment: IDL.Func([], [Result_5], ['query']),
-    get_hpke_public_key: IDL.Func([], [Result_6], ['query']),
+    get_agent_status: IDL.Func([SessionHandle], [Result_2], []),
+    get_cycles_status: IDL.Func([], [Result_3], []),
+    get_environment: IDL.Func([], [Result_4], ['query']),
+    get_hpke_public_key: IDL.Func([], [Result_5], ['query']),
+    get_journal_guard: IDL.Func([], [Result_7], ['query']),
+    get_journal_send_status: IDL.Func([], [Result_13], ['query']),
+    get_market_status: IDL.Func([IDL.Text], [Result_6], ['query']),
     get_order_by_request: IDL.Func([HpkeRequest], [Result_1], []),
     get_policy_principal: IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
+    get_send_journal: IDL.Func([], [Result_7], ['query']),
     get_vault_principal: IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
+    journal_restore_status: IDL.Func([], [Result_8], ['query']),
+    recovery_replay_pending: IDL.Func([], [Result_10], ['query']),
+    recovery_stage_status: IDL.Func([], [Result_12], ['query']),
     list_fills: IDL.Func([HpkeRequest], [Result_1], []),
     list_orders: IDL.Func([HpkeRequest], [Result_1], []),
-    request_agent_generation: IDL.Func([SessionHandle], [Result_7], []),
+    mark_recovery_unknown: IDL.Func([RecoveryFenceToken], [Result], []),
+    migrate_recovery: IDL.Func([PrepareRecovery], [Result_9], []),
+    prepare_recovery: IDL.Func([PrepareRecovery], [Result_9], []),
+    private_call: IDL.Func([HpkeRequest], [Result_1], []),
+    recovery_migration_locked: IDL.Func([], [Result_10], ['query']),
+    refresh_market: IDL.Func([], [Result], []),
     resolve_unknown_order_preflight: IDL.Func(
       [IDL.Vec(IDL.Nat8), PreflightResolution],
-      [Result_8],
+      [Result],
       [],
     ),
-    rotate_hpke_key: IDL.Func([], [Result_6], []),
-    set_ecdsa_key_id: IDL.Func([IDL.Text], [Result_8], []),
-    set_market_context: IDL.Func([IDL.Text, IDL.Text], [Result_8], []),
-    set_meta_cache: IDL.Func([IDL.Text, IDL.Text, IDL.Text], [Result_8], []),
-    set_policy_principal: IDL.Func([IDL.Principal], [Result_8], []),
-    set_vault_principal: IDL.Func([IDL.Principal], [Result_8], []),
-    set_venue_endpoints: IDL.Func([IDL.Text, IDL.Text], [Result_8], []),
-    submit_order: IDL.Func([SessionHandle, SubmitOrderArgs], [Result_3], []),
-    sweep: IDL.Func([], [Result_9], []),
+    resume_journal: IDL.Func([], [Result], []),
+    rotate_hpke_key: IDL.Func([], [Result_5], []),
+    set_ecdsa_key_id: IDL.Func([IDL.Text], [Result], []),
+    set_journal_guard: IDL.Func([IDL.Principal], [Result], []),
+    set_market_context: IDL.Func([IDL.Text, IDL.Text], [Result], []),
+    set_meta_cache: IDL.Func([IDL.Text, IDL.Text, IDL.Text], [Result], []),
+    set_policy_principal: IDL.Func([IDL.Principal], [Result], []),
+    set_send_journal: IDL.Func([IDL.Principal], [Result], []),
+    set_vault_principal: IDL.Func([IDL.Principal], [Result], []),
+    set_venue_endpoints: IDL.Func([IDL.Text, IDL.Text], [Result], []),
+    sweep: IDL.Func([], [Result_11], []),
     transform_info: IDL.Func([TransformArgs], [HttpRequestResult], ['query']),
+    transform_market_info: IDL.Func([TransformArgs], [HttpRequestResult], ['query']),
+    transform_open_orders: IDL.Func([TransformArgs], [HttpRequestResult], ['query']),
     version: IDL.Func([], [IDL.Text], ['query']),
-    whoami: IDL.Func([SessionHandle], [Result_6], []),
+    whoami: IDL.Func([SessionHandle], [Result_5], []),
   })
 }
 export const init = ({ IDL }) => {

@@ -11,7 +11,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-cargo build -p e2e-signer
+if [[ -z "${LOCAL_ELIGIBILITY_ISSUER_KEY:-}" ]]; then
+  export LOCAL_ELIGIBILITY_ISSUER_KEY="$(openssl rand -hex 32)"
+fi
+cargo build -p e2e-signer -p eligibility-issuer
+export LOCAL_ELIGIBILITY_ISSUER_ADDRESS="$(target/debug/eligibility-issuer address)"
 icp network start -d
 icp deploy
 

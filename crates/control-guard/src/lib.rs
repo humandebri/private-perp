@@ -18,8 +18,10 @@ use api_types::guard::{
     ScheduleUpgradeArgs, ScheduledUpgrade, UPGRADE_DELAY_MS, UpgradeRequest, UpgradeState,
     UpgradeStatus,
 };
+use api_types::operations::RestBudgetConfig;
 use candid::Principal;
 use db::error::Error as DbError;
+use ic_cdk::call::Call;
 use ic_cdk_management_canister::{
     CanisterInstallMode, CanisterStatusArgs, InstallCodeArgs, canister_status, install_code,
 };
@@ -159,6 +161,109 @@ fn require_sns(caller: Principal) -> Result<(), ErrorCode> {
         });
     }
     Ok(())
+}
+
+/// SNSが共有REST予算を設定する経路。policyは登録済みguardのcallerを検証する。
+#[ic_cdk::update]
+async fn configure_rest_budget(
+    policy: Principal,
+    config: RestBudgetConfig,
+) -> Result<(), ErrorCode> {
+    require_sns(ic_cdk::api::msg_caller())?;
+    check_principal(policy, "invalid policy principal")?;
+    let response = Call::bounded_wait(policy, "configure_rest_budget")
+        .with_arg(config)
+        .await
+        .map_err(|error| ErrorCode::UpstreamUnavailable {
+            venue: format!("policy configure_rest_budget: {error}"),
+        })?;
+    let result: Result<(), ErrorCode> = response
+        .candid()
+        .map_err(|error| internal(format!("policy response: {error}")))?;
+    result
+}
+
+/// SNSが市場の許可版を設定する経路。policyは登録済みguardのcallerを検証する。
+#[ic_cdk::update]
+async fn configure_policy_version(
+    policy: Principal,
+    version: u64,
+    markets: Vec<String>,
+) -> Result<(), ErrorCode> {
+    require_sns(ic_cdk::api::msg_caller())?;
+    check_principal(policy, "invalid policy principal")?;
+    let response = Call::bounded_wait(policy, "set_policy_version")
+        .with_args(&(version, markets))
+        .await
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    response
+        .candid::<Result<(), ErrorCode>>()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?
+}
+
+#[ic_cdk::update]
+async fn configure_eligibility(
+    vault: Principal,
+    terms_version: u64,
+    issuer_address: api_types::Blob,
+    mock_issuer: bool,
+) -> Result<(), ErrorCode> {
+    require_sns(ic_cdk::api::msg_caller())?;
+    check_principal(vault, "invalid vault principal")?;
+    let response = Call::bounded_wait(vault, "configure_eligibility")
+        .with_args(&(terms_version, issuer_address, mock_issuer))
+        .await
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    response
+        .candid::<Result<(), ErrorCode>>()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?
+}
+
+#[ic_cdk::update]
+async fn configure_cycles(
+    worker: Principal,
+    daily_floor: u128,
+    exit_reserve: u128,
+) -> Result<(), ErrorCode> {
+    require_sns(ic_cdk::api::msg_caller())?;
+    check_principal(worker, "invalid worker principal")?;
+    let response = Call::bounded_wait(worker, "configure_cycles")
+        .with_args(&(daily_floor, exit_reserve))
+        .await
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    response
+        .candid::<Result<(), ErrorCode>>()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?
+}
+
+#[ic_cdk::update]
+async fn configure_market_threshold(
+    core: Principal,
+    input: api_types::operations_status::MarketThreshold,
+) -> Result<(), ErrorCode> {
+    require_sns(ic_cdk::api::msg_caller())?;
+    check_principal(core, "invalid core principal")?;
+    let response = Call::bounded_wait(core, "configure_market_threshold")
+        .with_arg(input)
+        .await
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    response
+        .candid::<Result<(), ErrorCode>>()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?
+}
+
+/// SNSだけが、独立送信ジャーナルの証跡が一致したworkerを再開できる。
+#[ic_cdk::update]
+async fn resume_journal(worker: Principal) -> Result<(), ErrorCode> {
+    require_sns(ic_cdk::api::msg_caller())?;
+    check_principal(worker, "invalid worker principal")?;
+    let response = Call::bounded_wait(worker, "resume_journal")
+        .with_arg(())
+        .await
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    response
+        .candid::<Result<(), ErrorCode>>()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?
 }
 
 /// 予約済みの内容と一致するupgradeを実行する（実行者は誰でもよい）。

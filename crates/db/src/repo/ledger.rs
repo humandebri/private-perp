@@ -500,6 +500,19 @@ pub fn claim_unmatched_deposit(
     )
 }
 
+pub fn unmatched_deposit_claimed(
+    connection: &Connection,
+    event_id: &[u8; 32],
+) -> Result<bool, Error> {
+    Ok(connection
+        .query_optional_scalar::<i64>(
+            "SELECT 1 FROM journal_requests WHERE request_id = ?1 AND kind = 'deposit_claimed'",
+            params![event_id.as_slice()],
+        )
+        .map_err(sql)?
+        .is_some())
+}
+
 /// 外部イベントIDに対応する仕訳の種別（未計上は `None`）。
 pub fn journal_kind_by_external_event(
     connection: &Connection,

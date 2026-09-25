@@ -4,6 +4,7 @@ use api_types::auth::{
     ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
 };
 use api_types::error::{ErrorCode, NotAllowedCode};
+use api_types::journal::{RecoveryPayload, RecoveryRecord};
 use api_types::order::{OrderKind, OrderSummary, Side, SubmitOrderArgs, SubmitOrderResult};
 use api_types::{Blob, Network};
 use candid::Principal;
@@ -74,7 +75,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 fn order_args(
@@ -100,6 +103,112 @@ fn order_args(
         trigger: None,
         expires_after: None,
     }
+}
+
+#[test]
+fn order_risk_replays_from_snapshot_before_acceptance() {
+    let pic = pic();
+    let controller = principal(231);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let core = deploy(
+        &pic,
+        TRADING_CORE_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), ErrorCode> =
+        update(&pic, core, controller, "set_vault_principal", vault).unwrap();
+    set.unwrap();
+    configure_policy(&pic, core, controller, &["BTC", "ETH"]);
+    rotate_hpke_key(&pic, core, controller);
+    let meta: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_meta_cache",
+        (
+            "local".to_string(),
+            "hyperliquid".to_string(),
+            UNIVERSE.to_string(),
+        ),
+    )
+    .unwrap();
+    meta.unwrap();
+    let context: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "set_market_context",
+        ("local".to_string(), "hyperliquid".to_string()),
+    )
+    .unwrap();
+    context.unwrap();
+    let caller = principal(232);
+    let session = open_session(&pic, vault, caller, &secret(182));
+    fund_trading_account(
+        &pic,
+        vault,
+        controller,
+        caller,
+        &session,
+        b"order-risk-replay-fund",
+        5_000_000_000,
+        32,
+    );
+    let account_id = trading_account_id(&pic, vault, caller, &session);
+    observe_empty_account(&pic, core, caller, &session);
+    let initial = envelope::get_account_snapshot(&pic, core, caller, &session)
+        .expect("initial snapshot")
+        .expect("account status");
+    assert_eq!(initial.open_order_risk_reserved, 0);
+    let guard: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, core, controller, "get_journal_guard", ()).unwrap();
+    let guard = guard.unwrap().expect("configured guard");
+    let before_order = pic
+        .take_canister_snapshot(core, Some(controller), None)
+        .expect("snapshot before order acceptance");
+
+    let accepted: Result<SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "submit_order",
+        (
+            session.clone(),
+            order_args(&account_id, &session, b"replay-risk", "ETH", "0.05", "2500"),
+        ),
+    )
+    .expect("order call");
+    accepted.expect("order accepted");
+    let before = envelope::get_account_snapshot(&pic, core, caller, &session)
+        .expect("snapshot")
+        .expect("account status");
+    assert_eq!(before.open_order_risk_reserved, 125_000_000);
+
+    pic.load_canister_snapshot(core, Some(controller), before_order.id)
+        .expect("restore before order acceptance");
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, guard, controller, "resume_journal", core).expect("guard call");
+    let pending: Result<bool, ErrorCode> =
+        pocket_ic_tests::query(&pic, core, controller, "recovery_replay_pending", ()).unwrap();
+    assert!(resumed.is_err(), "external validation is still required");
+    let send_status: Result<(bool, bool), ErrorCode> =
+        pocket_ic_tests::query(&pic, core, caller, "get_journal_send_status", ()).unwrap();
+    assert_eq!(send_status.unwrap(), (true, true));
+    let restored = envelope::get_account_snapshot(&pic, core, caller, &session)
+        .expect("snapshot")
+        .expect("account status");
+    assert_eq!(restored.open_order_risk_reserved, 125_000_000);
+    assert!(
+        restored.pending_orders.is_empty(),
+        "plaintext order was not journaled"
+    );
+    assert!(pending.unwrap());
 }
 
 #[test]
@@ -236,6 +345,33 @@ fn orders_are_accepted_idempotently_after_authorization() {
     let duplicate = duplicate.expect("duplicate");
     assert_eq!(duplicate.order_id, accepted.order_id);
     assert_eq!(duplicate.cloid, accepted.cloid);
+    let configured: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, core, controller, "get_send_journal", ())
+            .expect("journal configured");
+    let journal = configured.expect("journal principal").expect("configured");
+    let events: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, core, "recovery_events", (0u64, 100u32)).unwrap();
+    let accepted_events: Vec<_> = events
+        .unwrap()
+        .into_iter()
+        .filter(|record| matches!(record.event.payload, RecoveryPayload::OrderAccepted { .. }))
+        .collect();
+    assert_eq!(accepted_events.len(), 1, "duplicate must not append again");
+    match &accepted_events[0].event.payload {
+        RecoveryPayload::OrderAccepted {
+            order_id,
+            request_id,
+            risk_micros,
+            reduce_only,
+            ..
+        } => {
+            assert_eq!(order_id, &accepted.order_id);
+            assert_eq!(request_id.as_ref(), &[71u8; 32]);
+            assert!(*risk_micros > 0);
+            assert!(!*reduce_only);
+        }
+        _ => unreachable!(),
+    }
 
     // 同一ID・異なる本文は拒否する。
     let conflict: Result<SubmitOrderResult, ErrorCode> = update_args(
@@ -780,8 +916,38 @@ fn orders_are_dispatched_and_record_the_venue_oid() {
     let listed = listed.expect("list");
     assert_eq!(listed.items[0].state, api_types::order::OrderState::Open);
     assert_eq!(listed.items[0].hl_oid, Some(12345));
+    let configured: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, core, controller, "get_send_journal", ())
+            .expect("journal configured");
+    let journal = configured.expect("journal principal").expect("configured");
+    let records: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, core, "recovery_events", (0u64, 10u32))
+            .expect("recovery events");
+    let records = records.expect("private recovery events");
+    assert!(records.iter().any(|record| {
+        matches!(
+            &record.event.payload,
+            RecoveryPayload::OrderActionResult {
+                kind,
+                accepted: true,
+                hl_oid: Some(12345),
+                ..
+            } if kind == "order"
+        )
+    }));
+    assert!(records.iter().any(|record| {
+        matches!(
+            &record.event.payload,
+            RecoveryPayload::IdentityAccount {
+                account_id: recorded_account,
+                owner,
+                address,
+                ..
+            } if recorded_account == &account_id && *owner == caller && address.len() == 20
+        )
+    }));
     // 取引所データの鮮度：観測が新しければ新規リスクを受け付ける。
-    let state = r#"{"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","leverage":{"value":3}}}]}"#;
+    let state = r#"{"marginSummary":{"totalMarginUsed":"0"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","unrealizedPnl":"0","leverage":{"value":3}}}]}"#;
     let ingested: Result<u32, ErrorCode> = update_args(
         &pic,
         core,
@@ -1235,7 +1401,53 @@ fn fills_are_ingested_idempotently() {
         sweep_with_venue_outcalls(&pic, core, caller, venue_body).expect("call");
     assert_eq!(swept.expect("sweep").dispatched, 1);
 
-    let fills = r#"[{"tid":1,"oid":777,"coin":"ETH","px":"2500","sz":"0.05","fee":12,"time":1758000000000}]"#;
+    let fills = r#"[{"tid":1,"oid":777,"coin":"ETH","px":"2500","sz":"0.02","fee":12,"time":1758000000000}]"#;
+    let journal: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, core, controller, "get_send_journal", ()).unwrap();
+    let journal = journal.unwrap().unwrap();
+    pic.stop_canister(journal, Some(controller)).unwrap();
+    let blocked: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_fills",
+        (session.clone(), fills.to_string()),
+    )
+    .expect("call");
+    assert!(
+        blocked.is_err(),
+        "journal outage must block fill and risk release"
+    );
+    let before: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> =
+        envelope::list_fills(&pic, core, caller, &session, None::<Blob>, 10u32).unwrap();
+    assert!(before.unwrap().items.is_empty());
+    pic.start_canister(journal, Some(controller)).unwrap();
+    let wrong_market: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_fills",
+        (
+            session.clone(),
+            r#"[{"tid":2,"oid":777,"coin":"BTC","px":"2500","sz":"0.05","fee":12,"time":1758000000000}]"#
+                .to_string(),
+        ),
+    )
+    .expect("call");
+    assert_eq!(wrong_market.unwrap(), 0, "market must match the order");
+    let bad_size: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_fills",
+        (
+            session.clone(),
+            r#"[{"tid":4,"oid":777,"coin":"ETH","px":"2500","sz":"-0.01","fee":1,"time":1758000000000}]"#
+                .to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(bad_size.is_err(), "invalid fill cannot reach the journal");
     let ingested: Result<u32, ErrorCode> = update_args(
         &pic,
         core,
@@ -1255,15 +1467,57 @@ fn fills_are_ingested_idempotently() {
     )
     .expect("call");
     assert_eq!(again.expect("ingest"), 0, "同じtidは二重計上しない");
+    let partial: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session, None::<Blob>, 10u32).unwrap();
+    let partial = partial.unwrap();
+    assert_eq!(
+        partial.items[0].state,
+        api_types::order::OrderState::PartiallyFilled
+    );
+    assert_eq!(partial.items[0].filled_quantity, "0.02");
+    let final_fill: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_fills",
+        (
+            session.clone(),
+            r#"[{"tid":3,"oid":777,"coin":"ETH","px":"2500","sz":"0.03","fee":18,"time":1758000000001}]"#
+                .to_string(),
+        ),
+    )
+    .expect("call");
+    assert_eq!(final_fill.expect("second partial fill"), 1);
+    let recovery: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, core, "recovery_events", (0u64, 100u32)).unwrap();
+    assert_eq!(
+        recovery
+            .unwrap()
+            .into_iter()
+            .filter(|record| matches!(record.event.payload, RecoveryPayload::FillObserved { .. }))
+            .count(),
+        2,
+        "duplicate fill must not append twice"
+    );
 
     let listed: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> =
         envelope::list_fills(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
             .expect("call");
     let listed = listed.expect("fills");
-    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items.len(), 2);
     assert_eq!(listed.items[0].market, "ETH");
-    assert_eq!(listed.items[0].quantity, "0.05");
-    assert_eq!(listed.items[0].fee, 12);
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.quantity == "0.02" && item.fee == 12)
+    );
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.quantity == "0.03" && item.fee == 18)
+    );
 
     let orders: Result<api_types::Paged<OrderSummary>, ErrorCode> =
         envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
@@ -1363,6 +1617,42 @@ fn order_status_updates_are_reflected() {
         sweep_with_venue_outcalls(&pic, core, caller, venue_body).expect("call");
     assert_eq!(swept.expect("sweep").dispatched, 1);
 
+    let guard: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, core, controller, "get_journal_guard", ()).unwrap();
+    let guard = guard.unwrap().expect("configured recovery guard");
+    let hidden: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, core, caller, "get_journal_guard", ()).unwrap();
+    assert!(matches!(hidden, Err(ErrorCode::Unauthenticated { .. })));
+    let before_status_snapshot = pic
+        .take_canister_snapshot(core, Some(controller), None)
+        .expect("snapshot before status reconciliation");
+
+    let journal: Result<Option<Principal>, ErrorCode> =
+        pocket_ic_tests::query(&pic, core, controller, "get_send_journal", ()).unwrap();
+    let journal = journal.unwrap().unwrap();
+    pic.stop_canister(journal, Some(controller)).unwrap();
+    let blocked: Result<bool, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_apply_order_status",
+        (
+            session.clone(),
+            r#"{"status":"canceled","order":{"oid":888}}"#.to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(
+        blocked.is_err(),
+        "journal outage must not release order risk"
+    );
+    let before: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session, None::<Blob>, 10u32).unwrap();
+    assert_eq!(
+        before.unwrap().items[0].state,
+        api_types::order::OrderState::Open
+    );
+    pic.start_canister(journal, Some(controller)).unwrap();
     let applied: Result<bool, ErrorCode> = update_args(
         &pic,
         core,
@@ -1375,6 +1665,21 @@ fn order_status_updates_are_reflected() {
     )
     .expect("call");
     assert!(applied.expect("applied"), "既知のoidへ反映される");
+    let records: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, core, "recovery_events", (0u64, 100u32)).unwrap();
+    assert_eq!(
+        records
+            .unwrap()
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    record.event.payload,
+                    RecoveryPayload::OrderStatusObserved { .. }
+                )
+            })
+            .count(),
+        1
+    );
 
     let orders: Result<api_types::Paged<OrderSummary>, ErrorCode> =
         envelope::list_orders(&pic, core, caller, &session.clone(), None::<Blob>, 10u32)
@@ -1383,6 +1688,69 @@ fn order_status_updates_are_reflected() {
         orders.expect("orders").items[0].state,
         api_types::order::OrderState::Cancelled
     );
+
+    // An older open observation cannot return a terminal order to active risk.
+    let stale_open: Result<bool, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_apply_order_status",
+        (
+            session.clone(),
+            r#"{"status":"open","order":{"oid":888}}"#.to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(!stale_open.expect("stale open ignored"));
+    let conflicting_terminal: Result<bool, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_apply_order_status",
+        (
+            session.clone(),
+            r#"{"status":"filled","order":{"oid":888}}"#.to_string(),
+        ),
+    )
+    .expect("call");
+    assert!(!conflicting_terminal.expect("terminal order remains terminal"));
+
+    // A fill arriving after the cancellation is still recorded, but must not
+    // turn the cancelled order back into a live partial order.
+    let late_fill: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_fills",
+        (
+            session.clone(),
+            r#"[{"tid":1801,"oid":888,"coin":"ETH","px":"2500","sz":"0.01","fee":1,"time":1758000000000}]"#
+                .to_string(),
+        ),
+    )
+    .expect("call");
+    assert_eq!(late_fill.expect("late fill recorded"), 1);
+    let another_fill: Result<u32, ErrorCode> = update_args(
+        &pic,
+        core,
+        caller,
+        "test_ingest_fills",
+        (
+            session.clone(),
+            r#"[{"tid":1802,"oid":888,"coin":"ETH","px":"2500","sz":"0.02","fee":1,"time":1758000000001}]"#
+                .to_string(),
+        ),
+    )
+    .expect("call");
+    assert_eq!(another_fill.expect("second fill recorded"), 1);
+    let after_fill: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session, None::<Blob>, 10u32).unwrap();
+    let after_fill = after_fill.unwrap();
+    assert_eq!(
+        after_fill.items[0].state,
+        api_types::order::OrderState::Cancelled
+    );
+    assert_eq!(after_fill.items[0].filled_quantity, "0.03");
 
     // 未知のoidは何も変えない。
     let unknown: Result<bool, ErrorCode> = update_args(
@@ -1397,6 +1765,30 @@ fn order_status_updates_are_reflected() {
     )
     .expect("call");
     assert!(!unknown.expect("applied"));
+
+    pic.load_canister_snapshot(core, Some(controller), before_status_snapshot.id)
+        .expect("restore older core snapshot");
+    let resume: Result<(), ErrorCode> =
+        update(&pic, guard, controller, "resume_journal", core).unwrap();
+    assert!(
+        matches!(resume, Err(ErrorCode::PolicyUnavailable)),
+        "replayed status still needs external validation"
+    );
+    let restored: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, caller, &session, None::<Blob>, 10u32).unwrap();
+    let restored = restored.unwrap();
+    assert_eq!(
+        restored.items[0].state,
+        api_types::order::OrderState::Cancelled,
+        "journal delta replays the terminal order state"
+    );
+    assert_eq!(restored.items[0].filled_quantity, "0.03");
+    let replayed_fills: Result<api_types::Paged<api_types::order::FillView>, ErrorCode> =
+        envelope::list_fills(&pic, core, caller, &session, None::<Blob>, 10u32).unwrap();
+    assert_eq!(replayed_fills.unwrap().items.len(), 2);
+    let replay_pending: Result<bool, ErrorCode> =
+        pocket_ic_tests::query(&pic, core, controller, "recovery_replay_pending", ()).unwrap();
+    assert!(replay_pending.unwrap());
 }
 
 /// 政策Canisterのprincipalはcontrollerだけが設定できる。

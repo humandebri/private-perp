@@ -47,6 +47,20 @@ export async function signTypedData(
   return hexToBytes(signature, 65)
 }
 
+export async function signPersonalBytes(
+  address: string,
+  message: Uint8Array,
+  provider = window.ethereum,
+): Promise<Uint8Array> {
+  if (!provider) throw new Error('MetaMaskが見つかりません')
+  const signature = await provider.request({
+    method: 'personal_sign',
+    params: [bytesToHex(message), address],
+  })
+  if (typeof signature !== 'string') throw new Error('署名を取得できません')
+  return hexToBytes(signature, 65)
+}
+
 export function withdrawalTypedData(args: {
   address: string
   amount: bigint

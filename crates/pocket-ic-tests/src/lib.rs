@@ -9,6 +9,126 @@
 pub mod envelope;
 pub mod fixed_rng;
 
+/// Configure a real signed local eligibility token for a test session.
+/// The issuer secret is generated from the host OS per test process and never
+/// committed, included in frontend code, or stored in a canister.
+pub fn activate_local_user(
+    pic: &pocket_ic::PocketIc,
+    vault: candid::Principal,
+    caller: candid::Principal,
+    session: &api_types::auth::SessionHandle,
+) {
+    use api_types::eligibility::{EligibilityClaims, EligibilityStatus, EligibilityToken};
+    use api_types::error::ErrorCode;
+    use std::io::Read;
+    thread_local! {
+        static ISSUERS: std::cell::RefCell<std::collections::HashMap<candid::Principal, [u8; 32]>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let controller = pic
+        .get_controllers(vault)
+        .into_iter()
+        .next()
+        .expect("vault controller");
+    let sns = principal(239);
+    let configured: Result<Option<(u64, api_types::Blob)>, ErrorCode> =
+        query(pic, vault, caller, "get_eligibility_configuration", ()).expect("config query");
+    let key = if configured.expect("eligibility config").is_none() {
+        let guard = deploy(
+            pic,
+            CONTROL_GUARD_WASM,
+            Some(vec![controller]),
+            candid::encode_one(()).unwrap(),
+        );
+        let configured: Result<(), ErrorCode> =
+            update(pic, guard, controller, "set_sns_principal", sns).unwrap();
+        configured.unwrap();
+        let configured: Result<(), ErrorCode> =
+            update(pic, vault, controller, "set_journal_guard", guard).unwrap();
+        configured.unwrap();
+        let mut key = [0u8; 32];
+        loop {
+            std::fs::File::open("/dev/urandom")
+                .unwrap()
+                .read_exact(&mut key)
+                .unwrap();
+            if hl_sign::address_from_secret(&key).is_ok() {
+                break;
+            }
+        }
+        let address = hl_sign::address_from_secret(&key).unwrap();
+        let configured: Result<(), ErrorCode> = update_args(
+            pic,
+            guard,
+            sns,
+            "configure_eligibility",
+            (vault, 1u64, address.to_vec(), true),
+        )
+        .unwrap();
+        configured.unwrap();
+        let configured: Result<(), ErrorCode> = update_args(
+            pic,
+            guard,
+            sns,
+            "configure_cycles",
+            (vault, 100_000_000_000u128, 1_000_000_000_000u128),
+        )
+        .unwrap();
+        configured.unwrap();
+        ISSUERS.with(|issuers| {
+            issuers.borrow_mut().insert(vault, key);
+        });
+        key
+    } else {
+        ISSUERS.with(|issuers| {
+            *issuers
+                .borrow()
+                .get(&vault)
+                .expect("issuer key for existing vault")
+        })
+    };
+    let client = envelope::client(0xD3);
+    let prepared: Result<api_types::Blob, ErrorCode> = client
+        .call_encoded(
+            pic,
+            vault,
+            caller,
+            "prepare_trading_account",
+            &candid::encode_one(session.clone()).unwrap(),
+        )
+        .unwrap();
+    let account = prepared.unwrap();
+    let expires_at = envelope::now_ms(pic) + 60 * 60 * 1000;
+    let claims: Result<EligibilityClaims, ErrorCode> = client
+        .call_encoded(
+            pic,
+            vault,
+            caller,
+            "eligibility_signing_claims",
+            &candid::encode_args((session.clone(), expires_at)).unwrap(),
+        )
+        .unwrap();
+    let claims = claims.unwrap();
+    assert_eq!(claims.account_id, account);
+    let encoded = candid::encode_one(&claims).unwrap();
+    let digest = hl_sign::keccak256_concat(&[b"private-perp/eligibility/v1", &encoded]);
+    let signature = hl_sign::sign_digest_for_tests(&digest, &key).unwrap();
+    let token = EligibilityToken {
+        claims,
+        signature: signature.to_bytes65().to_vec().into(),
+    };
+    let registered: Result<EligibilityStatus, ErrorCode> = client
+        .call_encoded(
+            pic,
+            vault,
+            caller,
+            "register_eligibility",
+            &candid::encode_args((session.clone(), token)).unwrap(),
+        )
+        .unwrap();
+    assert!(registered.unwrap().eligible);
+}
+
 /// 既に作成済みの実取引口座IDを取得する。口座の作成や観測は行わない。
 pub fn trading_account_id(
     pic: &pocket_ic::PocketIc,
@@ -60,6 +180,7 @@ pub const POLICY_WASM: &str = "policy.wasm";
 pub const FUNDS_VAULT_WASM: &str = "funds_vault.wasm";
 pub const CONTROL_GUARD_WASM: &str = "control_guard.wasm";
 pub const TRADING_CORE_WASM: &str = "trading_core.wasm";
+pub const SEND_JOURNAL_WASM: &str = "send_journal.wasm";
 
 /// Canisterへ供給するcycles（テスト用）。
 pub const TEST_CYCLES: u128 = 10_000_000_000_000_000;
@@ -131,12 +252,105 @@ pub fn deploy(
         .as_ref()
         .and_then(|controllers| controllers.first().copied());
     pic.install_canister(canister, wasm(file), init_arg, sender);
+    if file == FUNDS_VAULT_WASM || file == TRADING_CORE_WASM {
+        let controller = pic
+            .get_controllers(canister)
+            .into_iter()
+            .next()
+            .expect("worker controller");
+        let journal = deploy(
+            pic,
+            SEND_JOURNAL_WASM,
+            Some(vec![controller]),
+            candid::encode_one(()).expect("journal init"),
+        );
+        let role = if file == FUNDS_VAULT_WASM {
+            "vault"
+        } else {
+            "core"
+        };
+        let registered: Result<(), api_types::error::ErrorCode> = update_args(
+            pic,
+            journal,
+            controller,
+            "register_worker",
+            (role.to_string(), canister),
+        )
+        .expect("register journal worker call");
+        registered.expect("register journal worker");
+        let configured: Result<(), api_types::error::ErrorCode> =
+            update(pic, canister, controller, "set_send_journal", journal)
+                .expect("configure send journal call");
+        configured.expect("configure send journal");
+    }
+    if file == FUNDS_VAULT_WASM {
+        let vault_controller = pic
+            .get_controllers(canister)
+            .into_iter()
+            .next()
+            .expect("vault controller");
+        configure_vault_budget(pic, canister, vault_controller);
+    }
     canister
 }
 
 /// 引数なしCanisterをdeployする。
 pub fn deploy_default(pic: &PocketIc, file: &str) -> Principal {
     deploy(pic, file, None, candid::encode_one(()).expect("encode ()"))
+}
+
+/// vault単体試験も本番と同じ予算取得を通す。coreとの結合試験では
+/// `configure_policy`が両workerを同じpolicyへ差し替える。
+fn configure_vault_budget(pic: &PocketIc, vault: Principal, vault_controller: Principal) {
+    let controller = principal(240);
+    let policy = deploy(
+        pic,
+        POLICY_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).expect("encode ()"),
+    );
+    let guard: Result<(), api_types::error::ErrorCode> =
+        update(pic, policy, controller, "set_guard_principal", controller).expect("call");
+    guard.expect("set_guard_principal");
+    let sns: Result<(), api_types::error::ErrorCode> =
+        update(pic, policy, controller, "set_sns_principal", controller).expect("call");
+    sns.expect("set_sns_principal");
+    let version: Result<(), api_types::error::ErrorCode> = update_args(
+        pic,
+        policy,
+        controller,
+        "set_policy_version",
+        (1u64, vec!["BTC".to_string(), "ETH".to_string()]),
+    )
+    .expect("call");
+    version.expect("set_policy_version");
+    let active: Result<(), api_types::error::ErrorCode> =
+        update(pic, policy, controller, "clear_emergency_stop", ()).expect("call");
+    active.expect("clear_emergency_stop");
+    let worker: Result<(), api_types::error::ErrorCode> = update_args(
+        pic,
+        policy,
+        controller,
+        "register_budget_worker",
+        ("vault".to_string(), vault),
+    )
+    .expect("call");
+    worker.expect("register_budget_worker");
+    let budget: Result<(), api_types::error::ErrorCode> = update(
+        pic,
+        policy,
+        controller,
+        "configure_rest_budget",
+        api_types::operations::RestBudgetConfig {
+            capacity: 1200,
+            exit_reserve: 300,
+        },
+    )
+    .expect("call");
+    budget.expect("configure_rest_budget");
+    let configured: Result<(), api_types::error::ErrorCode> =
+        update(pic, vault, vault_controller, "set_policy_principal", policy).expect("call");
+    configured.expect("set_policy_principal");
 }
 
 /// 注文を受け付けるための最小構成の `policy_registry` を用意する。
@@ -185,7 +399,107 @@ pub fn configure_policy(
     let result: Result<(), api_types::error::ErrorCode> =
         update(pic, core, controller, "set_policy_principal", policy).expect("call");
     result.expect("set_policy_principal");
+    let result: Result<(), api_types::error::ErrorCode> = update_args(
+        pic,
+        policy,
+        controller,
+        "register_budget_worker",
+        ("core".to_string(), core),
+    )
+    .expect("call");
+    result.expect("register_budget_worker");
+    let vault: Option<Principal> =
+        query(pic, core, controller, "get_vault_principal", ()).expect("get_vault_principal");
+    if let Some(vault) = vault {
+        let result: Result<(), api_types::error::ErrorCode> =
+            update(pic, vault, controller, "set_core_principal", core).expect("call");
+        result.expect("set vault core principal");
+        let result: Result<(), api_types::error::ErrorCode> = update_args(
+            pic,
+            policy,
+            controller,
+            "register_budget_worker",
+            ("vault".to_string(), vault),
+        )
+        .expect("call");
+        result.expect("register vault budget worker");
+        let result: Result<(), api_types::error::ErrorCode> =
+            update(pic, vault, controller, "set_policy_principal", policy).expect("call");
+        result.expect("set vault policy principal");
+    }
+    let result: Result<(), api_types::error::ErrorCode> = update(
+        pic,
+        policy,
+        controller,
+        "configure_rest_budget",
+        api_types::operations::RestBudgetConfig {
+            capacity: 1200,
+            exit_reserve: 300,
+        },
+    )
+    .expect("call");
+    result.expect("configure_rest_budget");
+    configure_core_admission(pic, core, controller);
     policy
+}
+
+/// Configure cycles and BTC/ETH observations through the same guard and mock HL paths
+/// as production admission. A test that uses a custom policy can call this directly.
+pub fn configure_core_admission(pic: &PocketIc, core: Principal, controller: Principal) {
+    let guard = deploy(
+        pic,
+        CONTROL_GUARD_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let set: Result<(), api_types::error::ErrorCode> =
+        update(pic, guard, controller, "set_sns_principal", controller).unwrap();
+    set.unwrap();
+    let set: Result<(), api_types::error::ErrorCode> =
+        update(pic, core, controller, "set_journal_guard", guard).unwrap();
+    set.unwrap();
+    let set: Result<(), api_types::error::ErrorCode> = update_args(
+        pic,
+        guard,
+        controller,
+        "configure_cycles",
+        (core, 100_000_000_000u128, 1_000_000_000_000u128),
+    )
+    .unwrap();
+    set.unwrap();
+    for (market, index, depth) in [("BTC", 2, 10_000), ("ETH", 1, 1_000)] {
+        let set: Result<(), api_types::error::ErrorCode> = update_args(
+            pic,
+            guard,
+            controller,
+            "configure_market_threshold",
+            (
+                core,
+                api_types::operations_status::MarketThreshold {
+                    market: market.into(),
+                    expected_index: index,
+                    min_day_notional_usdc: 1_000_000,
+                    max_spread_bps: 20,
+                    min_each_side_depth_usdc: depth,
+                },
+            ),
+        )
+        .unwrap();
+        set.unwrap();
+    }
+    let (refreshed, _): (Result<(), api_types::error::ErrorCode>, _) = call_with_routed_outcalls(
+        pic, core, controller, "refresh_market", (), |call| {
+            let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+            match query.get("type").and_then(|v| v.as_str()) {
+                Some("metaAndAssetCtxs") => Ok((200, br#"[{"universe":[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]},[{"dayNtlVlm":"10000000"},{"dayNtlVlm":"100000000"},{"dayNtlVlm":"500000000"}]]"#.to_vec())),
+                Some("l2Book") => {
+                    let mid = if query.get("coin").and_then(|v| v.as_str()) == Some("BTC") { 60000 } else { 3000 };
+                    Ok((200, format!(r#"{{"levels":[[{{"px":"{}","sz":"1.25"}}],[{{"px":"{}","sz":"1.10"}}]]}}"#, mid - 1, mid + 1).into_bytes()))
+                }
+                other => Err((1, format!("unexpected market query: {other:?}"))),
+            }
+        }).expect("market refresh outcalls");
+    refreshed.expect("refresh market");
 }
 
 /// 封筒を使う試験の前提：controllerがHPKE鍵を生成する（`api-contract.md` 6節）。
@@ -316,10 +630,38 @@ where
     R: CandidType + DeserializeOwned,
 {
     let payload = candid::encode_one(arg).map_err(|error| format!("encode {method}: {error}"))?;
+    if private_vault_method(method) {
+        return envelope::client(0xED).call_encoded(pic, canister, caller, method, &payload);
+    }
+    if private_core_method(method) {
+        let wrapped = candid::encode_one(api_types::Blob::from(payload))
+            .map_err(|e| format!("encode core private payload: {e}"))?;
+        return envelope::client(0xEC).call_encoded(pic, canister, caller, method, &wrapped);
+    }
     let bytes = pic
         .update_call(canister, caller, method, payload)
         .map_err(|error| format!("reject {method}: {error:?}"))?;
     candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))
+}
+
+fn private_vault_method(method: &str) -> bool {
+    matches!(
+        method,
+        "revoke_session"
+            | "approve_agent_generation"
+            | "request_allocation"
+            | "request_withdrawal"
+            | "provision_reserve_account"
+            | "prepare_trading_account"
+            | "request_recovery"
+    )
+}
+
+fn private_core_method(method: &str) -> bool {
+    matches!(
+        method,
+        "submit_order" | "close_position" | "close_all" | "request_agent_generation" | "cancel_all"
+    )
 }
 
 /// query呼び出しを行い、応答をデコードする。
@@ -366,6 +708,14 @@ where
     R: CandidType + DeserializeOwned,
 {
     let payload = candid::encode_args(arg).map_err(|error| format!("encode {method}: {error}"))?;
+    if private_vault_method(method) {
+        return envelope::client(0xED).call_encoded(pic, canister, caller, method, &payload);
+    }
+    if private_core_method(method) {
+        let wrapped = candid::encode_one(api_types::Blob::from(payload))
+            .map_err(|e| format!("encode core private payload: {e}"))?;
+        return envelope::client(0xEC).call_encoded(pic, canister, caller, method, &wrapped);
+    }
     let bytes = pic
         .update_call(canister, caller, method, payload)
         .map_err(|error| format!("reject {method}: {error:?}"))?;
@@ -438,8 +788,30 @@ where
     R: CandidType + DeserializeOwned,
 {
     let payload = candid::encode_args(arg).map_err(|error| format!("encode {method}: {error}"))?;
+    let private = if private_vault_method(method) {
+        let client = envelope::client(0xED);
+        let (request, aad) = client.prepare_encoded(pic, canister, caller, method, &payload)?;
+        Some((client, request, aad))
+    } else {
+        None
+    };
+    let encoded = match private.as_ref() {
+        Some((_, request, _)) => {
+            candid::encode_one(request).map_err(|e| format!("encode envelope: {e}"))?
+        }
+        None => payload,
+    };
     let message_id = pic
-        .submit_call(canister, caller, method, payload)
+        .submit_call(
+            canister,
+            caller,
+            if private.is_some() {
+                "private_call"
+            } else {
+                method
+            },
+            encoded,
+        )
         .map_err(|error| format!("submit {method}: {error:?}"))?;
 
     let mut captured = None;
@@ -483,8 +855,7 @@ where
         // （sweepが送信前に失敗した場合など、原因をテスト側で観測できるようにする）。
         if let Some(status) = pic.ingress_status(message_id) {
             let bytes = status.map_err(|error| format!("reject {method}: {error:?}"))?;
-            let value: R =
-                candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))?;
+            let value: R = decode_captured_response(&bytes, method, private.as_ref())?;
             return Ok((value, None));
         }
         return Err(format!("{method}: no pending outcall to mock"));
@@ -493,9 +864,26 @@ where
     let bytes = pic
         .await_call(message_id)
         .map_err(|error| format!("reject {method}: {error:?}"))?;
-    let value: R =
-        candid::decode_one(&bytes).map_err(|error| format!("decode {method}: {error}"))?;
+    let value: R = decode_captured_response(&bytes, method, private.as_ref())?;
     Ok((value, Some(captured)))
+}
+
+fn decode_captured_response<R: CandidType + DeserializeOwned>(
+    bytes: &[u8],
+    method: &str,
+    private: Option<&(
+        envelope::EnvelopeClient,
+        api_types::envelope::HpkeRequest,
+        Vec<u8>,
+    )>,
+) -> Result<R, String> {
+    if let Some((client, request, aad)) = private {
+        let response: Result<api_types::envelope::HpkeResponse, api_types::error::ErrorCode> =
+            candid::decode_one(bytes).map_err(|e| format!("decode {method} envelope: {e}"))?;
+        client.decode_encoded(response, request, aad)
+    } else {
+        candid::decode_one(bytes).map_err(|error| format!("decode {method}: {error}"))
+    }
 }
 
 /// outcallを伴うupdate呼び出しを、**送信内容で振り分けて**複数のoutcallをmockし完了させる。

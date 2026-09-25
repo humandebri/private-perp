@@ -21,9 +21,9 @@ use pocket_ic_tests::{
 const ORIGIN: &str = "https://app.example.test";
 const UNIVERSE: &str = r#"[{"name":"SOL","szDecimals":0},{"name":"ETH","szDecimals":5},{"name":"BTC","szDecimals":5}]"#;
 /// ETHロングとBTCショートの建玉（`/info`のclearinghouseState相当）。
-const STATE: &str = r#"{"assetPositions":[
-  {"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","leverage":{"value":3},"marginMode":"cross"}},
-  {"position":{"coin":"BTC","szi":"-0.02","entryPx":"60000","leverage":{"value":3},"marginMode":"cross"}}
+const STATE: &str = r#"{"marginSummary":{"totalMarginUsed":"0"},"assetPositions":[
+  {"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","unrealizedPnl":"0","leverage":{"value":3},"marginMode":"cross"}},
+  {"position":{"coin":"BTC","szi":"-0.02","entryPx":"60000","unrealizedPnl":"0","leverage":{"value":3},"marginMode":"cross"}}
 ]}"#;
 
 fn secret(seed: u8) -> [u8; 32] {
@@ -80,7 +80,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 /// vault・core・policy・metaを用意し、取引可能な口座とセッションを返す。
@@ -393,7 +395,7 @@ fn partial_close_uses_the_requested_ratio_and_truncates() {
         core,
         caller,
         &session,
-        r#"{"assetPositions":[{"position":{"coin":"ETH","szi":"0.00001","entryPx":"2500","leverage":{"value":3}}}]}"#,
+        r#"{"marginSummary":{"totalMarginUsed":"0"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.00001","entryPx":"2500","unrealizedPnl":"0","leverage":{"value":3}}}]}"#,
     );
     let too_small = close(
         &pic,
@@ -495,7 +497,7 @@ fn a_closed_position_reaches_zero_after_dispatch_and_fills() {
         core,
         caller,
         &session,
-        r#"{"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","leverage":{"value":3},"marginMode":"cross"}}]}"#,
+        r#"{"marginSummary":{"totalMarginUsed":"0"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","unrealizedPnl":"0","leverage":{"value":3},"marginMode":"cross"}}]}"#,
     );
 
     let closed = close(

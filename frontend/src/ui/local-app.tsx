@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react'
+import { Link } from '@tanstack/react-router'
 import { bytesToHex } from '../client/wallet'
 import { variantName } from '../client/result'
 import type { Fill, OrderSummary, Position } from '../client/candid-codec'
@@ -26,6 +27,22 @@ function Workspace({
   publicContent?: boolean
 }) {
   const session = useLocalSession()
+  const data = session.data
+  const agentExpired = Boolean(
+    data?.agent?.current[0]?.expires_at[0] &&
+    data.agent.current[0].expires_at[0] <= BigInt(session.wallNow),
+  )
+  const journalLocked = Boolean(data?.vaultJournal?.[0] || data?.coreJournal?.[0])
+  const stopReasons = [
+    journalLocked &&
+      (data?.vaultJournal?.[1] || data?.coreJournal?.[1]
+        ? '復元した記録の照合待ちです'
+        : '送信ジャーナルの確認待ちです'),
+    !data?.eligibility?.eligible && '受付資格が未登録か期限切れです',
+    (data?.vaultCycles?.new_risk_stopped || data?.coreCycles?.new_risk_stopped) &&
+      'cycles残量または設定を確認してください',
+    agentExpired && 'Agentの承認期限が切れています',
+  ].filter((reason): reason is string => Boolean(reason))
   return (
     <main className="local-workspace">
       <section className="workspace-bar">
@@ -77,6 +94,16 @@ function Workspace({
           {session.data.issues.map((issue) => `${issue.source} (${issue.message})`).join(' / ')}
         </div>
       ) : null}
+      {data && stopReasons.length > 0 && (
+        <details className="warning-banner account-notice">
+          <summary>新規受付停止 · {stopReasons.join(' / ')}</summary>
+          <p>
+            {journalLocked
+              ? '残高と履歴を確認できます。送信はジャーナル照合後に再開します。'
+              : '取消・reduce-only決済・回収・出金は利用できます。'}
+          </p>
+        </details>
+      )}
       {!session.address && !publicContent ? (
         <section className="empty-state">
           <h1>ローカルセッションを開始</h1>
@@ -91,7 +118,7 @@ function Workspace({
 }
 
 function StatusCards() {
-  const { data, age, fresh } = useLocalSession()
+  const { data } = useLocalSession()
   return (
     <div className="status-grid" data-testid="account-balances">
       <article>
@@ -99,20 +126,6 @@ function StatusCards() {
         <strong>{micros(data?.funds.reserve_unallocated)}</strong>
         <small>USDC</small>
       </article>
-      {data?.snapshot && (
-        <>
-          <article>
-            <span>VENUE MARGIN</span>
-            <strong>{micros(data.snapshot.margin_used)}</strong>
-            <small>USDC observed</small>
-          </article>
-          <article>
-            <span>UNREALIZED PNL</span>
-            <strong>{signedMicros(data.snapshot.unrealized_pnl)}</strong>
-            <small>risk reserved {micros(data.snapshot.open_order_risk_reserved)}</small>
-          </article>
-        </>
-      )}
       <article>
         <span>TRADING EQUITY</span>
         <strong>{micros(data?.funds.trading_equity)}</strong>
@@ -123,26 +136,43 @@ function StatusCards() {
         <strong>{micros(data?.funds.withdrawable)}</strong>
         <small>USDC</small>
       </article>
-      <article>
-        <span>FRESHNESS</span>
-        <strong>
-          {data?.snapshot
-            ? `${Number.isFinite(age) ? Math.floor(age) : '—'} ms${fresh ? '' : ' / 更新待ち'}`
-            : '未観測'}
-        </strong>
-        <small>
-          {data?.snapshot
-            ? new Date(Number(data.snapshot.observed_at)).toLocaleTimeString()
-            : 'refresh required'}
-        </small>
-      </article>
     </div>
   )
 }
 
+function TradeOverview() {
+  const { data } = useLocalSession()
+  if (!data) return null
+  return (
+    <section className="trade-overview" aria-label="取引口座の概要" data-testid="trade-overview">
+      <div>
+        <span>取引口座の資産</span>
+        <strong>{micros(data.funds.trading_equity)} USDC</strong>
+      </div>
+      <div>
+        <span>出金可能額</span>
+        <strong>{micros(data.funds.withdrawable)} USDC</strong>
+      </div>
+      <div>
+        <span>建玉</span>
+        <strong>{data.snapshot?.positions.length ?? '—'} 件</strong>
+      </div>
+      <Link to="/funds">資金を管理</Link>
+    </section>
+  )
+}
+
 export function FundsApp() {
-  const { gateway, run: execute, busy, data } = useLocalSession()
+  const { gateway, run: execute, busy, data, wallNow, age, fresh } = useLocalSession()
   const [amount, setAmount] = useState('100')
+  const [eligibilityClaims, setEligibilityClaims] = useState('')
+  const [eligibilitySignature, setEligibilitySignature] = useState('')
+  const newFundsStopped =
+    !data?.eligibility?.eligible ||
+    !data?.vaultCycles ||
+    data.vaultCycles.new_risk_stopped ||
+    !data.vaultJournal ||
+    data.vaultJournal[0]
   const action = (kind: string) => async () => {
     const value = amountMicros(amount)
     if (kind === 'seed') await gateway.seedDeposit(amount)
@@ -157,6 +187,47 @@ export function FundsApp() {
         <div className="two-column">
           <section className="panel action-panel">
             <h1>資金操作</h1>
+            <details className="eligibility-panel" open={!data?.eligibility?.eligible}>
+              <summary>
+                受付資格：{data?.eligibility?.eligible ? '登録済み' : '未登録・期限切れ'}
+              </summary>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void execute(async () => {
+                    setEligibilityClaims(bytesToHex(await gateway.eligibilitySigningClaims()))
+                  })
+                }
+              >
+                署名対象を取得
+              </button>
+              {eligibilityClaims && (
+                <label>
+                  issuerへ渡すCandid（秘密鍵を画面へ入力しない）
+                  <textarea readOnly value={eligibilityClaims} rows={3} />
+                </label>
+              )}
+              <label>
+                issuerが返した署名
+                <input
+                  value={eligibilitySignature}
+                  onChange={(event) => setEligibilitySignature(event.target.value)}
+                  placeholder="0x…"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={busy || !eligibilityClaims || !eligibilitySignature}
+                onClick={() =>
+                  void execute(async () => {
+                    await gateway.registerEligibility(eligibilityClaims, eligibilitySignature)
+                  })
+                }
+              >
+                受付資格を登録
+              </button>
+            </details>
             <p>
               模擬入金 → 取引口座へ配分 → 取引の順に進めます。出金前にはreserveへ回収してください。
             </p>
@@ -171,12 +242,16 @@ export function FundsApp() {
                 />
               </label>
               <div className="action-grid">
-                <button type="button" disabled={busy} onClick={() => void execute(action('seed'))}>
+                <button
+                  type="button"
+                  disabled={busy || newFundsStopped}
+                  onClick={() => void execute(action('seed'))}
+                >
                   LOCAL MOCK 入金seed
                 </button>
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || newFundsStopped}
                   onClick={() => void execute(action('allocate'))}
                 >
                   取引口座へ配分
@@ -198,17 +273,72 @@ export function FundsApp() {
               </div>
             </form>
           </section>
-          <section className="panel">
+          <details
+            className="panel account-details"
+            open={Boolean(
+              data?.funds.unknowns.length ||
+              data?.funds.recovery_fence.length ||
+              data?.vaultCycles?.new_risk_stopped ||
+              data?.coreCycles?.new_risk_stopped ||
+              data?.vaultJournal?.[0] ||
+              data?.coreJournal?.[0] ||
+              (data?.agent?.current[0]?.expires_at[0] &&
+                data.agent.current[0].expires_at[0] <= BigInt(wallNow)),
+            )}
+          >
+            <summary>資金・運用の詳細</summary>
             <h2>資金状態</h2>
             <dl className="details">
+              <dt>使用中の証拠金</dt>
+              <dd>{micros(data?.snapshot?.margin_used)} USDC</dd>
+              <dt>未実現損益</dt>
+              <dd>{signedMicros(data?.snapshot?.unrealized_pnl)} USDC</dd>
+              <dt>注文リスク予約</dt>
+              <dd>{micros(data?.snapshot?.open_order_risk_reserved)} USDC</dd>
+              <dt>口座情報</dt>
+              <dd>
+                {data?.snapshot
+                  ? `${Number.isFinite(age) ? Math.floor(age) : '—'} ms${fresh ? '' : ' / 更新待ち'}`
+                  : '未観測'}
+              </dd>
               <dt>in transit</dt>
               <dd>{micros(data?.funds.in_transit)}</dd>
               <dt>withdrawal reserve</dt>
               <dd>{micros(data?.funds.reserved_for_withdrawal)}</dd>
               <dt>unknown</dt>
               <dd>{data?.funds.unknowns.length ?? 0}</dd>
+              <dt>送信ジャーナル / vault</dt>
+              <dd>
+                {!data?.vaultJournal ? '取得待ち' : data.vaultJournal[0] ? '照合待ち' : '正常'}
+              </dd>
+              <dt>送信ジャーナル / core</dt>
+              <dd>{!data?.coreJournal ? '取得待ち' : data.coreJournal[0] ? '照合待ち' : '正常'}</dd>
+              <dt>回収フェンス</dt>
+              <dd>
+                {data?.funds.recovery_fence.length
+                  ? variantName(data.funds.recovery_fence[0]) === 'Preparing'
+                    ? '回収準備中'
+                    : '照合待ち'
+                  : 'なし'}
+              </dd>
               <dt>revision</dt>
               <dd>{data?.funds.revision.toString() ?? '—'}</dd>
+              <dt>受付資格</dt>
+              <dd>
+                {data?.eligibility?.eligible
+                  ? `有効（規約 ${data.eligibility.terms_version}）`
+                  : '未登録・期限切れ'}
+              </dd>
+              <dt>cycles / vault</dt>
+              <dd>
+                {data?.vaultCycles?.estimated_days[0]?.toString() ?? '不明'} 日・
+                {data?.vaultCycles?.new_risk_stopped ? '新規停止' : '受付可'}
+              </dd>
+              <dt>cycles / core</dt>
+              <dd>
+                {data?.coreCycles?.estimated_days[0]?.toString() ?? '不明'} 日・
+                {data?.coreCycles?.new_risk_stopped ? '新規停止' : '受付可'}
+              </dd>
             </dl>
             <h2>Agent</h2>
             <dl className="details">
@@ -227,7 +357,7 @@ export function FundsApp() {
               <dt>revocation</dt>
               <dd>{data?.agent?.revocation_pending ? '要求中' : 'なし'}</dd>
             </dl>
-          </section>
+          </details>
         </div>
       </div>
     </Workspace>
@@ -250,7 +380,7 @@ export function TradeApp() {
     [side, setSide] = useState<'buy' | 'sell'>('buy')
   const [kind, setKind] = useState<'market' | 'limit'>('market'),
     [quantity, setQuantity] = useState('0.001'),
-    [price, setPrice] = useState('60000')
+    [price, setPrice] = useState('')
   const [leverage, setLeverage] = useState('3')
   const [slippage, setSlippage] = useState('50')
   const activeAgent =
@@ -280,7 +410,7 @@ export function TradeApp() {
     !/^\d+(\.\d+)?$/.test(quantity) || Number(quantity) <= 0 || !Number.isFinite(Number(quantity))
       ? '数量は0より大きい数値で入力してください。'
       : !/^\d+(\.\d+)?$/.test(price) || Number(price) <= 0 || !Number.isFinite(Number(price))
-        ? '価格は0より大きい数値で入力してください。'
+        ? '価格を入力するか、現在の参考価格を取り込んでください。'
         : !/^[1-5]$/.test(leverage)
           ? 'レバレッジは1〜5の整数で入力してください。'
           : kind === 'market' &&
@@ -295,25 +425,55 @@ export function TradeApp() {
             <span className="eyebrow">{market} PERPETUAL</span>
             <strong>{publicMarket.mids[market] ?? '—'}</strong>
           </div>
-          <span className={`state-chip ${publicMarket.connection}`}>
-            市況 ·{' '}
-            {publicMarket.connection === 'live'
-              ? '接続中'
-              : publicMarket.connection === 'reconnecting'
-                ? '再接続中'
-                : '未接続'}
-          </span>
-          {data && (
-            <span className={`state-chip ${fresh ? 'live' : 'warning'}`}>
-              ACCOUNT · {fresh ? 'fresh' : 'stale'}
+          {publicMarket.connection !== 'live' && (
+            <span className={`state-chip ${publicMarket.connection}`}>
+              市況 · {publicMarket.connection === 'reconnecting' ? '再接続中' : '未接続'}
             </span>
           )}
+          {data && !fresh && <span className="state-chip warning">口座情報の更新待ち</span>}
+          {data &&
+            ![data.btcMarket, data.ethMarket].find((item) => item?.market === market)
+              ?.eligible_for_new_risk && (
+              <span className="state-chip warning">
+                市場監視 ·{' '}
+                {[data.btcMarket, data.ethMarket].find((item) => item?.market === market)
+                  ?.reason_code[0] ?? '観測待ち'}
+              </span>
+            )}
         </section>
-        {data && <StatusCards />}
+        <TradeOverview />
         <nav className="trade-shortcuts" aria-label="取引画面内の移動">
           <a href="#order-ticket">注文入力</a>
           <a href="#market-chart">チャート</a>
+          <a href="#positions">建玉</a>
           <a href="#order-status">注文状態</a>
+        </nav>
+        <nav className="mobile-exit-actions" aria-label="退出操作">
+          <button
+            disabled={
+              busy ||
+              !data?.orders?.items.some((order) =>
+                ['Open', 'PartiallyFilled'].includes(variantName(order.state)),
+              )
+            }
+            onClick={() =>
+              window.confirm(
+                '未終端注文をすべて取り消します。保護用SL/TPも対象です。続行しますか？',
+              ) && void execute(() => gateway.cancelAll())
+            }
+          >
+            全取消
+          </button>
+          <button
+            disabled={busy || !data?.snapshot?.positions.length}
+            onClick={() =>
+              window.confirm('すべての建玉をreduce-onlyで決済します。続行しますか？') &&
+              void execute(() => gateway.closeAll())
+            }
+          >
+            全決済
+          </button>
+          <Link to="/funds">回収・出金</Link>
         </nav>
         <div className="trading-grid">
           <section className="panel chart-panel" id="market-chart">
@@ -329,41 +489,6 @@ export function TradeApp() {
                 <p>表示されない場合は、ローカルmockの起動と接続設定を確認してください。</p>
               </div>
             )}
-          </section>
-          <section className="panel market-tape">
-            <h2>板</h2>
-            <div className="book-labels">
-              <span>価格 (USDC)</span>
-              <span>数量 ({market})</span>
-            </div>
-            {!book[0].length && !book[1].length && <p>板データを待っています。</p>}
-            <div className="book-side asks">
-              {book[1].map((level) => (
-                <div key={level.px}>
-                  <span>{level.px}</span>
-                  <span>{level.sz}</span>
-                </div>
-              ))}
-            </div>
-            <div className="mid-price">{publicMarket.mids[market] ?? '—'}</div>
-            <div className="book-side bids">
-              {book[0].map((level) => (
-                <div key={level.px}>
-                  <span>{level.px}</span>
-                  <span>{level.sz}</span>
-                </div>
-              ))}
-            </div>
-            <h2>公開約定</h2>
-            {!trades.length && <p>約定データはまだありません。</p>}
-            <div className="trade-tape">
-              {trades.map((trade) => (
-                <div key={trade.tid} className={trade.side === 'B' ? 'positive' : 'negative'}>
-                  <span>{trade.px}</span>
-                  <span>{trade.sz}</span>
-                </div>
-              ))}
-            </div>
           </section>
           <section className="panel action-panel order-ticket" id="order-ticket">
             <h1>注文</h1>
@@ -487,14 +612,50 @@ export function TradeApp() {
               Marketはスリッページ上限付きIOC。倍率は安全性の推奨ではありません。
             </p>
           </section>
+          <details className="panel market-tape">
+            <summary>板・公開約定を見る</summary>
+            <h2>板</h2>
+            <div className="book-labels">
+              <span>価格 (USDC)</span>
+              <span>数量 ({market})</span>
+            </div>
+            {!book[0].length && !book[1].length && <p>板データを待っています。</p>}
+            <div className="book-side asks">
+              {book[1].map((level) => (
+                <div key={level.px}>
+                  <span>{level.px}</span>
+                  <span>{level.sz}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mid-price">{publicMarket.mids[market] ?? '—'}</div>
+            <div className="book-side bids">
+              {book[0].map((level) => (
+                <div key={level.px}>
+                  <span>{level.px}</span>
+                  <span>{level.sz}</span>
+                </div>
+              ))}
+            </div>
+            <h2>公開約定</h2>
+            {!trades.length && <p>約定データはまだありません。</p>}
+            <div className="trade-tape">
+              {trades.map((trade) => (
+                <div key={trade.tid} className={trade.side === 'B' ? 'positive' : 'negative'}>
+                  <span>{trade.px}</span>
+                  <span>{trade.sz}</span>
+                </div>
+              ))}
+            </div>
+          </details>
         </div>
-        {data?.snapshot?.positions.length ? (
-          <section className="panel table-panel">
+        {data && (
+          <section className="panel table-panel" id="positions">
             <div className="panel-title">
               <h2>建玉</h2>
               <button
                 className="danger"
-                disabled={busy}
+                disabled={busy || !data.snapshot?.positions.length}
                 onClick={() =>
                   window.confirm('すべての建玉をreduce-onlyで決済します。続行しますか？') &&
                   void execute(() => gateway.closeAll())
@@ -503,31 +664,35 @@ export function TradeApp() {
                 全決済
               </button>
             </div>
-            <table>
-              <thead>
-                <tr>
-                  <th>市場</th>
-                  <th>数量</th>
-                  <th>Entry</th>
-                  <th>PnL</th>
-                  <th>清算価格</th>
-                  <th>倍率</th>
-                  <th>保護 / 決済</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.snapshot.positions.map((position) => (
-                  <PositionRow
-                    key={position.market}
-                    position={position}
-                    busy={busy}
-                    run={execute}
-                  />
-                ))}
-              </tbody>
-            </table>
+            {data.snapshot?.positions.length ? (
+              <table className="responsive-table">
+                <thead>
+                  <tr>
+                    <th>市場</th>
+                    <th>数量</th>
+                    <th>Entry</th>
+                    <th>PnL</th>
+                    <th>清算価格</th>
+                    <th>倍率</th>
+                    <th>保護 / 決済</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.snapshot.positions.map((position) => (
+                    <PositionRow
+                      key={position.market}
+                      position={position}
+                      busy={busy}
+                      run={execute}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="table-empty">建玉はありません。約定後にここへ表示します。</p>
+            )}
           </section>
-        ) : null}
+        )}
         <section className="panel table-panel" id="order-status">
           <div className="panel-title">
             <h2>注文状態</h2>
@@ -545,17 +710,15 @@ export function TradeApp() {
                 ) && void execute(() => gateway.cancelAll())
               }
             >
-              Cancel All
+              全取消
             </button>
           </div>
-          <table>
+          <table className="responsive-table">
             <thead>
               <tr>
                 <th>市場</th>
                 <th>種別</th>
                 <th>状態</th>
-                <th>preflight</th>
-                <th>dispatch</th>
                 <th>約定 / 注文数量</th>
                 <th>操作</th>
               </tr>
@@ -563,9 +726,9 @@ export function TradeApp() {
             <tbody>
               {optimistic.map((order) => (
                 <tr key={bytesToHex(order.id)} className="pending-row">
-                  <td>{order.market}</td>
-                  <td>—</td>
-                  <td>
+                  <td data-label="市場">{order.market}</td>
+                  <td data-label="種別">—</td>
+                  <td data-label="状態">
                     {
                       {
                         sending: '送信中',
@@ -576,27 +739,32 @@ export function TradeApp() {
                     }
                     {order.message && <small>{order.message}</small>}
                   </td>
-                  <td>—</td>
-                  <td>—</td>
-                  <td>—</td>
-                  <td>{order.state === 'rejected' ? '入力・エラー内容を確認' : '照合待ち'}</td>
+                  <td data-label="約定 / 注文数量">—</td>
+                  <td data-label="操作">
+                    {order.state === 'rejected' ? '入力・エラー内容を確認' : '照合待ち'}
+                  </td>
                 </tr>
               ))}
               {orders.map((order) => (
                 <tr key={bytesToHex(order.order_id)}>
-                  <td>{order.market}</td>
-                  <td>
+                  <td data-label="市場">{order.market}</td>
+                  <td data-label="種別">
                     {order.trigger[0]
                       ? `positionTpsl/${variantName(order.trigger[0].kind)}`
                       : order.kind}
                   </td>
-                  <td>{variantName(order.state)}</td>
-                  <td>{variantName(order.preflight_state)}</td>
-                  <td>{variantName(order.dispatch_state)}</td>
-                  <td>
+                  <td data-label="状態">
+                    {variantName(order.state)}
+                    <details className="order-processing-details">
+                      <summary>処理詳細</summary>
+                      <span>事前確認：{variantName(order.preflight_state)}</span>
+                      <span>送信：{variantName(order.dispatch_state)}</span>
+                    </details>
+                  </td>
+                  <td data-label="約定 / 注文数量">
                     {order.filled_quantity} / {order.quantity}
                   </td>
-                  <td>
+                  <td data-label="操作">
                     <button
                       disabled={
                         busy || !['Open', 'PartiallyFilled'].includes(variantName(order.state))
@@ -642,17 +810,17 @@ function PositionRow({
   }
   return (
     <tr>
-      <td>{position.market}</td>
-      <td>{position.size}</td>
-      <td>{position.entry_price}</td>
-      <td className={position.unrealized_pnl >= 0n ? 'positive' : 'negative'}>
+      <td data-label="市場">{position.market}</td>
+      <td data-label="数量">{position.size}</td>
+      <td data-label="Entry">{position.entry_price}</td>
+      <td data-label="PnL" className={position.unrealized_pnl >= 0n ? 'positive' : 'negative'}>
         {signedMicros(position.unrealized_pnl)}
       </td>
-      <td>{position.liquidation_price[0] ?? '—'}</td>
-      <td>
+      <td data-label="清算価格">{position.liquidation_price[0] ?? '—'}</td>
+      <td data-label="倍率">
         {position.leverage}x {position.margin_mode}
       </td>
-      <td>
+      <td data-label="保護 / 決済">
         <div className="position-actions">
           <input
             aria-label={`${position.market} Stop Loss`}
@@ -721,6 +889,16 @@ function SessionHistory() {
     <Workspace>
       <div data-testid="account-panel" className="content-shell">
         <StatusCards />
+        {data?.funds.recovery_fence.length ? (
+          <section className="panel unknown-panel">
+            <h2>
+              {variantName(data.funds.recovery_fence[0]) === 'Preparing'
+                ? '回収準備中'
+                : '回収の照合待ち'}
+            </h2>
+            <p>この口座の新規注文は停止中です。取消とreduce-only決済は利用できます。</p>
+          </section>
+        ) : null}
         {data?.funds.unknowns.length ||
         orders.some((order) => variantName(order.state) === 'Unknown') ? (
           <section className="panel unknown-panel">

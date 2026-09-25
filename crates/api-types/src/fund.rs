@@ -117,6 +117,13 @@ pub struct FundStatus {
     pub observed_at: Timestamp,
     pub revision: u64,
     pub unknowns: Vec<UnresolvedAction>,
+    pub recovery_fence: Option<RecoveryFenceStatus>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryFenceStatus {
+    Preparing,
+    Reconciling,
 }
 
 /// 資金履歴の1件。

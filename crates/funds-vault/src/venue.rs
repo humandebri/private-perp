@@ -49,46 +49,26 @@ pub struct UsdSend {
 impl UsdSend {
     /// EIP-712の署名対象ダイジェスト（master鍵で署名する）。
     pub fn digest(&self) -> Result<[u8; 32], ErrorCode> {
-        let chain = chain_values()?;
-        let values = vec![
-            user_signed::TypedValue::String(chain.chain_name.clone()),
-            user_signed::TypedValue::String(self.destination.clone()),
-            user_signed::TypedValue::String(amount_text(self.amount_micros)),
-            user_signed::TypedValue::Uint64(self.time),
-        ];
-        user_signed::digest(
-            chain.user_signed_chain_id,
-            user_signed::USD_SEND_PRIMARY_TYPE,
-            user_signed::USD_SEND_FIELDS,
-            &values,
-        )
-        .map_err(|error| ErrorCode::Internal {
-            code: format!("usdSend digest: {error}"),
-        })
+        let network: hl_types::Network = crate::environment::resolved()?.network.into();
+        hl_sign::usd_send::UsdSend {
+            destination: &self.destination,
+            amount_micros: self.amount_micros,
+            time: self.time,
+        }
+        .digest(network)
+        .map_err(|code| ErrorCode::Internal { code })
     }
 
     /// 送信するJSON本文（action・signature・nonce）。
     pub fn body(&self, signature: &hl_sign::Signature) -> Result<Vec<u8>, ErrorCode> {
-        let chain = chain_values()?;
-        let body = serde_json::json!({
-            "action": {
-                "type": "usdSend",
-                "signatureChainId": chain.signature_chain_id,
-                "hyperliquidChain": chain.chain_name,
-                "destination": self.destination,
-                "amount": amount_text(self.amount_micros),
-                "time": self.time,
-            },
-            "nonce": self.time,
-            "signature": {
-                "r": format!("0x{}", hex::encode(signature.r)),
-                "s": format!("0x{}", hex::encode(signature.s)),
-                "v": signature.v,
-            },
-        });
-        serde_json::to_vec(&body).map_err(|error| ErrorCode::Internal {
-            code: format!("usdSend body: {error}"),
-        })
+        let network: hl_types::Network = crate::environment::resolved()?.network.into();
+        hl_sign::usd_send::UsdSend {
+            destination: &self.destination,
+            amount_micros: self.amount_micros,
+            time: self.time,
+        }
+        .body(network, signature)
+        .map_err(|code| ErrorCode::Internal { code })
     }
 }
 
@@ -150,7 +130,11 @@ impl ApproveAgent {
 pub async fn post_approve_agent(
     payload: &ApproveAgent,
     signature: &hl_sign::Signature,
+    permit: &crate::rest_budget::Permit,
 ) -> Result<(ExchangeOutcome, Vec<u8>), ErrorCode> {
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
     let body = payload.body(signature)?;
     let exchange_url = crate::environment::resolved()?.exchange_url;
     let response = HttpRequest::new(&exchange_url)
@@ -179,7 +163,7 @@ pub async fn post_approve_agent(
 
 /// マイクロUSDCをHLへ渡す十進文字列にする（指数表記を使わない）。
 pub fn amount_text(micros: u64) -> String {
-    hl_types::UsdcMicros::from_micros(micros).to_decimal_string()
+    hl_sign::usd_send::amount_text(micros)
 }
 
 /// 応答の分類。
@@ -195,7 +179,9 @@ pub enum ExchangeOutcome {
 pub fn parse_exchange_response(body: &[u8]) -> Option<ExchangeOutcome> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     match value.get("status")?.as_str()? {
-        "ok" => Some(ExchangeOutcome::Accepted),
+        "ok" if value.get("response")?.get("type")?.as_str()? == "default" => {
+            Some(ExchangeOutcome::Accepted)
+        }
         "err" => Some(ExchangeOutcome::Rejected {
             message: value
                 .get("response")
@@ -211,7 +197,11 @@ pub fn parse_exchange_response(body: &[u8]) -> Option<ExchangeOutcome> {
 pub async fn post_usd_send(
     payload: &UsdSend,
     signature: &hl_sign::Signature,
+    permit: &crate::rest_budget::Permit,
 ) -> Result<(ExchangeOutcome, Vec<u8>), ErrorCode> {
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
     let body = payload.body(signature)?;
     let exchange_url = crate::environment::resolved()?.exchange_url;
     let response = HttpRequest::new(&exchange_url)
@@ -228,6 +218,12 @@ pub async fn post_usd_send(
         .map_err(|error| ErrorCode::UpstreamUnavailable {
             venue: error.to_string(),
         })?;
+
+    if response.status.to_string() != "200" {
+        return Err(ErrorCode::UpstreamUnavailable {
+            venue: format!("exchange HTTP {}", response.status),
+        });
+    }
 
     let outcome = parse_exchange_response(&response.body);
     match outcome {
@@ -285,5 +281,9 @@ mod tests {
         // 解釈できない応答は「未実行」と扱わない（呼び出し側がunknownへ進める）。
         assert_eq!(parse_exchange_response(b"not json"), None);
         assert_eq!(parse_exchange_response(br#"{"unexpected":true}"#), None);
+        assert_eq!(
+            parse_exchange_response(br#"{"status":"ok","response":{"type":"other"}}"#),
+            None
+        );
     }
 }

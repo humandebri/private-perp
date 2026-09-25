@@ -10,6 +10,7 @@
 //! 解決する（`docs/phase-2/README.md`、`docs/phase-0/environments.md`のE-1/E-2）。
 
 use api_types::error::ErrorCode;
+use api_types::operations::BudgetClass;
 use ic_cdk_management_canister::{
     HttpHeader, HttpMethod, HttpRequest, HttpRequestResult, transform_context_from_query,
 };
@@ -33,7 +34,13 @@ pub enum ExchangeOutcome {
 }
 
 /// `/exchange`へ署名済みactionを送る（非replicated）。受理時は取引所のoidを返す。
-pub async fn post_exchange(body: &[u8]) -> Result<ExchangeOutcome, ErrorCode> {
+pub async fn post_exchange(
+    body: &[u8],
+    permit: &crate::rest_budget::Permit,
+) -> Result<ExchangeOutcome, ErrorCode> {
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
     let request: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| ErrorCode::UpstreamRejected {
             code: "invalid exchange request".to_string(),
@@ -154,6 +161,15 @@ pub async fn clearinghouse_state(user: &str) -> Result<String, ErrorCode> {
     .await
 }
 
+/// 回収直前にcore未登録の注文も含めて確認する。
+pub async fn open_orders(user: &str) -> Result<String, ErrorCode> {
+    fetch_info(
+        serde_json::json!({ "type": "openOrders", "user": user }),
+        MAX_STATE_RESPONSE_BYTES,
+    )
+    .await
+}
+
 /// 注文の状態（orderStatus）を取得する（replicated＋変換）。
 pub async fn order_status(user: &str, oid: u64) -> Result<String, ErrorCode> {
     fetch_info(
@@ -163,11 +179,46 @@ pub async fn order_status(user: &str, oid: u64) -> Result<String, ErrorCode> {
     .await
 }
 
+pub async fn meta_and_asset_ctxs() -> Result<String, ErrorCode> {
+    fetch_info(
+        serde_json::json!({ "type": "metaAndAssetCtxs" }),
+        128 * 1024,
+    )
+    .await
+}
+
+pub async fn l2_book(coin: &str) -> Result<String, ErrorCode> {
+    fetch_info(
+        serde_json::json!({ "type": "l2Book", "coin": coin }),
+        32 * 1024,
+    )
+    .await
+}
+
 /// `/info`へPOSTし、変換後の本文を返す。
 async fn fetch_info(
     query: serde_json::Value,
     max_response_bytes: u64,
 ) -> Result<String, ErrorCode> {
+    // userFills can return 2000 rows: 20 base + at most 100 row units.
+    // There is no refund when fewer rows are returned.
+    let weight = match query.get("type").and_then(|value| value.as_str()) {
+        Some("clearinghouseState" | "orderStatus") => 2,
+        Some("userFills") => 120,
+        Some("openOrders") => 20,
+        Some("metaAndAssetCtxs") => 20,
+        Some("l2Book") => 2,
+        _ => return Err(ErrorCode::PolicyUnavailable),
+    };
+    let transform = match query.get("type").and_then(|value| value.as_str()) {
+        Some("openOrders") => "transform_open_orders",
+        Some("metaAndAssetCtxs" | "l2Book") => "transform_market_info",
+        _ => "transform_info",
+    };
+    let permit = crate::rest_budget::acquire(BudgetClass::Reconcile, weight).await?;
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
     let info_url = crate::environment::resolved()?.info_url;
     let response = HttpRequest::new(&info_url)
         .with_method(HttpMethod::POST)
@@ -178,7 +229,7 @@ async fn fetch_info(
         .with_body(query.to_string().into_bytes())
         .with_max_response_bytes(max_response_bytes)
         .with_transform(transform_context_from_query(
-            "transform_info".to_string(),
+            transform.to_string(),
             Vec::new(),
         ))
         .send()
@@ -186,10 +237,51 @@ async fn fetch_info(
         .map_err(|error| ErrorCode::UpstreamUnavailable {
             venue: error.to_string(),
         })?;
+    if response.status.to_string() != "200" {
+        return Err(ErrorCode::UpstreamUnavailable {
+            venue: format!("info HTTP {}", response.status),
+        });
+    }
     String::from_utf8(response.body).map_err(|_| ErrorCode::UpstreamRejected {
         code: "non-utf8 info response".to_string(),
         retryable: false,
     })
+}
+
+#[ic_cdk::query]
+fn transform_market_info(
+    args: ic_cdk_management_canister::TransformArgs,
+) -> ic_cdk_management_canister::HttpRequestResult {
+    let body = serde_json::from_slice::<serde_json::Value>(&args.response.body)
+        .map(|value| value.to_string().into_bytes())
+        .unwrap_or_default();
+    HttpRequestResult {
+        status: args.response.status,
+        headers: Vec::new(),
+        body,
+    }
+}
+
+#[ic_cdk::query]
+fn transform_open_orders(
+    args: ic_cdk_management_canister::TransformArgs,
+) -> ic_cdk_management_canister::HttpRequestResult {
+    let body = serde_json::from_slice::<serde_json::Value>(&args.response.body)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .map(|orders| {
+            serde_json::Value::Array(
+                orders.iter().map(|order| {
+                    serde_json::json!({"oid": order.get("oid").cloned().unwrap_or(serde_json::Value::Null)})
+                }).collect()
+            ).to_string().into_bytes()
+        })
+        .unwrap_or_default();
+    HttpRequestResult {
+        status: args.response.status,
+        headers: Vec::new(),
+        body,
+    }
 }
 
 /// 変換関数：`/info`の応答から照合に使う要素だけを決定論的に残す。
@@ -245,6 +337,12 @@ fn canonical_fill(entry: &serde_json::Value) -> serde_json::Value {
 
 /// `clearinghouseState`から建玉の要素だけを残す。
 fn canonical_state(fields: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    if !fields
+        .get("assetPositions")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        return serde_json::Value::Null;
+    }
     let positions: Vec<serde_json::Value> = fields
         .get("assetPositions")
         .and_then(|value| value.as_array())

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   connectWallet,
   hexToBytes,
+  signPersonalBytes,
   signTypedData,
   withdrawalTypedData,
 } from '../../src/client/wallet'
@@ -45,5 +46,21 @@ describe('EIP-1193 wallet', () => {
       asset: 'usdc',
       destination: `0x${'11'.repeat(20)}`,
     })
+  })
+
+  it('signs the exact 32-byte zero-fee consent digest', async () => {
+    const calls: Array<{ method: string; params?: unknown[] }> = []
+    const provider = {
+      request: async (args: { method: string; params?: unknown[] }) => {
+        calls.push(args)
+        return `0x${'33'.repeat(65)}`
+      },
+    }
+    const address = `0x${'11'.repeat(20)}`
+    const digest = hexToBytes(`0x${'22'.repeat(32)}`)
+    expect(await signPersonalBytes(address, digest, provider)).toEqual(
+      hexToBytes(`0x${'33'.repeat(65)}`),
+    )
+    expect(calls).toEqual([{ method: 'personal_sign', params: [`0x${'22'.repeat(32)}`, address] }])
   })
 })

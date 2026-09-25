@@ -76,7 +76,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 fn order_args(account_id: &Blob, session: &SessionHandle) -> SubmitOrderArgs {

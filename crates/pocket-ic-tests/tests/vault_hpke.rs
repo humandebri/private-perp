@@ -52,3 +52,32 @@ fn hpke_keys_rotate_and_only_the_public_key_is_served() {
         "{denied:?}"
     );
 }
+
+#[test]
+fn old_plaintext_personal_write_entrypoints_are_closed() {
+    let candid = include_str!("../../../candid/funds_vault.did");
+    let pic = pic();
+    let controller = principal(120);
+    let vault = deploy_vault(&pic, controller);
+    for method in [
+        "revoke_session",
+        "approve_agent_generation",
+        "request_allocation",
+        "request_withdrawal",
+        "provision_reserve_account",
+        "prepare_trading_account",
+        "request_recovery",
+    ] {
+        assert!(
+            !candid
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("{method} :"))),
+            "old plaintext method {method} remains in public Candid"
+        );
+        let result = pic.update_call(vault, principal(121), method, vec![]);
+        assert!(
+            result.is_err(),
+            "old plaintext method {method} is still exposed: {result:?}"
+        );
+    }
+}

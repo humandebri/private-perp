@@ -13,8 +13,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, deploy, fund_trading_account, pic, principal,
-    update, update_args,
+    FUNDS_VAULT_WASM, POLICY_WASM, TRADING_CORE_WASM, configure_core_admission, deploy,
+    fund_trading_account, pic, principal, update, update_args,
 };
 use pocket_ic_tests::{observe_empty_account, trading_account_id};
 
@@ -75,7 +75,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 fn order_args(
@@ -128,6 +130,9 @@ fn a_stopped_policy_blocks_new_orders() {
         update(&pic, core, controller, "set_vault_principal", vault).expect("call");
     set.expect("set_vault_principal");
     let set: Result<(), ErrorCode> =
+        update(&pic, vault, controller, "set_core_principal", core).unwrap();
+    set.unwrap();
+    let set: Result<(), ErrorCode> =
         update(&pic, core, controller, "set_policy_principal", policy).expect("call");
     set.expect("set_policy_principal");
     let operator: Result<(), ErrorCode> =
@@ -153,6 +158,28 @@ fn a_stopped_policy_blocks_new_orders() {
     let armed: Result<(), ErrorCode> =
         update(&pic, policy, controller, "clear_emergency_stop", ()).expect("call");
     armed.expect("armed");
+    let registered: Result<(), ErrorCode> = update_args(
+        &pic,
+        policy,
+        controller,
+        "register_budget_worker",
+        ("core".to_string(), core),
+    )
+    .unwrap();
+    registered.unwrap();
+    let configured: Result<(), ErrorCode> = update(
+        &pic,
+        policy,
+        controller,
+        "configure_rest_budget",
+        api_types::operations::RestBudgetConfig {
+            capacity: 1200,
+            exit_reserve: 300,
+        },
+    )
+    .unwrap();
+    configured.unwrap();
+    configure_core_admission(&pic, core, controller);
 
     let meta: Result<(), ErrorCode> = update_args(
         &pic,

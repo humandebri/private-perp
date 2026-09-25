@@ -11,6 +11,7 @@ use api_types::fund::{
     AllocationRequest, Destination, FundRequestAccepted, FundRequestState, FundStatus,
     WithdrawalRequest,
 };
+use api_types::journal::{JournalHead, JournalRecord, RecoveryPayload, RecoveryRecord};
 use api_types::{AccountKind, AssetId, Blob, Network};
 use candid::Principal;
 use hl_sign::private_perp;
@@ -19,12 +20,55 @@ use pocket_ic::PocketIc;
 use pocket_ic::common::rest::{CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse};
 use pocket_ic_tests::{
     FUNDS_VAULT_WASM, call_with_mocked_outcall, call_with_mocked_outcall_captured, deploy,
-    deploy_default, pic, principal, update, update_args,
+    deploy_default, pic, principal, query, update, update_args,
 };
 use std::time::Duration;
 
 const ORIGIN: &str = "https://app.example.test";
 const ACCEPTED: &[u8] = br#"{"status":"ok","response":{"type":"default"}}"#;
+
+#[test]
+fn budget_denial_before_post_retries_without_losing_the_action() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = principal(240);
+    let policy: Option<Principal> =
+        query(&pic, vault, controller, "get_policy_principal", ()).expect("policy query");
+    let policy = policy.expect("policy configured");
+    let role: Result<(), ErrorCode> =
+        update(&pic, policy, controller, "set_operator", controller).expect("call");
+    role.expect("set_operator");
+    let pause: Result<(), ErrorCode> =
+        update(&pic, policy, controller, "pause_for_recovery", ()).expect("call");
+    pause.expect("pause_for_recovery");
+
+    let caller = principal(48);
+    let session = open_session(&pic, vault, caller, &secret(148));
+    credit(&pic, vault, caller, &session, 1_000_000, 48);
+    allocate(&pic, vault, caller, &session, b"budget-denied", 400_000).expect("accepted");
+    let denied: Result<u32, ErrorCode> =
+        update(&pic, vault, caller, "test_sweep_now", ()).expect("call");
+    assert!(denied.is_err(), "policy denial must prevent an HTTP POST");
+
+    let clear: Result<(), ErrorCode> =
+        update(&pic, policy, controller, "clear_recovery_pause", ()).expect("call");
+    clear.expect("clear_recovery_pause");
+    pic.advance_time(Duration::from_secs(31));
+    pic.tick();
+    let sent: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("call");
+    assert_eq!(sent.expect("sweep"), 1);
+    let again: Result<u32, ErrorCode> =
+        update(&pic, vault, caller, "test_sweep_now", ()).expect("call");
+    assert_eq!(again.expect("second sweep"), 0);
+}
 
 fn secret(seed: u8) -> [u8; 32] {
     let mut bytes = [0u8; 32];
@@ -80,7 +124,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 fn credit(
@@ -171,6 +217,367 @@ fn a_successful_allocation_moves_funds_to_in_transit() {
         after.withdrawable, 600_000,
         "予約は消費され、二重に拘束されない"
     );
+}
+
+#[test]
+fn allocation_acceptance_replays_from_snapshot_before_request() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(242);
+    let session = open_session(&pic, vault, caller, &secret(152));
+    credit(&pic, vault, caller, &session, 1_000_000, 52);
+    let reserve: Result<Vec<u8>, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .expect("reserve account");
+    reserve.expect("reserve provisioned");
+    let trading: Result<Vec<u8>, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone())
+            .expect("trading account");
+    trading.expect("trading provisioned");
+    let controller = pic.get_controllers(vault)[0];
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).expect("guard query");
+    let guard = guard.expect("guard result").expect("configured guard");
+    let before_request = pic
+        .take_canister_snapshot(vault, Some(controller), None)
+        .expect("snapshot before allocation acceptance");
+
+    allocate(
+        &pic,
+        vault,
+        caller,
+        &session,
+        b"replay-accepted-allocation",
+        400_000,
+    )
+    .expect("allocation accepted");
+    let accepted = status(&pic, vault, caller, &session);
+    assert_eq!(accepted.reserve_unallocated, 1_000_000);
+    assert_eq!(accepted.withdrawable, 600_000);
+
+    pic.load_canister_snapshot(vault, Some(controller), before_request.id)
+        .expect("restore before allocation acceptance");
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, guard, principal(239), "resume_journal", vault).expect("guard call");
+    assert!(resumed.is_err(), "external validation is still required");
+    let restored = status(&pic, vault, caller, &session);
+    assert_eq!(restored.reserve_unallocated, 1_000_000);
+    assert_eq!(restored.withdrawable, 600_000);
+    let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("restored events");
+    assert_eq!(
+        events.expect("events").items[0].state,
+        FundRequestState::Reserved
+    );
+    let pending_validation: Result<bool, ErrorCode> =
+        query(&pic, vault, controller, "recovery_replay_pending", ()).expect("pending query");
+    assert!(pending_validation.expect("pending validation"));
+    let send_status: Result<(bool, bool), ErrorCode> =
+        query(&pic, vault, caller, "get_journal_send_status", ()).expect("send status query");
+    assert_eq!(send_status.expect("send status"), (true, true));
+    let (_, captured): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("locked sweep call");
+    assert!(
+        captured.is_none(),
+        "replayed acceptance cannot start a POST"
+    );
+}
+
+#[test]
+fn allocation_reservation_replays_when_send_intent_is_ahead_of_backup() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(240);
+    let session = open_session(&pic, vault, caller, &secret(150));
+    credit(&pic, vault, caller, &session, 1_000_000, 50);
+    let reserve: Result<Vec<u8>, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .expect("reserve account");
+    reserve.expect("reserve provisioned");
+    let trading: Result<Vec<u8>, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone())
+            .expect("trading account");
+    trading.expect("trading provisioned");
+    let controller = pic.get_controllers(vault)[0];
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).expect("guard query");
+    let guard = guard.expect("guard result").expect("configured guard");
+    let before_request = pic
+        .take_canister_snapshot(vault, Some(controller), None)
+        .expect("snapshot before allocation acceptance");
+
+    allocate(
+        &pic,
+        vault,
+        caller,
+        &session,
+        b"replay-post-allocation",
+        400_000,
+    )
+    .expect("allocation accepted");
+    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("allocation sweep");
+    assert_eq!(swept.expect("allocation sent"), 1);
+    assert_eq!(status(&pic, vault, caller, &session).in_transit, 400_000);
+
+    pic.load_canister_snapshot(vault, Some(controller), before_request.id)
+        .expect("restore before allocation and POST");
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, guard, principal(239), "resume_journal", vault).expect("guard call");
+    assert!(
+        resumed.is_err(),
+        "the staged POST must not authorize sending"
+    );
+    let restored = status(&pic, vault, caller, &session);
+    assert_eq!(restored.reserve_unallocated, 1_000_000);
+    assert_eq!(restored.withdrawable, 600_000, "hold must be replayed");
+    assert_eq!(restored.in_transit, 0, "POST result is not yet proven");
+    let pending: Result<bool, ErrorCode> =
+        query(&pic, vault, controller, "recovery_replay_pending", ()).expect("pending query");
+    assert!(pending.expect("pending validation"));
+    let (_, captured): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("locked sweep call");
+    assert!(captured.is_none(), "restored action must not be resent");
+}
+
+#[test]
+fn allocation_result_replays_from_snapshot_taken_before_http_reply() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(241);
+    let session = open_session(&pic, vault, caller, &secret(151));
+    credit(&pic, vault, caller, &session, 1_000_000, 51);
+    allocate(&pic, vault, caller, &session, b"replay-allocation", 400_000).expect("accepted");
+    let controller = pic.get_controllers(vault)[0];
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).unwrap();
+    let guard = guard.unwrap().expect("configured recovery guard");
+
+    let message_id = pic
+        .submit_call(
+            vault,
+            caller,
+            "test_sweep_now",
+            candid::encode_one(()).unwrap(),
+        )
+        .expect("submit sweep");
+    let mut pending = None;
+    for _ in 0..50 {
+        pic.tick();
+        if let Some(request) = pic.get_canister_http().into_iter().next() {
+            pending = Some(request);
+            break;
+        }
+    }
+    let pending = pending.expect("usdSend outcall");
+    assert!(pending.url.contains("/exchange"));
+    let before_reply = pic
+        .take_canister_snapshot(vault, Some(controller), None)
+        .expect("snapshot after durable dispatch, before venue reply");
+    pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: pending.subnet_id,
+        request_id: pending.request_id,
+        response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+            status: 200,
+            headers: Vec::new(),
+            body: ACCEPTED.to_vec(),
+        }),
+        additional_responses: Vec::new(),
+    });
+    let reply = pic.await_call(message_id).expect("sweep reply");
+    let swept: Result<u32, ErrorCode> = candid::decode_one(&reply).expect("decode sweep");
+    assert_eq!(swept.expect("dispatched"), 1);
+    assert_eq!(status(&pic, vault, caller, &session).in_transit, 400_000);
+
+    pic.load_canister_snapshot(vault, Some(controller), before_reply.id)
+        .expect("restore before result");
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, guard, principal(239), "resume_journal", vault).unwrap();
+    assert!(resumed.is_err(), "external validation is still required");
+    let restored = status(&pic, vault, caller, &session);
+    assert_eq!(restored.in_transit, 400_000);
+    assert_eq!(restored.reserve_unallocated, 600_000);
+    let pending_validation: Result<bool, ErrorCode> =
+        query(&pic, vault, controller, "recovery_replay_pending", ()).unwrap();
+    assert!(pending_validation.unwrap());
+}
+
+#[test]
+fn journal_outage_after_allocation_post_keeps_reservation_for_reconciliation() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = pic.get_controllers(vault)[0];
+    let journal: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_send_journal", ()).expect("journal query");
+    let journal = journal.expect("configured journal").expect("principal");
+    let caller = principal(244);
+    let session = open_session(&pic, vault, caller, &secret(154));
+    credit(&pic, vault, caller, &session, 1_000_000, 54);
+    allocate(
+        &pic,
+        vault,
+        caller,
+        &session,
+        b"result-journal-outage",
+        400_000,
+    )
+    .expect("accepted");
+
+    let message_id = pic
+        .submit_call(
+            vault,
+            caller,
+            "test_sweep_now",
+            candid::encode_one(()).unwrap(),
+        )
+        .expect("submit sweep");
+    let pending = (0..50)
+        .find_map(|_| {
+            pic.tick();
+            pic.get_canister_http().into_iter().next()
+        })
+        .expect("exchange POST");
+    assert!(pending.url.ends_with("/exchange"));
+    pic.stop_canister(journal, Some(controller))
+        .expect("stop journal after POST");
+    pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: pending.subnet_id,
+        request_id: pending.request_id,
+        response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+            status: 200,
+            headers: Vec::new(),
+            body: ACCEPTED.to_vec(),
+        }),
+        additional_responses: Vec::new(),
+    });
+    let reply = pic.await_call(message_id).expect("sweep reply");
+    let swept: Result<u32, ErrorCode> = candid::decode_one(&reply).expect("decode sweep");
+    assert_eq!(swept.expect("unknown is persisted"), 1);
+    let funds = status(&pic, vault, caller, &session);
+    assert_eq!(funds.in_transit, 0);
+    assert_eq!(funds.withdrawable, 600_000);
+    let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("events call");
+    assert_eq!(
+        events.expect("events").items[0].state,
+        FundRequestState::Unknown
+    );
+}
+
+#[test]
+fn committed_v2_receipt_blocks_post_if_independent_journal_rolls_back() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = pic.get_controllers(vault)[0];
+    let configured: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_send_journal", ()).expect("journal configured");
+    let journal = configured.expect("journal principal").expect("configured");
+    let empty_journal = pic
+        .take_canister_snapshot(journal, Some(controller), None)
+        .expect("snapshot empty independent journal");
+    let caller = principal(39);
+    let session = open_session(&pic, vault, caller, &secret(130));
+    credit(&pic, vault, caller, &session, 1_000_000, 10);
+    allocate(&pic, vault, caller, &session, b"before-rollback", 100_000).expect("accepted");
+    let sent: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("call");
+    assert_eq!(sent.expect("sweep"), 1);
+    let local: Result<(u64, bool), ErrorCode> =
+        query(&pic, vault, controller, "recovery_stage_status", ())
+            .expect("local recovery receipt");
+    let (sequence, locked) = local.expect("receipt");
+    assert!(
+        sequence >= 2,
+        "account creation and transfer result are recorded"
+    );
+    assert!(!locked);
+    let prior: Result<Vec<JournalRecord>, ErrorCode> =
+        update_args(&pic, journal, vault, "records", (0u64, 10u32)).expect("prior V1 intent");
+    let prior = prior.expect("V1 records");
+    assert_eq!(prior.len(), 1);
+    pic.load_canister_snapshot(journal, Some(controller), empty_journal.id)
+        .expect("restore independent journal behind worker");
+    let replayed: Result<JournalHead, ErrorCode> =
+        update(&pic, journal, vault, "append", prior[0].intent.clone())
+            .expect("restore identical V1 intent");
+    assert_eq!(replayed.expect("V1 head").hash, prior[0].hash);
+    let before: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    assert!(matches!(
+        allocate(&pic, vault, caller, &session, b"after-rollback", 100_000),
+        Err(ErrorCode::PolicyUnavailable)
+    ));
+    let after: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    assert_eq!(
+        after.unwrap().withdrawable,
+        before.unwrap().withdrawable,
+        "rolled-back journal must block a new reservation"
+    );
+    let (swept, captured): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("call");
+    assert_eq!(swept.unwrap(), 0, "no new action can reach the outbox");
+    assert!(captured.is_none(), "rolled-back journal must block HL POST");
+    let local: Result<(u64, bool), ErrorCode> =
+        query(&pic, vault, controller, "recovery_stage_status", ()).unwrap();
+    assert!(local.unwrap().1, "journal rollback must leave sends locked");
 }
 
 #[test]
@@ -367,6 +774,104 @@ fn a_tampered_digest_is_never_signed() {
 }
 
 #[test]
+fn withdrawal_acceptance_replays_from_snapshot_before_request() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(243);
+    let key = secret(153);
+    let session = open_session(&pic, vault, caller, &key);
+    credit(&pic, vault, caller, &session, 1_000_000, 53);
+    let provisioned: Result<Vec<u8>, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .expect("reserve account");
+    provisioned.expect("reserve provisioned");
+    let controller = pic.get_controllers(vault)[0];
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).expect("guard query");
+    let guard = guard.expect("guard result").expect("configured guard");
+    let before_request = pic
+        .take_canister_snapshot(vault, Some(controller), None)
+        .expect("snapshot before withdrawal acceptance");
+
+    let eoa = address_from_secret(&key).expect("address");
+    let expires_at = 1_700_000_600_000u64;
+    let intent = private_perp::Withdrawal {
+        eoa,
+        amount: 300_000,
+        asset: "usdc".to_string(),
+        destination: format!("0x{}", hex::encode(eoa)),
+        network: "local".to_string(),
+        nonce: 1,
+        expires_at,
+        canister: vault.as_slice().to_vec(),
+    };
+    let signature = intent.sign_for_tests(&key).expect("sign");
+    let accepted: Result<FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_withdrawal",
+        WithdrawalRequest {
+            session: session.clone(),
+            client_request_id: blob(b"replay-accepted-withdrawal"),
+            amount: 300_000,
+            asset: AssetId::Usdc,
+            destination: Destination::AuthenticatedEoaHlAccount,
+            network: Network::Local,
+            nonce: 1,
+            expires_at,
+            intent_signature: signature.to_bytes65().to_vec().into(),
+        },
+    )
+    .expect("withdrawal call");
+    accepted.expect("withdrawal accepted");
+    assert_eq!(
+        status(&pic, vault, caller, &session).reserved_for_withdrawal,
+        300_000
+    );
+
+    pic.load_canister_snapshot(vault, Some(controller), before_request.id)
+        .expect("restore before withdrawal acceptance");
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, guard, principal(239), "resume_journal", vault).expect("guard call");
+    assert!(resumed.is_err(), "external validation is still required");
+    let restored = status(&pic, vault, caller, &session);
+    assert_eq!(restored.reserve_unallocated, 700_000);
+    assert_eq!(restored.reserved_for_withdrawal, 300_000);
+    assert_eq!(restored.withdrawable, 700_000);
+    let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .expect("restored events");
+    assert_eq!(
+        events.expect("events").items[0].state,
+        FundRequestState::Reserved
+    );
+    let (_, captured): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .expect("locked sweep call");
+    assert!(
+        captured.is_none(),
+        "replayed withdrawal cannot start a POST"
+    );
+}
+
+#[test]
 fn a_withdrawal_is_dispatched_from_the_reserve() {
     let pic = pic();
     let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
@@ -417,15 +922,43 @@ fn a_withdrawal_is_dispatched_from_the_reserve() {
     .expect("call");
     accepted.expect("withdrawal accepted");
 
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
-        &pic,
-        vault,
-        caller,
-        "test_sweep_now",
-        (),
-        Ok((200, ACCEPTED.to_vec())),
-    )
-    .expect("call");
+    let controller = pic.get_controllers(vault)[0];
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).unwrap();
+    let guard = guard.unwrap().expect("configured recovery guard");
+    let message_id = pic
+        .submit_call(
+            vault,
+            caller,
+            "test_sweep_now",
+            candid::encode_one(()).unwrap(),
+        )
+        .expect("submit payout sweep");
+    let mut pending = None;
+    for _ in 0..50 {
+        pic.tick();
+        if let Some(request) = pic.get_canister_http().into_iter().next() {
+            pending = Some(request);
+            break;
+        }
+    }
+    let pending = pending.expect("payout outcall");
+    assert!(pending.url.contains("/exchange"));
+    let before_reply = pic
+        .take_canister_snapshot(vault, Some(controller), None)
+        .expect("snapshot before payout response");
+    pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: pending.subnet_id,
+        request_id: pending.request_id,
+        response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+            status: 200,
+            headers: Vec::new(),
+            body: ACCEPTED.to_vec(),
+        }),
+        additional_responses: Vec::new(),
+    });
+    let reply = pic.await_call(message_id).expect("payout sweep reply");
+    let swept: Result<u32, ErrorCode> = candid::decode_one(&reply).expect("decode payout sweep");
     assert_eq!(swept.expect("sweep"), 1);
 
     let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
@@ -446,6 +979,53 @@ fn a_withdrawal_is_dispatched_from_the_reserve() {
         settled.withdrawable, 700_000,
         "払出し済みの分は出金可能額から除かれ、予約は二重に拘束しない"
     );
+    let configured: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_send_journal", ()).expect("journal configured");
+    let journal = configured.expect("journal principal").expect("configured");
+    let records: Result<Vec<RecoveryRecord>, ErrorCode> =
+        update_args(&pic, journal, vault, "recovery_events", (0u64, 10u32))
+            .expect("recovery events");
+    let records = records.expect("private recovery events");
+    for kind in ["reserve", "trading"] {
+        assert!(records.iter().any(|record| matches!(
+            &record.event.payload,
+            RecoveryPayload::CustodyAccount {
+                kind: recorded_kind,
+                address,
+                ..
+            } if recorded_kind == kind && address.len() == 20
+        )));
+    }
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event.payload,
+                RecoveryPayload::FundTransferResult { .. }
+            ))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        &records.last().expect("transfer result").event.payload,
+        RecoveryPayload::FundTransferResult {
+            kind,
+            amount_micros: 300_000,
+            accepted: true,
+            ..
+        } if kind == "withdrawal"
+    ));
+    pic.load_canister_snapshot(vault, Some(controller), before_reply.id)
+        .expect("restore before payout result");
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, guard, principal(239), "resume_journal", vault).unwrap();
+    assert!(resumed.is_err(), "external validation is still required");
+    let restored = status(&pic, vault, caller, &session);
+    assert_eq!(restored.reserved_for_withdrawal, 0);
+    assert_eq!(restored.withdrawable, 700_000);
+    let pending_validation: Result<bool, ErrorCode> =
+        query(&pic, vault, controller, "recovery_replay_pending", ()).unwrap();
+    assert!(pending_validation.unwrap());
 }
 
 #[test]
@@ -557,7 +1137,7 @@ fn payout_rejection_and_unknown_are_handled() {
 }
 
 #[test]
-fn an_unknown_action_can_be_resolved_as_not_executed() {
+fn free_text_cannot_release_an_unknown_action() {
     let pic = pic();
     let controller = principal(47);
     let vault = deploy(
@@ -627,7 +1207,7 @@ fn an_unknown_action_can_be_resolved_as_not_executed() {
     assert_eq!(unknown.unknowns.len(), 1);
     let action_id = unknown.unknowns[0].action_id.clone();
 
-    // 証跡が空の解消は拒否する（取引所へ照会した記録を必須にする）。
+    // 証跡が空の解消は拒否する。
     let no_evidence: Result<(), ErrorCode> = update_args(
         &pic,
         vault,
@@ -638,7 +1218,7 @@ fn an_unknown_action_can_be_resolved_as_not_executed() {
     .expect("call");
     assert!(no_evidence.is_err(), "証跡なしの解消は拒否する");
 
-    // controllerが「未実行」として解消すると、予約が戻り要求はrejectedになる。
+    // controllerの自由文も未実行の証明にならない。予約を保持する。
     let resolved: Result<(), ErrorCode> = update_args(
         &pic,
         vault,
@@ -651,12 +1231,17 @@ fn an_unknown_action_can_be_resolved_as_not_executed() {
         ),
     )
     .expect("call");
-    resolved.expect("resolved");
+    assert!(matches!(
+        resolved,
+        Err(ErrorCode::NotAllowed {
+            code: api_types::error::NotAllowedCode::OperationNotAvailable
+        })
+    ));
 
     let after = status(&pic, vault, caller, &session);
-    assert!(after.unknowns.is_empty(), "未解決actionが消える");
-    assert_eq!(after.reserve_unallocated, 1_000_000, "資金が戻る");
-    assert_eq!(after.reserved_for_withdrawal, 0);
+    assert_eq!(after.unknowns.len(), 1, "未解決actionを保持する");
+    assert_eq!(after.reserve_unallocated, 750_000, "資金を解放しない");
+    assert_eq!(after.reserved_for_withdrawal, 250_000);
 
     let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
         &pic,
@@ -668,10 +1253,10 @@ fn an_unknown_action_can_be_resolved_as_not_executed() {
     .expect("call");
     assert_eq!(
         events.expect("events").items[0].state,
-        FundRequestState::Rejected
+        FundRequestState::Unknown
     );
 
-    // 二重解消は拒否する。
+    // 繰り返しの自由文でも解消できない。
     let again: Result<(), ErrorCode> = update_args(
         &pic,
         vault,

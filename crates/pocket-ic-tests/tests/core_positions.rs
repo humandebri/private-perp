@@ -76,7 +76,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 #[test]
@@ -196,4 +198,30 @@ fn positions_are_ingested_and_exposed_in_the_snapshot() {
     assert_eq!(snapshot.positions[0].unrealized_pnl, -3_250_000);
     assert_eq!(snapshot.margin_used, 16_666_667);
     assert_eq!(snapshot.unrealized_pnl, -3_250_000);
+
+    for malformed in [
+        r#"{"marginSummary":{"totalMarginUsed":"0"}}"#,
+        r#"{"marginSummary":{"totalMarginUsed":"0"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.02","entryPx":"2500","unrealizedPnl":"1e2"}}]}"#,
+        r#"{"marginSummary":{"totalMarginUsed":"0"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.02","entryPx":"2500","unrealizedPnl":"0.0000001"}}]}"#,
+        r#"{"marginSummary":{"totalMarginUsed":"-1"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.02","entryPx":"2500","unrealizedPnl":"0"}}]}"#,
+    ] {
+        let rejected: Result<u32, ErrorCode> = update_args(
+            &pic,
+            core,
+            caller,
+            "test_ingest_positions",
+            (session.clone(), malformed.to_string()),
+        )
+        .expect("call");
+        assert!(
+            rejected.is_err(),
+            "bad observation must not replace positions"
+        );
+    }
+    let retained: Result<AccountSnapshot, ErrorCode> =
+        envelope::get_account_snapshot(&pic, core, caller, &session).expect("call");
+    let retained = retained.expect("snapshot");
+    assert_eq!(retained.positions.len(), 1);
+    assert_eq!(retained.positions[0].size, "0.02");
+    assert_eq!(retained.unrealized_pnl, -3_250_000);
 }

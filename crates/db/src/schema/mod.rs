@@ -7,4 +7,5 @@
 pub mod core;
 pub mod guard;
 pub mod policy;
+pub mod send_journal;
 pub mod vault;

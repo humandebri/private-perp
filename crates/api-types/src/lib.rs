@@ -7,14 +7,19 @@
 //! ロジックは置かず、型と定数だけを置く。
 
 pub mod auth;
+pub mod builder_fee;
+pub mod eligibility;
 pub mod envelope;
 pub mod environment;
 pub mod error;
 pub mod fund;
 pub mod guard;
+pub mod journal;
 pub mod operations;
+pub mod operations_status;
 pub mod order;
 pub mod policy;
+pub mod recovery;
 
 use candid::CandidType;
 use serde::{Deserialize, Serialize};

@@ -5,7 +5,7 @@ import { bytesToHex } from './wallet'
 
 type Gateway = Pick<
   LocalGateway,
-  'login' | 'logout' | 'fundingInstructions' | 'refresh' | 'submitOrder' | 'lookupOrder'
+  'login' | 'logout' | 'prepareTradingAccount' | 'refresh' | 'submitOrder' | 'lookupOrder'
 >
 export type OrderInput = Parameters<LocalGateway['submitOrder']>[0]
 export type TrackedOrder = {
@@ -26,7 +26,11 @@ export type SessionState = {
   refreshError?: string
   orders: TrackedOrder[]
 }
-const message = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
+const message = (cause: unknown) => {
+  if (cause instanceof CanisterError && cause.code === 'VenueRateLimited')
+    return '共有REST予算の空きを待っています。取消・決済・出金は引き続き操作できます。'
+  return cause instanceof Error ? cause.message : String(cause)
+}
 const expired = (cause: unknown) =>
   cause instanceof CanisterError &&
   ['SessionExpired', 'SessionRevoked', 'Unauthenticated'].includes(cause.code)
@@ -35,13 +39,43 @@ export function effectiveAge(state: SessionState, now: number): number {
   if (!state.data?.snapshot || state.receivedAt === undefined) return Infinity
   return Number(state.data.snapshot.data_age_ms) + Math.max(0, now - state.receivedAt)
 }
-export function orderBlockReason(state: SessionState, now: number): string | undefined {
+export function orderBlockReason(
+  state: SessionState,
+  now: number,
+  wallNow = Date.now(),
+): string | undefined {
   const data = state.data
   if (!state.address) return 'MetaMaskで接続してください'
   if (state.refreshError || !data?.snapshot || !data.orders || !data.agent)
     return '口座・注文・Agent情報を更新できません。接続を確認してください。'
+  if (!data.vaultJournal || !data.coreJournal)
+    return '送信ジャーナルの状態を確認できません。新規注文を停止中です。'
+  if (data.vaultJournal[0] || data.coreJournal[0])
+    return data.vaultJournal[1] || data.coreJournal[1]
+      ? '復元した記録を照合中です。注文送信を停止しています。'
+      : '送信ジャーナルの確認待ちです。注文送信を停止しています。'
   if (!data.agent.current[0] || variantName(data.agent.current[0].state) !== 'Active')
     return 'Agentを承認してください'
+  if (!data.eligibility?.eligible)
+    return '受付資格が未登録か期限切れです。取消・決済・回収・出金は利用できます。'
+  if (
+    !data.vaultCycles ||
+    !data.coreCycles ||
+    data.vaultCycles.new_risk_stopped ||
+    data.coreCycles.new_risk_stopped
+  )
+    return 'cycles残量または消費下限の設定により新規受付を停止中です。'
+  if (
+    !data.btcMarket ||
+    !data.ethMarket ||
+    !data.btcMarket.eligible_for_new_risk ||
+    !data.ethMarket.eligible_for_new_risk
+  )
+    return '市場観測または流動性の条件を満たしていません。取消・決済は利用できます。'
+  if (data.agent.current[0].expires_at[0] && data.agent.current[0].expires_at[0] <= BigInt(wallNow))
+    return 'Agentの承認期限が切れています。新しい世代を承認してください。'
+  if (data.funds.recovery_fence.length)
+    return '回収フェンス中です。取消・reduce-only決済を利用できます。'
   if (!data.snapshot.account_id.length) return '取引口座を観測できません'
   if (
     state.orders.some((order) => ['sending', 'unknown'].includes(order.state)) ||
@@ -93,7 +127,7 @@ export class SessionStore {
       const session = await this.gateway.login()
       if (!this.isCurrent(generation)) return
       this.publish({ address: session.address })
-      await this.gateway.fundingInstructions()
+      await this.gateway.prepareTradingAccount()
       if (this.isCurrent(generation)) await this.refresh()
     } catch (cause) {
       if (this.isCurrent(generation)) this.publish({ error: message(cause) })

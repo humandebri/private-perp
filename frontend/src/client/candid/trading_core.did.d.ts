@@ -49,19 +49,16 @@ export type BadRequestCode =
   | { MissingField: null }
   | { PriceOutOfRange: null }
   | { UnsupportedAsset: null }
-/**
- * `close_all` の結果（建玉ごとの受付結果と、受付できなかった銘柄）。
- */
-export interface CloseAllOutcome {
-  submitted: Array<SubmitOrderResult>
-  failed: Array<CloseFailure>
-}
-/**
- * 決済できなかった銘柄とその理由。
- */
-export interface CloseFailure {
-  error: ErrorCode
-  market: string
+export interface CyclesStatus {
+  warning: boolean
+  observed_daily_burn: bigint
+  balance: bigint
+  refill_target: [] | [bigint]
+  exit_reserve: [] | [bigint]
+  configured_daily_floor: [] | [bigint]
+  estimated_days: [] | [bigint]
+  new_risk_stopped: boolean
+  observed_at: bigint
 }
 /**
  * 解決済みの環境設定（既定値の適用と検証を通したもの）。
@@ -184,6 +181,19 @@ export interface HttpRequestResult {
    */
   headers: Array<HttpHeader>
 }
+export interface MarketStatus {
+  eligible_for_new_risk: boolean
+  market: string
+  reason_code: [] | [string]
+  observed_at: [] | [bigint]
+}
+export interface MarketThreshold {
+  max_spread_bps: number
+  min_day_notional_usdc: bigint
+  expected_index: number
+  market: string
+  min_each_side_depth_usdc: bigint
+}
 /**
  * IC network。`docs/phase-0/environments.md` の環境分離の単位。
  */
@@ -204,23 +214,35 @@ export type NotAllowedCode =
   | { OperationNotAvailable: null }
   | { UpgradeNotScheduled: null }
 /**
- * 注文種別。Marketはスリッページ上限付きIOC指値として構築する。
- */
-export type OrderKind = { LimitGtc: null } | { MarketIoc: null }
-/**
  * 送信結果が不明なleverage preflightを外部確認後に解決する。
  */
 export type PreflightResolution = { Applied: null } | { Rejected: null }
-export type Result = { Ok: bigint } | { Err: ErrorCode }
+export interface PrepareRecovery {
+  account_id: Uint8Array | number[]
+  request_id: Uint8Array | number[]
+  user_id: Uint8Array | number[]
+  master_address: Uint8Array | number[]
+}
+export interface RecoveryFenceToken {
+  account_id: Uint8Array | number[]
+  request_id: Uint8Array | number[]
+  user_id: Uint8Array | number[]
+  epoch: bigint
+}
+export type Result = { Ok: null } | { Err: ErrorCode }
 export type Result_1 = { Ok: HpkeResponse } | { Err: ErrorCode }
-export type Result_2 = { Ok: CloseAllOutcome } | { Err: ErrorCode }
-export type Result_3 = { Ok: SubmitOrderResult } | { Err: ErrorCode }
-export type Result_4 = { Ok: AgentStatus } | { Err: ErrorCode }
-export type Result_5 = { Ok: EnvironmentView } | { Err: ErrorCode }
-export type Result_6 = { Ok: Uint8Array | number[] } | { Err: ErrorCode }
-export type Result_7 = { Ok: AgentGeneration } | { Err: ErrorCode }
-export type Result_8 = { Ok: null } | { Err: ErrorCode }
-export type Result_9 = { Ok: SweepOutcome } | { Err: ErrorCode }
+export type Result_10 = { Ok: boolean } | { Err: ErrorCode }
+export type Result_11 = { Ok: SweepOutcome } | { Err: ErrorCode }
+export type Result_12 = { Ok: [bigint, boolean] } | { Err: ErrorCode }
+export type Result_13 = { Ok: [boolean, boolean] } | { Err: ErrorCode }
+export type Result_2 = { Ok: AgentStatus } | { Err: ErrorCode }
+export type Result_3 = { Ok: CyclesStatus } | { Err: ErrorCode }
+export type Result_4 = { Ok: EnvironmentView } | { Err: ErrorCode }
+export type Result_5 = { Ok: Uint8Array | number[] } | { Err: ErrorCode }
+export type Result_6 = { Ok: MarketStatus } | { Err: ErrorCode }
+export type Result_7 = { Ok: [] | [Principal] } | { Err: ErrorCode }
+export type Result_8 = { Ok: [bigint, bigint, boolean] } | { Err: ErrorCode }
+export type Result_9 = { Ok: RecoveryFenceToken } | { Err: ErrorCode }
 /**
  * 失効世代付きセッション。`trading_core` はvaultが発行したものだけを受け入れる。
  */
@@ -229,34 +251,6 @@ export interface SessionHandle {
   expires_at: bigint
   vault_principal: Principal
   revocation_generation: bigint
-}
-export type Side = { Buy: null } | { Sell: null }
-export interface SubmitOrderArgs {
-  account_id: Uint8Array | number[]
-  /**
-   * Marketはスリッページ上限付きIOC指値のため必須。Limitでは上限価格。
-   */
-  limit_price: [] | [string]
-  trigger: [] | [Trigger]
-  leverage: [] | [number]
-  client_request_id: Uint8Array | number[]
-  reduce_only: boolean
-  kind: OrderKind
-  side: Side
-  slippage_tolerance_bps: [] | [number]
-  session: SessionHandle
-  /**
-   * 正規化十進文字列。
-   */
-  quantity: string
-  market: string
-  expires_after: [] | [bigint]
-}
-export interface SubmitOrderResult {
-  request_id: Uint8Array | number[]
-  cloid: Uint8Array | number[]
-  accepted_at: bigint
-  order_id: Uint8Array | number[]
 }
 /**
  * `sweep`の結果（送信・取消・照合の件数）。失敗の内訳はログ・DBの状態で確認する。
@@ -297,45 +291,20 @@ export interface TransformArgs {
    */
   response: HttpRequestResult
 }
-/**
- * 建玉単位のSL/TP（HL `positionTpsl`、reduce-only）。
- */
-export interface Trigger {
-  kind: TriggerKind
-  is_market: boolean
-  trigger_price: string
-}
-export type TriggerKind = { TakeProfit: null } | { StopLoss: null }
 export interface _SERVICE {
-  /**
-   * 未終端の注文すべてに取消要求を付ける（送信はsweepが行う）。
-   */
-  cancel_all: ActorMethod<[SessionHandle], Result>
+  abort_recovery: ActorMethod<[RecoveryFenceToken], Result>
+  begin_recovery_migration: ActorMethod<[], Result>
   /**
    * 注文の取消を要求する（**封筒必須**。署名・送信はパイプラインが行う）。
    *
    * 認証は封筒の`aad`と本文のセッションで行う（`api-contract.md` 6節）。
    */
   cancel_order: ActorMethod<[HpkeRequest], Result_1>
-  /**
-   * 建玉をすべて閉じる（建玉ごとに`close_position`と同じ反対売買を送る）。
-   *
-   * 1件の失敗で全体を止めない（建玉ごとの結果を返す）。受付IDは
-   * `client_request_id`と銘柄から導出するため、同じIDの再送は同じ注文として扱われる
-   * （建玉が変わっている場合は`IdempotencyConflict`になる）。
-   */
-  close_all: ActorMethod<[SessionHandle, Uint8Array | number[]], Result_2>
-  /**
-   * 建玉を閉じる（全量または比率指定）。反対売買のreduce-only IOC指値として受付ける。
-   *
-   * `limit_price`はスリッページ上限（公開市況から画面が決める）。省略時は観測した
-   * 建玉からmark価格を近似して`DEFAULT_SLIPPAGE_BPS`の幅を付ける。
-   * `ratio_bps`は建玉に対する比率（10000 = 全量）。
-   */
-  close_position: ActorMethod<
-    [SessionHandle, Uint8Array | number[], string, number, [] | [string]],
-    Result_3
-  >
+  commit_recovery: ActorMethod<[RecoveryFenceToken], Result>
+  configure_cycles: ActorMethod<[bigint, bigint], Result>
+  configure_market_threshold: ActorMethod<[MarketThreshold], Result>
+  finish_recovery: ActorMethod<[RecoveryFenceToken], Result>
+  finish_recovery_migration: ActorMethod<[], Result>
   /**
    * 口座snapshot（残高はvault、注文はcore。**封筒必須**）。
    */
@@ -345,15 +314,19 @@ export interface _SERVICE {
    *
    * 認可にvaultへのinter-canister呼び出しが必要なためqueryにはできない（updateで提供）。
    */
-  get_agent_status: ActorMethod<[SessionHandle], Result_4>
+  get_agent_status: ActorMethod<[SessionHandle], Result_2>
+  get_cycles_status: ActorMethod<[], Result_3>
   /**
    * 現在の環境設定（診断用・公開）。秘密は含まない。
    */
-  get_environment: ActorMethod<[], Result_5>
+  get_environment: ActorMethod<[], Result_4>
   /**
    * 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
    */
-  get_hpke_public_key: ActorMethod<[], Result_6>
+  get_hpke_public_key: ActorMethod<[], Result_5>
+  get_journal_guard: ActorMethod<[], Result_7>
+  get_journal_send_status: ActorMethod<[], Result_13>
+  get_market_status: ActorMethod<[string], Result_6>
   /**
    * 受付結果を再送せずに照合する。不存在と他人の要求は区別しない。
    */
@@ -362,10 +335,14 @@ export interface _SERVICE {
    * 政策Canisterのprincipal（診断用）。
    */
   get_policy_principal: ActorMethod<[], [] | [Principal]>
+  get_send_journal: ActorMethod<[], Result_7>
   /**
    * vaultのprincipal（診断用）。
    */
   get_vault_principal: ActorMethod<[], [] | [Principal]>
+  journal_restore_status: ActorMethod<[], Result_8>
+  recovery_replay_pending: ActorMethod<[], Result_10>
+  recovery_stage_status: ActorMethod<[], Result_12>
   /**
    * 約定一覧（新しい順。**封筒必須**。認可にvaultへの問い合わせが必要なためupdate）。
    */
@@ -379,19 +356,20 @@ export interface _SERVICE {
    * （`docs/phase-1/README.md` の残課題）。
    */
   list_orders: ActorMethod<[HpkeRequest], Result_1>
+  mark_recovery_unknown: ActorMethod<[RecoveryFenceToken], Result>
+  migrate_recovery: ActorMethod<[PrepareRecovery], Result_9>
+  prepare_recovery: ActorMethod<[PrepareRecovery], Result_9>
   /**
-   * Agent世代を要求する（**coreが鍵を導出・保管**し、vaultはmaster署名でアドレスを承認する）。
-   *
-   * 未承認の世代があるうちは同じ世代を返す。注文はこの世代の鍵で署名する。
+   * 本人向け書込みの封筒入口。業務エラーも暗号化した結果として返す。
    */
-  request_agent_generation: ActorMethod<[SessionHandle], Result_7>
+  private_call: ActorMethod<[HpkeRequest], Result_1>
+  recovery_migration_locked: ActorMethod<[], Result_10>
+  refresh_market: ActorMethod<[], Result>
   /**
    * 外部確認済みのleverage preflight不明状態をcontrollerが解決する。
    */
-  resolve_unknown_order_preflight: ActorMethod<
-    [Uint8Array | number[], PreflightResolution],
-    Result_8
-  >
+  resolve_unknown_order_preflight: ActorMethod<[Uint8Array | number[], PreflightResolution], Result>
+  resume_journal: ActorMethod<[], Result>
   /**
    * HPKEの鍵世代を更新する（controllerのみ）。
    *
@@ -399,47 +377,43 @@ export interface _SERVICE {
    * `docs/phase-0/api-contract.md` 6節）。更新すると以前の世代は退役し、
    * 旧鍵で作られた封筒は復号できない（クライアントは公開鍵を取得し直す）。
    */
-  rotate_hpke_key: ActorMethod<[], Result_6>
+  rotate_hpke_key: ActorMethod<[], Result_5>
   /**
    * 閾値ECDSAのkey IDを設定する（controllerのみ）。
    *
    * testnetの鍵名はデプロイ後に実測して確定する（`docs/phase-0/environments.md` 2節）。
    */
-  set_ecdsa_key_id: ActorMethod<[string], Result_8>
+  set_ecdsa_key_id: ActorMethod<[string], Result>
+  set_journal_guard: ActorMethod<[Principal], Result>
   /**
    * 銘柄解決に使うnetwork・dexを設定する（controllerのみ）。
    */
-  set_market_context: ActorMethod<[string, string], Result_8>
+  set_market_context: ActorMethod<[string, string], Result>
   /**
    * `meta`の`universe`を登録する（ローカルのブートストラップ。本番はHL `/info` から取得する）。
    */
-  set_meta_cache: ActorMethod<[string, string, string], Result_8>
+  set_meta_cache: ActorMethod<[string, string, string], Result>
   /**
    * 政策Canisterのprincipalを設定する（controllerのみ）。
    */
-  set_policy_principal: ActorMethod<[Principal], Result_8>
+  set_policy_principal: ActorMethod<[Principal], Result>
+  set_send_journal: ActorMethod<[Principal], Result>
   /**
    * vaultのprincipalを設定する（controllerのみ）。
    */
-  set_vault_principal: ActorMethod<[Principal], Result_8>
+  set_vault_principal: ActorMethod<[Principal], Result>
   /**
    * Hyperliquidのendpointを設定する（controllerのみ）。
    *
    * 設定済みのnetworkと整合しないhost（例：testnet設定にmainnet endpoint）は拒否する。
    */
-  set_venue_endpoints: ActorMethod<[string, string], Result_8>
-  /**
-   * 受付を1件処理する（認可・検証・冪等性・pending注文の登録）。
-   *
-   * 署名・送信・照合はパイプライン（次段階）が行う。ここでは受付だけを確定させる。
-   */
-  submit_order: ActorMethod<[SessionHandle, SubmitOrderArgs], Result_3>
+  set_venue_endpoints: ActorMethod<[string, string], Result>
   /**
    * 未処理の注文・取消を送信し、取引所状態を照合する（controllerのみ）。
    *
    * 本番は `heartbeat` が間隔を空けて呼ぶ。停止した場合の手動実行の入口でもある。
    */
-  sweep: ActorMethod<[], Result_9>
+  sweep: ActorMethod<[], Result_11>
   /**
    * 変換関数：`/info`の応答から照合に使う要素だけを決定論的に残す。
    *
@@ -447,6 +421,8 @@ export interface _SERVICE {
    * 応答は空本文にし、呼び出し側は「未観測」として扱う（誤って建玉0にしない）。
    */
   transform_info: ActorMethod<[TransformArgs], HttpRequestResult>
+  transform_market_info: ActorMethod<[TransformArgs], HttpRequestResult>
+  transform_open_orders: ActorMethod<[TransformArgs], HttpRequestResult>
   /**
    * このビルドのバージョン。デプロイ確認用。
    */
@@ -456,7 +432,7 @@ export interface _SERVICE {
    * vaultに問い合わせ、返却されたprincipalが「このメッセージのcaller」と一致する場合だけ
    * user_idを返す。順序を逆にしない（callerを信用しない）。
    */
-  whoami: ActorMethod<[SessionHandle], Result_6>
+  whoami: ActorMethod<[SessionHandle], Result_5>
 }
 export declare const idlFactory: IDL.InterfaceFactory
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[]

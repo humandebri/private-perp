@@ -72,7 +72,9 @@ fn open_session(
         },
     )
     .expect("call");
-    session.expect("session")
+    let session = session.expect("session");
+    pocket_ic_tests::activate_local_user(pic, vault, caller, &session);
+    session
 }
 
 /// mainnetは拒否し、networkとendpointの不一致も拒否する（E-2）。
@@ -95,6 +97,22 @@ fn the_vault_refuses_mainnet_and_mismatched_endpoints() {
     assert_eq!(default.network, Network::Local);
     assert_eq!(default.exchange_url, "http://localhost:8080/exchange");
     assert_eq!(default.ecdsa_key_id, "test_key_1");
+    let verified: Result<bool, ErrorCode> =
+        pocket_ic_tests::query(&pic, vault, outsider, "get_recovery_history_verified", ())
+            .expect("query");
+    assert!(!verified.expect("history gate defaults closed"));
+    let denied: Result<(), ErrorCode> =
+        update(&pic, vault, outsider, "set_recovery_history_verified", true).expect("call");
+    assert!(matches!(denied, Err(ErrorCode::Unauthenticated { .. })));
+    let confirmed: Result<(), ErrorCode> = update(
+        &pic,
+        vault,
+        controller,
+        "set_recovery_history_verified",
+        true,
+    )
+    .expect("call");
+    confirmed.expect("local history confirmation");
 
     // 非controllerは変更できない。
     let denied: Result<(), ErrorCode> =
@@ -134,6 +152,20 @@ fn the_vault_refuses_mainnet_and_mismatched_endpoints() {
     )
     .expect("call");
     testnet.expect("set_network(testnet)");
+    let verified: Result<bool, ErrorCode> =
+        pocket_ic_tests::query(&pic, vault, outsider, "get_recovery_history_verified", ())
+            .expect("query");
+    assert!(!verified.expect("network change clears history confirmation"));
+
+    let confirmed: Result<(), ErrorCode> = update(
+        &pic,
+        vault,
+        controller,
+        "set_recovery_history_verified",
+        true,
+    )
+    .expect("call");
+    confirmed.expect("testnet history confirmation");
 
     // E-2: testnet設定にmainnet endpointを指定すると拒否する。
     let mismatch: Result<(), ErrorCode> = update_args(
@@ -171,6 +203,10 @@ fn the_vault_refuses_mainnet_and_mismatched_endpoints() {
     )
     .expect("call");
     configured.expect("set_venue_endpoints(testnet)");
+    let verified: Result<bool, ErrorCode> =
+        pocket_ic_tests::query(&pic, vault, outsider, "get_recovery_history_verified", ())
+            .expect("query");
+    assert!(!verified.expect("endpoint change clears history confirmation"));
     let environment: Result<EnvironmentView, ErrorCode> =
         pocket_ic_tests::query(&pic, vault, outsider, "get_environment", ()).expect("call");
     let environment = environment.expect("environment");
