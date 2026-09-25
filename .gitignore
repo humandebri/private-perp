@@ -10,6 +10,11 @@ playwright-report/
 !.env.example
 *.log
 
+# OS and Python caches
+.DS_Store
+__pycache__/
+*.py[cod]
+
 # Rust / icp-cli
 /target/
 /.icp/
