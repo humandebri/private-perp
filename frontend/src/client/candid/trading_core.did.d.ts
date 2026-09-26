@@ -83,6 +83,12 @@ export interface EnvironmentView {
  */
 export type ErrorCode =
   | { Internal: { code: string } }
+  | {
+      /**
+       * 単一書込みフェンスの一時的な競合。受付ごとの再試行規則に従う。
+       */
+      JournalWriterBusy: null
+    }
   | { DuplicateIgnored: { request_id: Uint8Array | number[] } }
   | { SigningQueueFull: null }
   | { NotAllowed: { code: NotAllowedCode } }
@@ -231,18 +237,18 @@ export interface RecoveryFenceToken {
 }
 export type Result = { Ok: null } | { Err: ErrorCode }
 export type Result_1 = { Ok: HpkeResponse } | { Err: ErrorCode }
-export type Result_10 = { Ok: boolean } | { Err: ErrorCode }
-export type Result_11 = { Ok: SweepOutcome } | { Err: ErrorCode }
+export type Result_10 = { Ok: RecoveryFenceToken } | { Err: ErrorCode }
+export type Result_11 = { Ok: boolean } | { Err: ErrorCode }
 export type Result_12 = { Ok: [bigint, boolean] } | { Err: ErrorCode }
-export type Result_13 = { Ok: [boolean, boolean] } | { Err: ErrorCode }
+export type Result_13 = { Ok: SweepOutcome } | { Err: ErrorCode }
 export type Result_2 = { Ok: AgentStatus } | { Err: ErrorCode }
 export type Result_3 = { Ok: CyclesStatus } | { Err: ErrorCode }
 export type Result_4 = { Ok: EnvironmentView } | { Err: ErrorCode }
 export type Result_5 = { Ok: Uint8Array | number[] } | { Err: ErrorCode }
-export type Result_6 = { Ok: MarketStatus } | { Err: ErrorCode }
-export type Result_7 = { Ok: [] | [Principal] } | { Err: ErrorCode }
-export type Result_8 = { Ok: [bigint, bigint, boolean] } | { Err: ErrorCode }
-export type Result_9 = { Ok: RecoveryFenceToken } | { Err: ErrorCode }
+export type Result_6 = { Ok: [] | [Principal] } | { Err: ErrorCode }
+export type Result_7 = { Ok: [boolean, boolean] } | { Err: ErrorCode }
+export type Result_8 = { Ok: MarketStatus } | { Err: ErrorCode }
+export type Result_9 = { Ok: [bigint, bigint, boolean] } | { Err: ErrorCode }
 /**
  * 失効世代付きセッション。`trading_core` はvaultが発行したものだけを受け入れる。
  */
@@ -324,9 +330,9 @@ export interface _SERVICE {
    * 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
    */
   get_hpke_public_key: ActorMethod<[], Result_5>
-  get_journal_guard: ActorMethod<[], Result_7>
-  get_journal_send_status: ActorMethod<[], Result_13>
-  get_market_status: ActorMethod<[string], Result_6>
+  get_journal_guard: ActorMethod<[], Result_6>
+  get_journal_send_status: ActorMethod<[], Result_7>
+  get_market_status: ActorMethod<[string], Result_8>
   /**
    * 受付結果を再送せずに照合する。不存在と他人の要求は区別しない。
    */
@@ -335,14 +341,12 @@ export interface _SERVICE {
    * 政策Canisterのprincipal（診断用）。
    */
   get_policy_principal: ActorMethod<[], [] | [Principal]>
-  get_send_journal: ActorMethod<[], Result_7>
+  get_send_journal: ActorMethod<[], Result_6>
   /**
    * vaultのprincipal（診断用）。
    */
   get_vault_principal: ActorMethod<[], [] | [Principal]>
-  journal_restore_status: ActorMethod<[], Result_8>
-  recovery_replay_pending: ActorMethod<[], Result_10>
-  recovery_stage_status: ActorMethod<[], Result_12>
+  journal_restore_status: ActorMethod<[], Result_9>
   /**
    * 約定一覧（新しい順。**封筒必須**。認可にvaultへの問い合わせが必要なためupdate）。
    */
@@ -357,13 +361,15 @@ export interface _SERVICE {
    */
   list_orders: ActorMethod<[HpkeRequest], Result_1>
   mark_recovery_unknown: ActorMethod<[RecoveryFenceToken], Result>
-  migrate_recovery: ActorMethod<[PrepareRecovery], Result_9>
-  prepare_recovery: ActorMethod<[PrepareRecovery], Result_9>
+  migrate_recovery: ActorMethod<[PrepareRecovery], Result_10>
+  prepare_recovery: ActorMethod<[PrepareRecovery], Result_10>
   /**
    * 本人向け書込みの封筒入口。業務エラーも暗号化した結果として返す。
    */
   private_call: ActorMethod<[HpkeRequest], Result_1>
-  recovery_migration_locked: ActorMethod<[], Result_10>
+  recovery_migration_locked: ActorMethod<[], Result_11>
+  recovery_replay_pending: ActorMethod<[], Result_11>
+  recovery_stage_status: ActorMethod<[], Result_12>
   refresh_market: ActorMethod<[], Result>
   /**
    * 外部確認済みのleverage preflight不明状態をcontrollerが解決する。
@@ -413,7 +419,7 @@ export interface _SERVICE {
    *
    * 本番は `heartbeat` が間隔を空けて呼ぶ。停止した場合の手動実行の入口でもある。
    */
-  sweep: ActorMethod<[], Result_11>
+  sweep: ActorMethod<[], Result_13>
   /**
    * 変換関数：`/info`の応答から照合に使う要素だけを決定論的に残す。
    *

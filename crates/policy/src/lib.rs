@@ -29,6 +29,7 @@ fn map_db(error: DbError) -> ErrorCode {
         DbError::Sql(message) => internal(message),
         DbError::NotFound => internal("policy is not configured".to_string()),
         DbError::Conflict => ErrorCode::ReservationConflict,
+        DbError::WriterBusy => ErrorCode::JournalWriterBusy,
         DbError::Overflow => internal("integer overflow".to_string()),
         DbError::Invariant(message) => internal(message.to_string()),
         DbError::InsufficientFunds { .. } => internal("unexpected funds error".to_string()),

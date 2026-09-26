@@ -373,6 +373,22 @@ CREATE TABLE reconcile_cursor (
 );
 ";
 
+/// v27: 口座・銘柄ごとの確定済みレバレッジと、送信中の変更を区別する。
+const LEVERAGE_CACHE: &str = "
+CREATE TABLE leverage_cache (
+    account_id BLOB NOT NULL CHECK (length(account_id) = 32),
+    asset_index INTEGER NOT NULL CHECK (asset_index >= 0),
+    confirmed_leverage INTEGER CHECK (confirmed_leverage > 0),
+    confirmed_at INTEGER,
+    pending_order_id BLOB CHECK (pending_order_id IS NULL OR length(pending_order_id) = 32),
+    pending_leverage INTEGER CHECK (pending_leverage IS NULL OR pending_leverage > 0),
+    pending_state TEXT CHECK (pending_state IN ('reserved', 'unknown')),
+    PRIMARY KEY (account_id, asset_index),
+    CHECK ((pending_order_id IS NULL AND pending_leverage IS NULL AND pending_state IS NULL)
+        OR (pending_order_id IS NOT NULL AND pending_leverage IS NOT NULL AND pending_state IS NOT NULL))
+);
+";
+
 /// `trading_core` のMigration一覧。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -495,5 +511,9 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 26,
         sql: super::send_journal::REPLAY_VALIDATION_SQL,
+    },
+    Migration {
+        version: 27,
+        sql: LEVERAGE_CACHE,
     },
 ];

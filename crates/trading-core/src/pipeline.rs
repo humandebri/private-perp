@@ -16,9 +16,7 @@ use crate::{
 use api_types::error::{BadRequestCode, ErrorCode};
 use api_types::journal::{RecoveryEvent, RecoveryPayload};
 use api_types::operations::BudgetClass;
-use ic_cdk_management_canister::{
-    EcdsaPublicKeyArgs, SignWithEcdsaArgs, ecdsa_public_key, sign_with_ecdsa,
-};
+use ic_cdk_management_canister::{SignWithEcdsaArgs, sign_with_ecdsa};
 
 /// 1回のsweepで送る注文・取消の上限（outcallの回数を抑える）。
 const MAX_DISPATCH_PER_SWEEP: u32 = 4;
@@ -134,7 +132,40 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
             continue;
         }
 
-        if order.preflight_state == api_types::fund::ActionState::Queued {
+        let needs_preflight = if order.preflight_state == api_types::fund::ActionState::Queued {
+            match db::tx::update(|connection| {
+                let decision = db::repo::leverage::prepare(
+                    connection,
+                    &order_id,
+                    &order.account_id,
+                    order.asset_index,
+                    order.effective_leverage,
+                    now,
+                )?;
+                if decision == db::repo::leverage::Decision::Skip {
+                    db::repo::orders::mark_preflight_skipped(
+                        connection,
+                        &order_id,
+                        worker_epoch,
+                        now,
+                    )?;
+                }
+                Ok(decision)
+            })
+            .map_err(map_db)?
+            {
+                db::repo::leverage::Decision::Send => true,
+                db::repo::leverage::Decision::Skip => false,
+                db::repo::leverage::Decision::Wait => {
+                    retry_order(&order_id, worker_epoch, &ErrorCode::PolicyUnavailable, now)?;
+                    continue;
+                }
+            }
+        } else {
+            false
+        };
+
+        if needs_preflight {
             let preflight = match sign_and_build_leverage(&order).await {
                 Ok(value) => value,
                 Err(error) => {
@@ -189,6 +220,22 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
                         &order_id,
                         worker_epoch,
                         blocker.unwrap_or("send permit or market admission expired"),
+                        send_now,
+                    )?;
+                    return Ok(false);
+                }
+                if !db::repo::leverage::owns_reservation(
+                    connection,
+                    &order_id,
+                    &order.account_id,
+                    order.asset_index,
+                )? {
+                    db::repo::orders::retry_before_dispatch(
+                        connection,
+                        &order_id,
+                        worker_epoch,
+                        "leverage reservation changed",
+                        send_now.saturating_add(RETRY_DELAY_MS),
                         send_now,
                     )?;
                     return Ok(false);
@@ -1328,16 +1375,6 @@ pub(crate) async fn sign_with_agent_key(
         }
     }
     let path = agent_derivation_path(account_id, generation.generation);
-    let public_key: [u8; 33] = ecdsa_public_key(&EcdsaPublicKeyArgs {
-        canister_id: None,
-        derivation_path: path.clone(),
-        key_id: ecdsa_key_id()?,
-    })
-    .await
-    .map_err(|error| internal(format!("ecdsa_public_key failed: {error}")))?
-    .public_key
-    .try_into()
-    .map_err(|_| internal("unexpected public key length".to_string()))?;
     let signature = sign_with_ecdsa(&SignWithEcdsaArgs {
         message_hash: digest.to_vec(),
         derivation_path: path,
@@ -1353,7 +1390,12 @@ pub(crate) async fn sign_with_agent_key(
     let mut s = [0u8; 32];
     r.copy_from_slice(&bytes[0..32]);
     s.copy_from_slice(&bytes[32..64]);
-    let v = hl_sign::recover_v(&digest, r, s, &public_key)
+    let expected_address: [u8; 20] = generation
+        .agent_address
+        .as_ref()
+        .try_into()
+        .map_err(|_| internal("unexpected agent address length".to_string()))?;
+    let v = hl_sign::recover_v_for_address(&digest, r, s, &expected_address)
         .map_err(|error| internal(format!("cannot recover v: {error}")))?;
     Ok(hl_sign::Signature { r, s, v })
 }

@@ -3,8 +3,7 @@
 //! `docs/phase-0/api-contract.md` 6節・`Implementation.md` 5.4に従い、状態変更POSTは
 //! **非replicated** outcallで送る（応答の揺れを合意の対象にしない。解釈できない応答は
 //! 「未実行」と扱わず、呼び出し側が`unknown`へ進める）。読み取り（`/info`）は
-//! **replicated** outcall＋決定論的な変換関数で行い、全ノードで同じ本文にしてから
-//! 取り込む。
+//! replicated outcallと変換関数を使い、単一ノードの改変を資金・リスク判断へ取り込まない。
 //!
 //! 送信先URLは現状testnet固定である。Phase 2の環境設定一般化でnetwork設定から
 //! 解決する（`docs/phase-2/README.md`、`docs/phase-0/environments.md`のE-1/E-2）。

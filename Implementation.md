@@ -103,7 +103,7 @@ Plan 16章と本書14章の境界で、資金台帳とmaster actionをtestnet向
 | 認可・リスク検証 | 同期・純粋 | 無視できる |
 | sign_with_ecdsa | クロスネット（confidential → pzp6e） | **未実測** |
 | HTTPS outcall POST | 非replicated、TLS | 数百ms |
-| 照合 `/info` | 非replicated POST | 数百ms |
+| 照合 `/info` | replicated POST＋transform | 数百ms |
 
 DFINITYのエンジニアは「`sign_with_ecdsa` を呼ぶcanisterを署名subnet上に置けばクロスネット遅延を完全に避けられる」と回答している。本番鍵 `key_1` は fiduciary signing subnet `pzp6e`（34ノード）にのみ配備され、テスト鍵は `fuqsr` にある。**D10の構成ではこの回避策を取れない**ため、クロスネット分の遅延を毎回支払う。
 
@@ -681,7 +681,7 @@ Canister自身がHyperliquidのRESTを叩く。制限は**IP単位で1,200 weigh
 - 入金はブラウザ提示のhashや成功表示では計上しない。HLで宛先、認証済み送金元、資産、金額、安定イベントIDを検証する。新しい入金の額・時刻だけから本人を推定しない。
 - 出金予約後、ユーザー別口座の出金可能額を確認して回収し、回収の確定後にreserveから本人へ払う。途中の応答喪失は別送金に置き換えず照合する。共通reserveに資金があっても、未確認の回収や未確定PnLを先払いしない。
 - 新規発注と回収を口座ごとの資金移動ロック・世代で調整する。coreはvaultからの認証済み配分状態を確認し、移動中の証拠金を利用可能として数えない。取消・reduce-onlyを不必要に妨げない。
-- 非replicated POSTを選び、外部送信はDBのawait外で行う。資金計上に用いる読取はreplicated outcallによる確定イベント照合を初期方針にする。決定的なtransformは意味のある金額・宛先・IDを消さない。不一致や安定IDを取得できないケースは計上しない。
+- 非replicated POSTを選び、外部送信はDBのawait外で行う。資金・リスク判断に使う`/info`の読取は料金方式v2のreplicated outcallとする。単一ノードによる応答改変を残高計上やunknown解消へ取り込まない。transformは意味のある金額・宛先・IDを消さない。不一致や安定IDを取得できないケースは計上しない。
 - replicated読取でもHLの嘘・履歴欠落を暗号学的に排除できない。HTTPS/APIの信頼とICP内の合意を区別する。送金ごとの一意な確定根拠が得られることをPhase 1で確認し、得られなければ実資金の実装を有効化しない。
 - master nonce/outboxの巻戻しは特に危険である。復元後は送信停止から開始し、外部履歴・全予約・残高を照合する。旧署名の期限とHLの受理条件を確認できない資金actionを自動再署名しない。
 

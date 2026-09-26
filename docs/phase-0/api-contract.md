@@ -317,7 +317,7 @@ type OrderSummary = record {
 
 - 1回の上限：送信4件・取消4件・照合2口座・注文状態4件/口座（outcallの回数を抑える）。
 - 送信（`/exchange`）は**非replicated** POST。HTTP/外側の`ok`だけでなく各statusを解釈し、受理は`open`または即時`filled`、明示拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`とし**再送しない**（リスク予約も解放しない。解消は照合またはcontrollerの確認済み操作で行う）。
-- 照合（`/info`）は**replicated** outcall＋決定論的な変換関数（`transform_info`）で行う。約定（`userFills`）は`tid`で冪等に取り込み、建玉（`clearinghouseState`）は**観測の全量**で置き換え、注文状態（`orderStatus`）はoidが分かる未終端注文だけに反映する。
+- 照合（`/info`）は料金方式v2の**replicated** outcall＋変換関数（`transform_info`）で行う。約定（`userFills`）は`tid`で冪等に取り込み、建玉（`clearinghouseState`）は**観測の全量**で置き換え、注文状態（`orderStatus`）はoidが分かる未終端注文だけに反映する。replicatedでもHL自体の虚偽や履歴欠落は排除できないため、外部証跡の信頼条件と履歴の完全性は別途検証する。
 - 照合の対象は`accounts`に取引所アドレスを保存済みの有効口座で、`account_id`順のカーソルで巡回する（先頭N件固定にしない）。アドレスは本人の署名済み要求の処理中にvaultから一度だけ取得して保存する。
 - 自動sweep（timer）は本番ビルドのみで組む。試験ビルドでは明示的な`test_sweep_now`で同じ経路を駆動する（PocketICで試験が待つoutcallと取り違えないため）。
 
@@ -424,6 +424,7 @@ type ErrorCode = variant {
   SessionRevoked;
   NotEligible : record { policy_version : nat64 };
   PolicyUnavailable;
+  JournalWriterBusy;
   BadRequest : record { code : BadRequestCode; detail : text };
   IdempotencyConflict : record { request_id : RequestId };
   DuplicateIgnored : record { request_id : RequestId };
@@ -459,6 +460,7 @@ type NotAllowedCode = variant {
 |---|---|---|
 | 同一`client_request_id`・同一本文で再試行可 | `UpstreamUnavailable`、`VenueRateLimited`、`SigningQueueFull` | 同じ冪等性キーで再送。新しいcloid・nonceを作らない |
 | 状態更新後に再試行可 | `StaleAccountState`、`PolicyUnavailable`、`ReservationConflict` | 状態を再取得し、`revision`と`observed_at`を更新してから再判断 |
+| 受付ごとの再試行 | `JournalWriterBusy` | 単一書込みフェンスの一時的な競合。`open_session`はchallenge消費後のため、新しいchallengeと署名で有界に再試行する。他の受付は各要求の冪等性規則を守る |
 | 再試行不可 | `Unauthenticated`、`SessionExpired`、`SessionRevoked`、`NotEligible`、`BadRequest`、`IdempotencyConflict`、`InsufficientFunds`、`RiskLimitExceeded`、`NotAllowed`、`Internal` | 理由を表示し、入力を修正する。自動再送しない（`Internal`は設定不備・DB不整合を含む恒久エラーのため） |
 | 成功扱い（重複受付） | `DuplicateIgnored` | 既存の受付状態を表示する。エラー表示にしない |
 | 自動再送禁止（照合のみ） | `UnknownPending` | 結果不明として表示し、照合結果が届くまで再発注しない |

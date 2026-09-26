@@ -107,6 +107,23 @@ fn p95(mut values: Vec<u128>) -> u128 {
     values[(values.len() * 95).div_ceil(100).saturating_sub(1)]
 }
 
+// Inclusive canister balance deltas for each workflow segment. These include
+// concurrent timer work and must not be presented as isolated signing,
+// outcall, or storage costs.
+fn add_phase_cycles<const N: usize>(
+    pic: &pocket_ic::PocketIc,
+    watched: &[candid::Principal; N],
+    before: &[u128; N],
+    total: &mut [u128; N],
+) -> [u128; N] {
+    let mut after = [0u128; N];
+    for (index, canister) in watched.iter().enumerate() {
+        after[index] = pic.cycle_balance(*canister);
+        total[index] = total[index].saturating_add(before[index].saturating_sub(after[index]));
+    }
+    after
+}
+
 fn run(users: usize) {
     let pic = pic();
     let controller = principal(200);
@@ -168,6 +185,8 @@ fn run(users: usize) {
     let mut budget_wait_ms = 0u64;
     let mut peak_rest_weight = 0u32;
     let mut total_rest_weight = 0u64;
+    // login/funding, allocation, agent/observation, order, cancel, recovery
+    let mut phase_cycles = [[0u128; 5]; 6];
     for index in 0..users {
         let budget: Result<RestBudgetStatus, ErrorCode> =
             query(&pic, policy, controller, "get_rest_budget_status", ()).unwrap();
@@ -183,6 +202,7 @@ fn run(users: usize) {
             query(&pic, policy, controller, "get_rest_budget_status", ()).unwrap();
         let before_user = before_user.unwrap().used;
         let start = Instant::now();
+        let mut phase_before = watched.map(|id| pic.cycle_balance(id));
         let caller = principal(20 + index as u8);
         let session = session(&pic, vault, caller, 21 + index as u8);
         let request_id = format!("mixed-fixed-20260924-{index:03}");
@@ -196,6 +216,7 @@ fn run(users: usize) {
             5_000_000_000,
             index as u8 + 1,
         );
+        phase_before = add_phase_cycles(&pic, &watched, &phase_before, &mut phase_cycles[0]);
         let (allocation, calls): (Result<u32, ErrorCode>, _) =
             call_with_routed_outcalls(&pic, vault, controller, "test_sweep_now", (), |call| {
                 route(call, index as u64 + 10_000)
@@ -206,6 +227,7 @@ fn run(users: usize) {
             .iter()
             .filter(|call| call.url.ends_with("/exchange"))
             .count();
+        phase_before = add_phase_cycles(&pic, &watched, &phase_before, &mut phase_cycles[1]);
 
         let agent: Result<AgentGeneration, ErrorCode> = update(
             &pic,
@@ -227,6 +249,7 @@ fn run(users: usize) {
         .unwrap();
         observe_empty_account(&pic, core, caller, &session);
         let account_id = trading_account_id(&pic, vault, caller, &session);
+        phase_before = add_phase_cycles(&pic, &watched, &phase_before, &mut phase_cycles[2]);
         let accepted_at = Instant::now();
         let order: Result<SubmitOrderResult, ErrorCode> = update_args(
             &pic,
@@ -272,6 +295,7 @@ fn run(users: usize) {
                         .is_ok_and(|body| body["action"]["type"] == "order")
             })
             .count();
+        phase_before = add_phase_cycles(&pic, &watched, &phase_before, &mut phase_cycles[3]);
         let canceled: Result<(), ErrorCode> =
             envelope::cancel_order(&pic, core, caller, &session, order.order_id).unwrap();
         canceled.unwrap();
@@ -293,6 +317,7 @@ fn run(users: usize) {
                     })
             })
             .count();
+        phase_before = add_phase_cycles(&pic, &watched, &phase_before, &mut phase_cycles[4]);
         let recovery: Result<FundRequestAccepted, ErrorCode> = update_args(
             &pic,
             vault,
@@ -334,6 +359,7 @@ fn run(users: usize) {
         }) {
             failure_count += 1;
         }
+        add_phase_cycles(&pic, &watched, &phase_before, &mut phase_cycles[5]);
         complete_ms.push(start.elapsed().as_millis());
         let after_user: Result<RestBudgetStatus, ErrorCode> =
             query(&pic, policy, controller, "get_rest_budget_status", ()).unwrap();
@@ -364,7 +390,7 @@ fn run(users: usize) {
         .map(|(before, after)| before.saturating_sub(after))
         .collect();
     eprintln!(
-        "MIXED_LOAD {{\"seed\":20260924,\"users\":{users},\"allocation_posts\":{},\"order_posts\":{},\"cancel_posts\":{},\"recovery_posts\":{},\"rest_weight_total\":{total_rest_weight},\"rest_weight_current_window\":{},\"rest_weight_peak_sample\":{peak_rest_weight},\"budget_wait_ms\":{budget_wait_ms},\"order_accept_p95_host_ms\":{},\"workflow_p95_host_ms\":{},\"market_age_ms\":{},\"cycles_vault\":{},\"cycles_core\":{},\"cycles_policy\":{},\"cycles_vault_journal\":{},\"cycles_core_journal\":{},\"failures\":{failure_count}}}",
+        "MIXED_LOAD {{\"seed\":20260924,\"users\":{users},\"allocation_posts\":{},\"order_posts\":{},\"cancel_posts\":{},\"recovery_posts\":{},\"rest_weight_total\":{total_rest_weight},\"rest_weight_current_window\":{},\"rest_weight_peak_sample\":{peak_rest_weight},\"budget_wait_ms\":{budget_wait_ms},\"order_accept_p95_host_ms\":{},\"workflow_p95_host_ms\":{},\"market_age_ms\":{},\"cycles_vault\":{},\"cycles_core\":{},\"cycles_policy\":{},\"cycles_vault_journal\":{},\"cycles_core_journal\":{},\"phase_cycles\":{},\"failures\":{failure_count}}}",
         posts[0],
         posts[1],
         posts[2],
@@ -377,7 +403,8 @@ fn run(users: usize) {
         consumed[1],
         consumed[2],
         consumed[3],
-        consumed[4]
+        consumed[4],
+        serde_json::to_string(&phase_cycles).unwrap()
     );
     assert_eq!(posts, [users; 4]);
     assert_eq!(failure_count, 0);

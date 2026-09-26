@@ -7,7 +7,7 @@ Phase 2の既存実装・判定とは区別する。
 
 - ローカルの実canister・mock HL・Chromeで本人の入金案内、配分、Agent承認、成行・指値、SL/TP、取消、回収、出金、履歴、別ユーザー分離の一往復を確認した。画面は注文・建玉・資金を普段の導線とし、資格登録や運用詳細は必要時に開く。狭幅の退出操作もE2Eで確認した。
 - 実HLでの操作感、注文受理と約定の待ち時間、残高反映の滑らかさは未判定。testnet受入はユーザーの指示に従い、ローカル実装が終わるまで行わない。
-- 本人認可、単発送信、結果不明時の予約とフェンス、取消・決済・回収・出金の経路は取引体験の安全条件として維持する。古いbackupの全面再構築、builder fee mock、細かな100人性能内訳、相関評価はそれぞれ別判定として記録する。
+- 本人認可、単発送信、結果不明時の予約とフェンス、取消・決済・回収・出金の経路は取引体験の安全条件として維持する。builder fee mock、100人負荷の性能、相関評価はそれぞれ別判定として記録する。
 
 ## 実装済み
 
@@ -28,7 +28,7 @@ Phase 2の既存実装・判定とは区別する。
 - 独立ジャーナルは入金・本人振替イベントの論理IDを内容から再計算して検証する。任意の論理IDで同じ入金や振替を別記録として追記することを拒否する。
 - 初回ログインで新規EOAと本人IDの対応を作る際は、Principal・EOA・本人ID・networkを非公開V2業務イベントへ先行追記する。書込みフェンス内で既存本人を再確認し、受領番号と本人行を同じDBトランザクションで確定する。既存本人の再ログインは追記せず、journal不通中でも認証できる。journal不通中の新規本人登録は拒否する。
 - vaultの本人向け書込み6入口（セッション失効、Agent承認、配分、出金、準備口座作成、回収）を単一のHPKE `private_call`へ移し、旧平文Candid入口を削除した。封筒の宛先・network・caller・期限・単回使用IDを照合し、業務結果も暗号化する。frontendの操作とローカルbootstrapの鍵生成を合わせた。
-- ジャーナル照合ロックはupgrade後に自動解除せず、設定済みSNS principalだけが`control_guard.resume_journal`を通して解除できるようにした。この経路は独立ジャーナルの高水位・hashとローカル受領記録の連続性、受領記録のない未解決POSTの不存在を確認する。不一致のある古いbackupは送信停止のまま残す。
+- ジャーナル照合ロックはupgrade後に自動解除せず、設定済みSNS principalだけが`control_guard.resume_journal`を通して解除できるようにした。この経路は独立ジャーナルの高水位・hashとローカル受領記録の連続性、受領記録のない未解決POSTの不存在を確認する。独立ジャーナルと不一致のある復元状態は送信停止のまま残す。
 - coreの注文・Agent世代要求・全取消・個別/全決済を書込みHPKE `private_call`へ移し、旧平文Candid入口を削除した。vaultには配分前の取引口座準備をHPKEで追加し、画面が入金案内前に呼び出す。本人・他人のセッションを使ったPocketIC試験と旧入口拒否試験を追加した。
 - 復元時に独立ジャーナルの差分があれば、guard経由の再開呼出しで最大100件ずつhash鎖を検証し、受領記録と別の永続ステージへ取り込む。ステージ済みでも送信は解除しない。`journal_restore_status`はcontrollerへローカル受領末尾・ステージ末尾・送信停止状態を返す。送信中に再開処理がロックを立てた場合、受領証跡を`dispatching`へ反映するトランザクションを拒否する。
 - `send_journal`に送信意図とは別の、workerごとの版付き業務イベント列を追加した。本人と口座の対応、仕訳、予約、注文リスク、約定、外部結果、基準点の型を定義し、論理IDの冪等性、内容相違の拒否、連番と前hashを実装した。登録worker以外には取得させない。配分・出金・回収POSTの明示受理と拒否、回収の応答喪失後の履歴一致・未実行確定、coreのleverage設定・注文・取消の明示結果、配分・出金・回収と注文の受付、後続約定と注文状態観測は型付きイベントを先に追記し、受領番号を対応する状態確定と同じDB transactionで保存する。残る業務更新の先行追記は未実装。
@@ -41,13 +41,16 @@ Phase 2の既存実装・判定とは区別する。
 - builder feeの送信値を0に保ち、EOAの`personal_sign`で署名した同意をHPKEで登録するlocal/testnet専用mock経路を追加した。署名はPrincipal・ユーザー・口座・vault・network・builder・有効期限・nonce・fee 0に束縛し、mock承認と金額0の会計記録を同一DBトランザクションで保存する。実HLの`approveBuilderFee`は呼ばない。
 - 固定seedの20人・100人で、各ユーザーの資格登録、合成入金、配分、Agent承認、注文、取消、回収を実際のcanister経路で混ぜた[ローカル負荷記録](mixed-load-local.md)を作成した。共有REST予算、待機、観測鮮度、canister別cycles総差分、失敗件数を記録した。V2資金送信結果イベントの通常追記後に再測定し、両群で失敗0件だった。
 
+## 初回デプロイとbackupの扱い
+
+サービスは未デプロイで、初回デプロイは空の状態から始める。任意の古いbackupからの全面再構築、状態digest付き基準点、復元記録からの注文行再生成はPhase 3の完了条件から外す。既存のジャーナル高水位照合、不一致時の送信停止、結果不明時の予約・フェンス維持は引き続き必要とする。運用開始後にbackupからの復元を保証する場合は、対象時点と必要な証跡を別途定義する。
+
 ## 未実装・未検証
 
 - 回収フェンスのtestnet受入。ローカルではcoreのprepare/commit、注文受付・送信前のフェンス、HL openOrders・建玉照会、vaultの予約とoutboxを結合した。POST結果不明は再送せず、送金履歴の時間窓と取得カーソルを永続化して照合する。実HLの履歴の完全性が未確認のため、未実行判定による自動解除は既定で無効にした。
-- 2口座testnet受入のGATE 0を確認したが、この作業環境の`ICP_HOME=.icp-home`には`private-perp-local` identityのみで、`icp.yaml`にもlocal networkのみが定義されている。testnet canister ID、cycles、tECDSA key ID、2独立HL口座とtest USDCの準備を確認できていない。実HLへのPOST・残高照合・履歴完全性確認は未実施であり、`recovery_history_verified`をtestnetで有効にしていない。[受入記録](testnet-acceptance.md)にGATE 0と必要な証跡を分けた。
-- V2先行追記の未網羅部分、状態digest付き基準点、注文本文を含まない復元記録からの注文行再構築、送信意図V1がbackupより進んだ場合の差分確定、HL履歴・残高による復元確定は未実装。本人・口座、入金、資金受付と一部外部結果、注文受付の要求とリスク予約は限定再生できるが、古いbackupを全面的に安全復元する条件には達していない。証跡不足のbackupでは送信停止を維持する。
-- 署名・outcall・保存別のcycles実測は未実施。canister別の総差分しか得ておらず、[混合負荷](mixed-load-local.md)の100人試験もIC時計を進めて共有REST予算の待機を処理したため、実時間の性能合格には使えない。
-- 2独立HL口座でのtestnet資金往復・障害復旧。testnet identity、cycles、test USDC、tECDSA key IDの準備状況も未確認。A/B0/B1の合成公開トレース相関評価は[別記録](privacy-local-eval.md)で実施し、B0/B1とも未達とした。実HLの公開情報を加えた相関評価は未実施。
+- 2口座testnet受入のGATE 0は未達。この作業環境の`ICP_HOME=.icp-home`には`private-perp-local` identityのみで、`icp.yaml`にもlocal networkのみが定義されている。testnet canister ID、cycles、tECDSA key ID、2独立HL口座とtest USDCの準備を確認できていない。実HLへのPOST・残高照合・履歴完全性確認は未実施であり、`recovery_history_verified`をtestnetで有効にしていない。[受入記録](testnet-acceptance.md)にGATE 0と必要な証跡を分けた。
+- 署名・outcall・保存別のcycles実測は未実施。[混合負荷](mixed-load-local.md)では業務区間別の包括的なcycles差分を追加したが、timer費用が混ざる。100人試験もIC時計を進めて共有REST予算の待機を処理したため、実時間の性能合格には使えない。
+- A/B0/B1の合成公開トレース相関評価は[別記録](privacy-local-eval.md)で実施し、B0/B1とも未達とした。実HLの公開情報を加えた相関評価は未実施。
 
 ## 検証
 
@@ -111,6 +114,10 @@ Phase 2の既存実装・判定とは区別する。
 - 直近の全PocketICは並列実行によるPocketIC instance削除競合を避けて逐次実行し、39試験群・131件が成功した。この全面実行後の公開ジャーナル状態APIは対象のcore-orders 13件・vault-outbox 15件とWasm clippyで確認した。ローカルの実Canister・mock HL・Chromeの一往復E2E 4件も成功した。狭幅の確認ダイアログ追加後のE2E再実行では4件中3件が成功し、長い一往復試験は資金履歴の110件入力後、別口座へのログインが`PolicyUnavailable`で失敗した。確認ダイアログの取消は通過したが、最後の別口座ログインの失敗原因は未確定であり、この再実行を合格とは記録しない。
 - `vlmkit` 0.22.0でビルド済みローカル画面を検査した。取引・資金・履歴の公開状態は1280/768/375pxのintegrityで欠陥0、取引画面の320〜1280px幅掃引と375pxでの横はみ出し0、タッチ対象不足0、測定可能な文字コントラスト違反0、開閉操作・animation・reduced-motion検査も通過した。フォーカス検査の高さ720pxで出た逆行警告は、1600pxで消えたためスクロール中のviewport座標に起因する。残る段飛び警告は非操作要素と無効ボタンを飛ばす箇所であり、Tab到達性の欠落は確認されていない。未接続のボタン3件を操作不能とする`check interactions`の警告は意図した無効状態。`funds`と`history`は未認証シェルのみを測ったため、本人画面の視覚合格を意味しない。スキルの要求版0.23.0はnpm未公開で、公開済み0.22.0を使用した。
 - ローカル検証は実HLのREST weight・受理挙動・cycles費用を保証しない。
+- 混合負荷へ業務区間別cycles差分を追加し、test-venue Wasmで20人・100人を逐次再実行した。配分・注文・取消・回収のPOSTは各人数分、失敗0件。値と測定の限界は[混合負荷記録](mixed-load-local.md)に更新した。Chromeを使ったローカル実canister画面E2Eで、110件の履歴投入後の別口座ログインが`PolicyUnavailable`で失敗することを再現した。ログイン時に新しいchallengeを使って有界に再試行する修正後、E2E 4件、frontendの型検査・lint・format・unit 31件が成功した。
+- 2026-09-25、Agentの署名ごとに呼んでいた`ecdsa_public_key`を省き、世代登録時に保存したアドレスと署名から復元したアドレスを照合する方式へ変更した。`sign_with_ecdsa`はHLの各actionで引き続き実行する。現行`ic-cdk-management-canister` 0.2.0の`HttpRequest` builderは料金方式v2を指定済みで、HL `/exchange`は既に非replicatedだったため、残るcore/vaultの`/info`を非replicatedへ切り替えた。単一ノードの読取結果は資金確定の独立証明にならず、実HLでの信頼条件とcycles費用は未確認。署名37件、PocketICの注文13件・入金2件・回収12件・入金照合1件、Wasm clippy `-D warnings`、署名境界検査が成功した。
+- 同じ固定seedの20人・100人混合負荷を変更後のWasmで再実行し、失敗0件。5 canister合計のcycles差分は先行測定比でそれぞれ2,068,584,103 cycles（0.163%）、11,542,328,492 cycles（0.182%）減った。ただし署名・outcall・保存・timerが混在するため、この全差分を公開鍵照会の削減に帰属しない。100人の市場観測年齢は61秒から244秒となった。[詳細](mixed-load-local.md)。
+- レバレッジの確定値を口座・銘柄単位で永続化し、同じ倍率の後続注文では`updateLeverage`とそのtECDSA署名を省く。倍率変更は先行注文と送信結果不明の変更が解決するまで待機し、未確認の送信を自動再送しない。外部Agentによる変更を永久に見逃さないよう、確定値は10分で再確認する。upgrade時に旧状態から確定値を推測せず、最初の注文では従来どおり更新する。PocketICの`core_pipeline`で同倍率の省略、倍率変更、結果不明時の停止を確認した。
 
 ## 既存環境の移行
 
@@ -119,3 +126,7 @@ Phase 2の既存実装・判定とは区別する。
 ## ローカルeligibility issuer
 
 `LOCAL_ELIGIBILITY_ISSUER_KEY`をgit管理外の環境変数に設定し、`cargo run -p eligibility-issuer -- address`で公開アドレスを得る。これを`LOCAL_ELIGIBILITY_ISSUER_ADDRESS`として`bootstrap-local.sh`へ渡す。画面で取得した署名対象のCandid hexをissuer CLIの標準入力へ渡し、出力された署名を画面へ登録する。testnetでは公開アドレス・規約版・cyclesと市場閾値を別途設定し、ローカルbootstrapの値をそのまま流用しない。
+
+## レビュー指摘への対応（2026-09-26）
+
+資金・リスク判断に使うcore/vaultの`/info`をreplicatedへ戻した。`/exchange`は非replicatedを維持する。上記の非replicated読取による負荷測定は変更前の記録であり、現在の構成の性能値ではない。レバレッジの旧未解決preflight解決では、予約者がNULLのキャッシュ行を予約なしとして扱うよう修正した。

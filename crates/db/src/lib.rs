@@ -153,11 +153,14 @@ mod tests {
                     "{name}: migration {} has empty SQL",
                     migration.version
                 );
-                assert!(
-                    migration.sql.trim_start().starts_with("CREATE TABLE"),
-                    "{name}: migration {} must start with CREATE TABLE",
-                    migration.version
-                );
+                // 初期schemaは表を作る。後続migrationはALTER TABLEなどで
+                // 既存schemaを更新するため、CREATE TABLEでの開始を要求しない。
+                if migration.version == 1 {
+                    assert!(
+                        migration.sql.trim_start().starts_with("CREATE TABLE"),
+                        "{name}: initial migration must start with CREATE TABLE"
+                    );
+                }
                 assert!(
                     !migration.sql.to_uppercase().contains("IF NOT EXISTS"),
                     "{name}: migration {} must not use IF NOT EXISTS",

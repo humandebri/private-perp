@@ -65,6 +65,8 @@ type EnvironmentView = record {
 // API全体のエラー。
 type ErrorCode = variant {
   Internal : record { code : text };
+  // 単一書込みフェンスの一時的な競合。受付ごとの再試行規則に従う。
+  JournalWriterBusy;
   DuplicateIgnored : record { request_id : blob };
   SigningQueueFull;
   NotAllowed : record { code : NotAllowedCode };

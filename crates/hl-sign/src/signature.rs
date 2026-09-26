@@ -170,6 +170,27 @@ pub fn recover_v(
     Err(SignError::PublicKeyMismatch)
 }
 
+/// `r`・`s` と登録済みアドレスから `v` を決定する。
+///
+/// Agentの公開鍵は世代登録時に検証済みで、そのアドレスを永続化している。
+/// 署名ごとの管理Canister公開鍵照会を避けても、復元した署名者を照合できる。
+pub fn recover_v_for_address(
+    digest: &[u8; 32],
+    r: [u8; 32],
+    s: [u8; 32],
+    expected_address: &[u8; 20],
+) -> Result<u8, SignError> {
+    for v in [27u8, 28u8] {
+        let candidate = Signature { r, s, v };
+        if let Ok(address) = recover_address(digest, &candidate, None)
+            && address == *expected_address
+        {
+            return Ok(v);
+        }
+    }
+    Err(SignError::PublicKeyMismatch)
+}
+
 fn recover_public_key(digest: &[u8; 32], signature: &Signature) -> Result<[u8; 33], SignError> {
     let recovered = VerifyingKey::recover_from_prehash(
         digest,
@@ -195,7 +216,7 @@ fn secret_key_from_bytes(secret_key: &[u8; 32]) -> Result<k256::SecretKey, SignE
 mod tests {
     use super::{
         Signature, address_from_public_key, address_from_secret, public_key_compressed,
-        recover_address, recover_v, sign_digest_for_tests,
+        recover_address, recover_v, recover_v_for_address, sign_digest_for_tests,
     };
     use crate::error::SignError;
 
@@ -316,6 +337,23 @@ mod tests {
 
         let v = recover_v(&digest, signature.r, signature.s, &public_key).expect("recover v");
         assert_eq!(v, signature.v);
+    }
+
+    #[test]
+    fn recover_v_uses_the_registered_agent_address() {
+        let digest = crate::keccak::keccak256(b"agent action");
+        let signature = sign_digest_for_tests(&digest, &secret(17)).expect("sign");
+        let address = address_from_secret(&secret(17)).expect("address");
+        let other_address = address_from_secret(&secret(18)).expect("other address");
+
+        assert_eq!(
+            recover_v_for_address(&digest, signature.r, signature.s, &address),
+            Ok(signature.v)
+        );
+        assert_eq!(
+            recover_v_for_address(&digest, signature.r, signature.s, &other_address),
+            Err(SignError::PublicKeyMismatch)
+        );
     }
 
     #[test]

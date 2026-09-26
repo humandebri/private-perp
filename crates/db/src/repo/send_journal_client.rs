@@ -118,6 +118,19 @@ pub fn claim_writer(
     )
     .map_err(sql)?;
     if crate::cas::changes(c)? != 1 {
+        // Classify contention in the same transaction as the failed CAS.
+        // A locked or unconfigured journal remains PolicyUnavailable.
+        let active = c
+            .query_optional_scalar::<i64>(
+                "SELECT 1 FROM send_journal_client WHERE singleton = 1
+                 AND locked = 0 AND writer_request_id IS NOT NULL
+                 AND writer_epoch < 9223372036854775807",
+                params![],
+            )
+            .map_err(sql)?;
+        if active.is_some() {
+            return Err(Error::WriterBusy);
+        }
         return Err(Error::Conflict);
     }
     let epoch = c

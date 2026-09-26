@@ -1824,6 +1824,7 @@ pub async fn append(role: &str, intent: SendIntent) -> Result<JournalAck, ErrorC
     })
     .map_err(|error| match error {
         db::error::Error::Conflict => ErrorCode::PolicyUnavailable,
+        db::error::Error::WriterBusy => ErrorCode::JournalWriterBusy,
         other => map_db(other),
     })?;
     if let Err(error) = ensure_ready(role).await {
@@ -1935,6 +1936,7 @@ where
     })
     .map_err(|error| match error {
         db::error::Error::Conflict => ErrorCode::PolicyUnavailable,
+        db::error::Error::WriterBusy => ErrorCode::JournalWriterBusy,
         other => map_db(other),
     })?;
     let Some(writer_epoch) = writer_epoch else {

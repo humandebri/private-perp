@@ -12,6 +12,8 @@ pub enum Error {
     NotFound,
     /// 一意制約などによる競合（同一キーの異なる内容を含む）。
     Conflict,
+    /// 独立ジャーナルへの単一書込みフェンスを別の処理が保持中。
+    WriterBusy,
     /// 残高・予約が不足している。
     InsufficientFunds { available: i64, requested: i64 },
     /// 取引口座のequityに対するリスク上限を超える。
@@ -30,6 +32,7 @@ impl std::fmt::Display for Error {
             Self::Sql(message) => write!(formatter, "sql error: {message}"),
             Self::NotFound => write!(formatter, "not found"),
             Self::Conflict => write!(formatter, "conflict"),
+            Self::WriterBusy => write!(formatter, "journal writer busy"),
             Self::InsufficientFunds {
                 available,
                 requested,

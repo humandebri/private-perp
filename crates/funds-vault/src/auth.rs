@@ -49,6 +49,7 @@ pub fn map_db(error: DbError, request_id: Option<&[u8]>) -> ErrorCode {
                 code: NotAllowedCode::OperationNotAvailable,
             },
         },
+        DbError::WriterBusy => ErrorCode::JournalWriterBusy,
         DbError::StateConflict { .. } => ErrorCode::ReservationConflict,
         DbError::Overflow => bad(BadRequestCode::QuantityOutOfRange, "integer overflow"),
         DbError::Invariant(message) => bad(BadRequestCode::MalformedPayload, message),

@@ -277,6 +277,7 @@ export class SessionStore {
               'InsufficientFunds',
               'NotEligible',
               'PolicyUnavailable',
+              'JournalWriterBusy',
               'StaleAccountState',
               'VenueRateLimited',
               'SigningQueueFull',

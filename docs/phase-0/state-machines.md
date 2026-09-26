@@ -125,7 +125,7 @@ accepted ──▶ reserved ──▶ executing ──▶ settled
 | `dispatching`中のupgrade | `unknown`。アップグレード後に照合から再開する |
 | `orderStatus`が見つからない | 未実行の証明ではない。保持期間・可視化遅延を考慮し、未解決なら`unknown`を維持する |
 | 安定イベントIDが取得できない入金 | 計上しない |
-| 非replicated読取の結果 | 単独では資金計上の権威にしない。replicated outcallによる確定イベント照合を初期方針とする |
+| 非replicated読取の結果 | 単一ノードの応答だけでは資金計上・`unknown`解消の独立証明にならない。HLイベントの識別子・口座・金額・履歴の完全性と信頼条件を実測し、本番での確定条件を別途承認する |
 | 照合で取消済みと判明 | `cancelled`へ遷移し、取消actionの照合根拠を残す |
 | 照合で部分約定と判明 | `partially_filled`。リスク予約は約定分だけ消費する |
 

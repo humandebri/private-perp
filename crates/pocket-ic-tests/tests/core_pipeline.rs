@@ -198,6 +198,17 @@ fn submit(
     request_id: &[u8],
     quantity: &str,
 ) -> Result<api_types::order::SubmitOrderResult, ErrorCode> {
+    submit_with_leverage(pic, core, user, request_id, quantity, 3)
+}
+
+fn submit_with_leverage(
+    pic: &PocketIc,
+    core: Principal,
+    user: &User,
+    request_id: &[u8],
+    quantity: &str,
+    leverage: u32,
+) -> Result<api_types::order::SubmitOrderResult, ErrorCode> {
     update_args(
         pic,
         core,
@@ -216,13 +227,127 @@ fn submit(
                 limit_price: Some("2500".to_string()),
                 slippage_tolerance_bps: None,
                 reduce_only: false,
-                leverage: Some(3),
+                leverage: Some(leverage),
                 trigger: None,
                 expires_after: None,
             },
         ),
     )
     .expect("call")
+}
+
+fn exchange_types(calls: &[pocket_ic_tests::CapturedHttpCall]) -> Vec<String> {
+    calls
+        .iter()
+        .filter(|call| call.url.contains("/exchange"))
+        .map(|call| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&call.body).expect("exchange JSON");
+            body["action"]["type"]
+                .as_str()
+                .expect("action type")
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn confirmed_leverage_is_reused_per_account_and_asset() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 210, b"leverage-cache");
+
+    let sweep = |pic: &PocketIc| {
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED),
+        )
+        .expect("sweep call")
+    };
+
+    submit(&pic, core, &user, b"leverage-first", "0.01").expect("first order");
+    let (first, first_calls) = sweep(&pic);
+    assert_eq!(first.expect("first sweep").dispatched, 1);
+    assert_eq!(exchange_types(&first_calls), ["updateLeverage", "order"]);
+
+    submit(&pic, core, &user, b"leverage-same", "0.01").expect("same leverage");
+    let (second, second_calls) = sweep(&pic);
+    assert_eq!(second.expect("second sweep").dispatched, 1);
+    assert_eq!(exchange_types(&second_calls), ["order"]);
+
+    submit_with_leverage(&pic, core, &user, b"leverage-changed", "0.01", 4)
+        .expect("changed leverage");
+    let (third, third_calls) = sweep(&pic);
+    assert_eq!(third.expect("third sweep").dispatched, 1);
+    assert_eq!(exchange_types(&third_calls), ["updateLeverage", "order"]);
+}
+
+#[test]
+fn uncertain_leverage_blocks_a_different_setting() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 211, b"leverage-unknown");
+    let first = submit(&pic, core, &user, b"leverage-unknown-first", "0.01").expect("first order");
+    submit_with_leverage(&pic, core, &user, b"leverage-unknown-second", "0.01", 4)
+        .expect("second order accepted");
+    let normal = route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED);
+    let (outcome, first_calls) = call_with_routed_outcalls::<
+        (),
+        Result<api_types::order::SweepOutcome, ErrorCode>,
+        _,
+    >(&pic, core, controller, "test_sweep_now", (), |call| {
+        if call.url.contains("/exchange") {
+            Err((1, "leverage result unavailable".to_string()))
+        } else {
+            normal(call)
+        }
+    })
+    .expect("first sweep call");
+    assert_eq!(outcome.expect("first sweep").dispatched, 1);
+    assert_eq!(exchange_types(&first_calls), ["updateLeverage"]);
+
+    let (outcome, second_calls) =
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED),
+        )
+        .expect("second sweep call");
+    assert_eq!(outcome.expect("second sweep").dispatched, 0);
+    assert!(exchange_types(&second_calls).is_empty());
+
+    let resolved: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "resolve_unknown_order_preflight",
+        (first.order_id, PreflightResolution::Rejected),
+    )
+    .expect("resolution call");
+    resolved.expect("resolve first leverage change");
+    pic.advance_time(std::time::Duration::from_secs(6));
+    pic.tick();
+    let (outcome, third_calls) =
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED),
+        )
+        .expect("third sweep call");
+    assert_eq!(outcome.expect("third sweep").dispatched, 1);
+    assert_eq!(exchange_types(&third_calls), ["updateLeverage", "order"]);
 }
 
 /// 送信内容から応答を選ぶ（URLと本文の`type`で振り分ける）。
@@ -317,6 +442,10 @@ fn the_pipeline_dispatches_and_reconciles_orders() {
                     .is_ok_and(|body| body["action"]["type"] == "order")
         })
         .expect("exchange outcall");
+    assert_eq!(
+        exchange.replication,
+        pocket_ic::common::rest::CanisterHttpReplication::NonReplicated,
+    );
     let body: serde_json::Value = serde_json::from_slice(&exchange.body).expect("json");
     assert_eq!(body["action"]["type"], "order");
     assert!(
@@ -334,6 +463,10 @@ fn the_pipeline_dispatches_and_reconciles_orders() {
         .collect::<Vec<_>>();
     assert!(!info.is_empty(), "照合のoutcallが出る");
     for call in &info {
+        assert_eq!(
+            call.replication,
+            pocket_ic::common::rest::CanisterHttpReplication::FullyReplicated,
+        );
         let query: serde_json::Value = serde_json::from_slice(&call.body).expect("json");
         assert_eq!(query["user"], expected_user, "取引所アドレスで照会する");
     }
@@ -563,7 +696,8 @@ fn rejected_orders_release_risk_and_unknown_sends_are_not_resent() {
     );
 
     // 送信結果が不明な注文は`unknown`にし、再送しない。
-    let uncertain = submit(&pic, core, &user, b"pipeline-uncertain", "0.05").expect("accepted");
+    let uncertain = submit_with_leverage(&pic, core, &user, b"pipeline-uncertain", "0.05", 4)
+        .expect("accepted");
     let (swept, _) = call_with_routed_outcalls::<
         (),
         Result<api_types::order::SweepOutcome, ErrorCode>,

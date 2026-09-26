@@ -1,6 +1,6 @@
 //! 取引所の入金の取得（replicatedな`/info`）と取り込み。
 //!
-//! 取得はreplicated outcall＋決定論的な変換関数で行い、取り込みは正規化した
+//! 取得はreplicated outcall＋変換関数で行い、取り込みは正規化した
 //! イベントID（`keccak256("deposit" ‖ tx_hash)`）で二重計上を防ぐ。宛先が導出口座
 //! （`custody_accounts.master_address`）と一致すれば本人へ計上し、未知の宛先は記録のみ。
 

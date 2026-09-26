@@ -41,6 +41,7 @@ export const idlFactory = ({ IDL }) => {
   })
   const ErrorCode = IDL.Variant({
     Internal: IDL.Record({ code: IDL.Text }),
+    JournalWriterBusy: IDL.Null,
     DuplicateIgnored: IDL.Record({ request_id: IDL.Vec(IDL.Nat8) }),
     SigningQueueFull: IDL.Null,
     NotAllowed: IDL.Record({ code: NotAllowedCode }),
@@ -149,33 +150,40 @@ export const idlFactory = ({ IDL }) => {
   })
   const Result_4 = IDL.Variant({ Ok: EnvironmentView, Err: ErrorCode })
   const Result_5 = IDL.Variant({ Ok: IDL.Vec(IDL.Nat8), Err: ErrorCode })
+  const Result_6 = IDL.Variant({
+    Ok: IDL.Opt(IDL.Principal),
+    Err: ErrorCode,
+  })
+  const Result_7 = IDL.Variant({
+    Ok: IDL.Tuple(IDL.Bool, IDL.Bool),
+    Err: ErrorCode,
+  })
   const MarketStatus = IDL.Record({
     eligible_for_new_risk: IDL.Bool,
     market: IDL.Text,
     reason_code: IDL.Opt(IDL.Text),
     observed_at: IDL.Opt(IDL.Nat64),
   })
-  const Result_6 = IDL.Variant({ Ok: MarketStatus, Err: ErrorCode })
-  const Result_7 = IDL.Variant({
-    Ok: IDL.Opt(IDL.Principal),
-    Err: ErrorCode,
-  })
-  const Result_8 = IDL.Variant({
+  const Result_8 = IDL.Variant({ Ok: MarketStatus, Err: ErrorCode })
+  const Result_9 = IDL.Variant({
     Ok: IDL.Tuple(IDL.Nat64, IDL.Nat64, IDL.Bool),
     Err: ErrorCode,
   })
-  const Result_13 = IDL.Variant({ Ok: IDL.Tuple(IDL.Bool, IDL.Bool), Err: ErrorCode })
   const PrepareRecovery = IDL.Record({
     account_id: IDL.Vec(IDL.Nat8),
     request_id: IDL.Vec(IDL.Nat8),
     user_id: IDL.Vec(IDL.Nat8),
     master_address: IDL.Vec(IDL.Nat8),
   })
-  const Result_9 = IDL.Variant({
+  const Result_10 = IDL.Variant({
     Ok: RecoveryFenceToken,
     Err: ErrorCode,
   })
-  const Result_10 = IDL.Variant({ Ok: IDL.Bool, Err: ErrorCode })
+  const Result_11 = IDL.Variant({ Ok: IDL.Bool, Err: ErrorCode })
+  const Result_12 = IDL.Variant({
+    Ok: IDL.Tuple(IDL.Nat64, IDL.Bool),
+    Err: ErrorCode,
+  })
   const PreflightResolution = IDL.Variant({
     Applied: IDL.Null,
     Rejected: IDL.Null,
@@ -185,11 +193,7 @@ export const idlFactory = ({ IDL }) => {
     dispatched: IDL.Nat32,
     cancels: IDL.Nat32,
   })
-  const Result_11 = IDL.Variant({ Ok: SweepOutcome, Err: ErrorCode })
-  const Result_12 = IDL.Variant({
-    Ok: IDL.Tuple(IDL.Nat64, IDL.Bool),
-    Err: ErrorCode,
-  })
+  const Result_13 = IDL.Variant({ Ok: SweepOutcome, Err: ErrorCode })
   const HttpHeader = IDL.Record({ value: IDL.Text, name: IDL.Text })
   const HttpRequestResult = IDL.Record({
     status: IDL.Nat,
@@ -214,23 +218,23 @@ export const idlFactory = ({ IDL }) => {
     get_cycles_status: IDL.Func([], [Result_3], []),
     get_environment: IDL.Func([], [Result_4], ['query']),
     get_hpke_public_key: IDL.Func([], [Result_5], ['query']),
-    get_journal_guard: IDL.Func([], [Result_7], ['query']),
-    get_journal_send_status: IDL.Func([], [Result_13], ['query']),
-    get_market_status: IDL.Func([IDL.Text], [Result_6], ['query']),
+    get_journal_guard: IDL.Func([], [Result_6], ['query']),
+    get_journal_send_status: IDL.Func([], [Result_7], ['query']),
+    get_market_status: IDL.Func([IDL.Text], [Result_8], ['query']),
     get_order_by_request: IDL.Func([HpkeRequest], [Result_1], []),
     get_policy_principal: IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
-    get_send_journal: IDL.Func([], [Result_7], ['query']),
+    get_send_journal: IDL.Func([], [Result_6], ['query']),
     get_vault_principal: IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
-    journal_restore_status: IDL.Func([], [Result_8], ['query']),
-    recovery_replay_pending: IDL.Func([], [Result_10], ['query']),
-    recovery_stage_status: IDL.Func([], [Result_12], ['query']),
+    journal_restore_status: IDL.Func([], [Result_9], ['query']),
     list_fills: IDL.Func([HpkeRequest], [Result_1], []),
     list_orders: IDL.Func([HpkeRequest], [Result_1], []),
     mark_recovery_unknown: IDL.Func([RecoveryFenceToken], [Result], []),
-    migrate_recovery: IDL.Func([PrepareRecovery], [Result_9], []),
-    prepare_recovery: IDL.Func([PrepareRecovery], [Result_9], []),
+    migrate_recovery: IDL.Func([PrepareRecovery], [Result_10], []),
+    prepare_recovery: IDL.Func([PrepareRecovery], [Result_10], []),
     private_call: IDL.Func([HpkeRequest], [Result_1], []),
-    recovery_migration_locked: IDL.Func([], [Result_10], ['query']),
+    recovery_migration_locked: IDL.Func([], [Result_11], ['query']),
+    recovery_replay_pending: IDL.Func([], [Result_11], ['query']),
+    recovery_stage_status: IDL.Func([], [Result_12], ['query']),
     refresh_market: IDL.Func([], [Result], []),
     resolve_unknown_order_preflight: IDL.Func(
       [IDL.Vec(IDL.Nat8), PreflightResolution],
@@ -247,7 +251,7 @@ export const idlFactory = ({ IDL }) => {
     set_send_journal: IDL.Func([IDL.Principal], [Result], []),
     set_vault_principal: IDL.Func([IDL.Principal], [Result], []),
     set_venue_endpoints: IDL.Func([IDL.Text, IDL.Text], [Result], []),
-    sweep: IDL.Func([], [Result_11], []),
+    sweep: IDL.Func([], [Result_13], []),
     transform_info: IDL.Func([TransformArgs], [HttpRequestResult], ['query']),
     transform_market_info: IDL.Func([TransformArgs], [HttpRequestResult], ['query']),
     transform_open_orders: IDL.Func([TransformArgs], [HttpRequestResult], ['query']),

@@ -108,22 +108,7 @@ export class LocalGateway {
     const generation = ++this.generation
     const clients = await createClients()
     const address = await connectWallet()
-    const challenge = unwrap(
-      await clients.vault.issue_challenge({
-        principal: clients.principal,
-        origin: location.origin,
-        network: { Local: null },
-        purpose: { Login: null },
-        eoa_address: hexToBytes(address, 20),
-      }),
-    )
-    const signature = await signTypedData(address, new Uint8Array(challenge.typed_data))
-    const session = unwrap(
-      await clients.vault.open_session({
-        challenge_id: challenge.challenge_id,
-        eoa_signature: signature,
-      }),
-    )
+    const session = await this.openLoginSession(clients, address, generation)
     const envelope = await EnvelopeClient.create()
     if (generation !== this.generation) {
       await this.sealedVault(
@@ -136,6 +121,46 @@ export class LocalGateway {
     }
     this.active = { address, session, clients, envelope }
     return this.active
+  }
+
+  private async openLoginSession(
+    clients: CanisterClients,
+    address: string,
+    generation: number,
+  ): Promise<SessionHandle> {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (generation !== this.generation) throw new Error('セッションは破棄されました')
+      // open_session consumes its challenge before the journal write. A busy
+      // journal therefore needs a fresh challenge and signature on retry.
+      const challenge = unwrap(
+        await clients.vault.issue_challenge({
+          principal: clients.principal,
+          origin: location.origin,
+          network: { Local: null },
+          purpose: { Login: null },
+          eoa_address: hexToBytes(address, 20),
+        }),
+      )
+      const signature = await signTypedData(address, new Uint8Array(challenge.typed_data))
+      if (generation !== this.generation) throw new Error('セッションは破棄されました')
+      try {
+        return unwrap(
+          await clients.vault.open_session({
+            challenge_id: challenge.challenge_id,
+            eoa_signature: signature,
+          }),
+        )
+      } catch (error) {
+        if (
+          !(error instanceof CanisterError) ||
+          error.code !== 'JournalWriterBusy' ||
+          attempt === 3
+        )
+          throw error
+        await new Promise((resolve) => setTimeout(resolve, 150 * 2 ** attempt))
+      }
+    }
+    throw new Error('セッションを開始できませんでした')
   }
 
   async logout(): Promise<void> {

@@ -53,6 +53,8 @@ pub enum ErrorCode {
         policy_version: u64,
     },
     PolicyUnavailable,
+    /// 単一書込みフェンスの一時的な競合。受付ごとの再試行規則に従う。
+    JournalWriterBusy,
     BadRequest {
         code: BadRequestCode,
         detail: String,
@@ -180,6 +182,14 @@ mod tests {
             code: "vault principal is not configured".to_string(),
         };
         assert!(!error.retry_same_request());
+        assert!(error.must_not_auto_resend());
+    }
+
+    #[test]
+    fn journal_writer_busy_does_not_authorize_reusing_a_consumed_challenge() {
+        let error = ErrorCode::JournalWriterBusy;
+        assert!(!error.retry_same_request());
+        assert!(!error.retry_after_state_refresh());
         assert!(error.must_not_auto_resend());
     }
 }

@@ -1361,7 +1361,65 @@ pub fn mark_preflight_applied(
         crate::cas::changes(connection)?,
         "dispatching preflight",
         "claim lost",
+    )?;
+    let (account_id, asset_index, leverage) = leverage_target(connection, order_id)?;
+    crate::repo::leverage::confirmed(
+        connection,
+        order_id,
+        &account_id,
+        asset_index,
+        leverage,
+        now,
     )
+}
+
+/// 確認済みの同一設定を使い、注文のpreflightだけを省く。
+pub fn mark_preflight_skipped(
+    connection: &mut UpdateConnection<'_>,
+    order_id: &[u8; 32],
+    worker_epoch: u64,
+    now: u64,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "UPDATE orders SET preflight_state = 'reconciled', updated_at = ?3
+             WHERE order_id = ?1 AND worker_epoch = ?2 AND dispatch_state = 'signing'
+               AND preflight_state = 'queued'",
+            params![order_id.as_slice(), worker_epoch as i64, now as i64],
+        )
+        .map_err(sql)?;
+    crate::cas::ensure_changed(
+        crate::cas::changes(connection)?,
+        "queued preflight",
+        "claim lost",
+    )
+}
+
+fn leverage_target(
+    connection: &Connection,
+    order_id: &[u8; 32],
+) -> Result<([u8; 32], u32, u32), Error> {
+    let row = connection
+        .query_optional(
+            "SELECT account_id, asset_index, effective_leverage FROM orders WHERE order_id = ?1",
+            params![order_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<Vec<u8>>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<i64>(2)?,
+                ))
+            },
+        )
+        .map_err(sql)?
+        .ok_or(Error::NotFound)?;
+    Ok((
+        row.0
+            .try_into()
+            .map_err(|_| Error::Invariant("bad leverage account"))?,
+        u32::try_from(row.1).map_err(|_| Error::Invariant("bad leverage asset"))?,
+        u32::try_from(row.2).map_err(|_| Error::Invariant("bad leverage value"))?,
+    ))
 }
 
 /// leverage更新が拒否または不明になった場合は注文本体を送らず停止する。
@@ -1399,6 +1457,12 @@ pub fn stop_after_preflight(
         "dispatching preflight",
         "claim lost",
     )?;
+    let (account_id, asset_index, _) = leverage_target(connection, order_id)?;
+    if rejected {
+        crate::repo::leverage::rejected(connection, order_id, &account_id, asset_index)?;
+    } else {
+        crate::repo::leverage::unresolved(connection, order_id, &account_id, asset_index)?;
+    }
     if rejected {
         release_risk_for_order(connection, order_id, now)?;
     }
@@ -1443,6 +1507,16 @@ pub fn resolve_unknown_preflight(
         crate::cas::changes(connection)?,
         "unknown preflight",
         "not unresolved",
+    )?;
+    let (account_id, asset_index, leverage) = leverage_target(connection, order_id)?;
+    crate::repo::leverage::resolve_legacy_or_pending(
+        connection,
+        order_id,
+        &account_id,
+        asset_index,
+        leverage,
+        applied,
+        now,
     )?;
     connection
         .execute(
@@ -1696,6 +1770,17 @@ pub fn recover_expired_dispatches(
               WHERE dispatch_state = 'signing' AND preflight_state = 'dispatching'
                 AND (lease_until IS NULL OR lease_until < ?1)",
             params![now as i64],
+        )
+        .map_err(sql)?;
+    connection
+        .execute(
+            "UPDATE leverage_cache SET pending_state = 'unknown'
+              WHERE pending_state = 'reserved' AND EXISTS (
+                  SELECT 1 FROM orders
+                   WHERE orders.order_id = leverage_cache.pending_order_id
+                     AND orders.preflight_state = 'unknown'
+              )",
+            &[],
         )
         .map_err(sql)?;
     connection

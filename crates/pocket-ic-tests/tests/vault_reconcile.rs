@@ -123,15 +123,25 @@ fn fetched_deposits_are_credited_once() {
         .expect("snapshot before deposits");
 
     // 取得（replicated outcall＋変換）→ 本人へ計上。
-    let first: Result<u32, ErrorCode> = call_with_mocked_outcall(
+    let (first, calls): (Result<u32, ErrorCode>, _) = pocket_ic_tests::call_with_routed_outcalls(
         &pic,
         vault,
         controller,
         "reconcile_deposits",
         (blob(&address),),
-        Ok((200, INFO_BODY.to_vec())),
+        |call| {
+            assert!(call.url.contains("/info"));
+            Ok((200, INFO_BODY.to_vec()))
+        },
     )
     .expect("call");
+    assert!(!calls.is_empty());
+    for call in calls {
+        assert_eq!(
+            call.replication,
+            pocket_ic::common::rest::CanisterHttpReplication::FullyReplicated,
+        );
+    }
     assert_eq!(first.expect("reconciled"), 1);
     let status: Result<FundStatus, ErrorCode> =
         update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");

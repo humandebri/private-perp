@@ -25,6 +25,6 @@ pub use hash::{ActionHashInput, action_hash, sign_action_for_tests, signing_dige
 pub use keccak::{keccak256, keccak256_concat};
 pub use signature::{
     Signature, address_from_public_key, address_from_secret, public_key_compressed,
-    recover_address, recover_v, sign_digest_for_tests,
+    recover_address, recover_v, recover_v_for_address, sign_digest_for_tests,
 };
 pub use typed_data::{TypedField, TypedKind, TypedValue, digest_with_domain, sign_with_domain};
