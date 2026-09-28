@@ -1,7 +1,7 @@
 use api_types::error::ErrorCode;
 use candid::{Principal, decode_one, encode_args};
 use pocket_ic::PocketIc;
-use pocket_ic_tests::{principal, query, update, update_args};
+use pocket_ic_tests::{call_with_routed_outcalls, principal, query, update, update_args};
 
 fn private<R: candid::CandidType + serde::de::DeserializeOwned>(
     pic: &PocketIc,
@@ -12,6 +12,11 @@ fn private<R: candid::CandidType + serde::de::DeserializeOwned>(
     payload: Vec<u8>,
 ) -> Result<R, ErrorCode> {
     let client = pocket_ic_tests::envelope::client(91);
+    let payload = if role == "core" {
+        candid::encode_one(api_types::Blob::from(payload)).unwrap()
+    } else {
+        payload
+    };
     let (request, aad) = client
         .prepare_encoded_for_role(pic, canister, caller, method, &payload, Some(role))
         .unwrap();
@@ -24,6 +29,35 @@ fn private<R: candid::CandidType + serde::de::DeserializeOwned>(
     )
     .unwrap();
     client.decode_encoded(response, &request, &aad).unwrap()
+}
+
+fn private_with_outcalls<R: candid::CandidType + serde::de::DeserializeOwned>(
+    pic: &PocketIc,
+    canister: Principal,
+    caller: Principal,
+    role: &str,
+    method: &str,
+    payload: Vec<u8>,
+    route: impl Fn(&pocket_ic_tests::CapturedHttpCall) -> Result<(u16, Vec<u8>), (u64, String)>,
+) -> (Result<R, ErrorCode>, Vec<pocket_ic_tests::CapturedHttpCall>) {
+    let client = pocket_ic_tests::envelope::client(91);
+    let (request, aad) = client
+        .prepare_encoded_for_role(pic, canister, caller, method, &payload, Some(role))
+        .unwrap();
+    let (response, calls): (Result<api_types::envelope::HpkeResponse, ErrorCode>, _) =
+        call_with_routed_outcalls(
+            pic,
+            canister,
+            caller,
+            &format!("{role}_private_call"),
+            (request.clone(),),
+            route,
+        )
+        .unwrap();
+    (
+        client.decode_encoded(response, &request, &aad).unwrap(),
+        calls,
+    )
 }
 
 #[test]
@@ -325,6 +359,251 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
         )
         .unwrap();
         assert_eq!(remaining.state, api_types::fund::FundRequestState::Reserved);
+
+        // Drive the integrated custody and trading send paths. These HTTP
+        // replies are mock HL responses; no real testnet POST is implied.
+        let credit: Result<(), ErrorCode> = update_args(
+            &pic,
+            canister,
+            caller,
+            "test_credit_deposit",
+            (session.clone(), 10_000_000u64, vec![34u8; 32]),
+        )
+        .unwrap();
+        credit.unwrap();
+        let trading_allocation = api_types::fund::AllocationRequest {
+            session: session.clone(),
+            client_request_id: vec![35; 32].into(),
+            amount: 5_000_000,
+            target: api_types::AccountKind::Trading,
+            intent_signature: None,
+        };
+        let allocated: api_types::fund::FundRequestAccepted = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "request_allocation",
+            candid::encode_one(trading_allocation).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(allocated.state, api_types::fund::FundRequestState::Reserved);
+        let configured: Result<(), ErrorCode> =
+            update(&pic, canister, admin, "clear_emergency_stop", ()).unwrap();
+        configured.unwrap();
+        let (sent, transfer_calls): (Result<u32, ErrorCode>, _) =
+            call_with_routed_outcalls(&pic, canister, admin, "vault_test_sweep_now", (), |call| {
+                assert!(call.url.ends_with("/exchange"));
+                let body: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                assert_eq!(body["action"]["type"], "usdSend");
+                Ok((
+                    200,
+                    br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+                ))
+            })
+            .unwrap();
+        assert_eq!(sent.unwrap(), 3);
+        assert_eq!(transfer_calls.len(), 3);
+        let trading_address: Result<api_types::Blob, ErrorCode> = update(
+            &pic,
+            canister,
+            caller,
+            "get_trading_address",
+            session.clone(),
+        )
+        .unwrap();
+        let credited: Result<bool, ErrorCode> = update_args(
+            &pic,
+            canister,
+            Principal::anonymous(),
+            "credit_venue_deposit",
+            (
+                api_types::Blob::from(vec![36u8; 32]),
+                5_000_000u64,
+                trading_address.unwrap(),
+                "usdc".to_string(),
+            ),
+        )
+        .unwrap();
+        assert!(credited.unwrap());
+        let funds: Result<api_types::fund::FundStatus, ErrorCode> =
+            query(&pic, canister, caller, "get_fund_status", session.clone()).unwrap();
+        assert_eq!(funds.unwrap().trading_equity, 5_000_000);
+
+        let configured: Result<(), ErrorCode> = update_args(
+            &pic,
+            canister,
+            admin,
+            "core_configure_market_threshold",
+            (api_types::operations_status::MarketThreshold {
+                market: "ETH".into(),
+                expected_index: 1,
+                min_day_notional_usdc: 1_000_000,
+                max_spread_bps: 20,
+                min_each_side_depth_usdc: 1_000,
+            },),
+        )
+        .unwrap();
+        configured.unwrap();
+        let configured: Result<(), ErrorCode> = update_args(
+            &pic,
+            canister,
+            Principal::anonymous(),
+            "set_market_context",
+            ("local".to_string(), "hyperliquid".to_string()),
+        )
+        .unwrap();
+        configured.unwrap();
+        let configured: Result<(), ErrorCode> = update_args(
+            &pic,
+            canister,
+            Principal::anonymous(),
+            "set_meta_cache",
+            (
+                "local".to_string(),
+                "hyperliquid".to_string(),
+                r#"[{"name":"SOL","szDecimals":0},{"name":"ETH","szDecimals":5},{"name":"BTC","szDecimals":5}]"#.to_string(),
+            ),
+        )
+        .unwrap();
+        configured.unwrap();
+        let configured: Result<(), ErrorCode> = update_args(
+            &pic,
+            canister,
+            admin,
+            "set_policy_version",
+            (2u64, vec!["BTC".to_string(), "ETH".to_string()]),
+        )
+        .unwrap();
+        configured.unwrap();
+        let configured: Result<(), ErrorCode> =
+            update(&pic, canister, admin, "clear_emergency_stop", ()).unwrap();
+        configured.unwrap();
+        let (refreshed, market_calls): (Result<(), ErrorCode>, _) = call_with_routed_outcalls(
+            &pic,
+            canister,
+            Principal::anonymous(),
+            "refresh_market",
+            (),
+            |call| {
+                let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                match query["type"].as_str() {
+                    Some("metaAndAssetCtxs") => Ok((200, br#"[{"universe":[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]},[{"dayNtlVlm":"10000000"},{"dayNtlVlm":"100000000"},{"dayNtlVlm":"500000000"}]]"#.to_vec())),
+                    Some("l2Book") => Ok((200, br#"{"levels":[[{"px":"2499","sz":"1.25"}],[{"px":"2501","sz":"1.10"}]]}"#.to_vec())),
+                    other => Err((1, format!("unexpected market query: {other:?}"))),
+                }
+            },
+        )
+        .unwrap();
+        refreshed.unwrap();
+        assert!(!market_calls.is_empty());
+        let rotated: Result<Vec<u8>, ErrorCode> = update(
+            &pic,
+            canister,
+            Principal::anonymous(),
+            "core_rotate_hpke_key",
+            (),
+        )
+        .unwrap();
+        rotated.unwrap();
+        let agent: api_types::fund::AgentGeneration = private(
+            &pic,
+            canister,
+            caller,
+            "core",
+            "request_agent_generation",
+            candid::encode_one(session.clone()).unwrap(),
+        )
+        .unwrap();
+        let (approved, approval_calls): (Result<api_types::fund::AgentGeneration, ErrorCode>, _) =
+            private_with_outcalls(
+                &pic,
+                canister,
+                caller,
+                "vault",
+                "approve_agent_generation",
+                encode_args((session.clone(), 1u64, agent.agent_address)).unwrap(),
+                |call| {
+                    assert!(call.url.ends_with("/exchange"));
+                    let body: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                    assert_eq!(body["action"]["type"], "approveAgent");
+                    Ok((
+                        200,
+                        br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+                    ))
+                },
+            );
+        assert_eq!(approved.unwrap().state, api_types::fund::AgentState::Active);
+        assert_eq!(approval_calls.len(), 1);
+        let observed: Result<u32, ErrorCode> = update_args(
+            &pic,
+            canister,
+            caller,
+            "test_ingest_positions",
+            (
+                session.clone(),
+                r#"{"assetPositions":[],"marginSummary":{"totalMarginUsed":"0"}}"#.to_string(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(observed.unwrap(), 0);
+        let order = api_types::order::SubmitOrderArgs {
+            session: session.clone(),
+            client_request_id: vec![37; 32].into(),
+            account_id: account.clone(),
+            market: "ETH".into(),
+            side: api_types::order::Side::Buy,
+            kind: api_types::order::OrderKind::LimitGtc,
+            quantity: "0.001".into(),
+            limit_price: Some("2500".into()),
+            slippage_tolerance_bps: None,
+            reduce_only: false,
+            leverage: Some(3),
+            trigger: None,
+            expires_after: None,
+        };
+        let accepted: api_types::order::SubmitOrderResult = private(
+            &pic,
+            canister,
+            caller,
+            "core",
+            "submit_order",
+            encode_args((session.clone(), order)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(accepted.request_id.as_ref(), &[37; 32]);
+        let (swept, order_calls): (Result<api_types::order::SweepOutcome, ErrorCode>, _) =
+            call_with_routed_outcalls(
+                &pic,
+                canister,
+                admin,
+                "core_test_sweep_now",
+                (),
+                |call| {
+                    if call.url.ends_with("/exchange") {
+                        let body: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                        return match body["action"]["type"].as_str() {
+                            Some("updateLeverage") => Ok((200, br#"{"status":"ok","response":{"type":"default"}}"#.to_vec())),
+                            Some("order") => Ok((200, br#"{"status":"ok","response":{"type":"default","data":{"statuses":[{"resting":{"oid":4242}}]}}}"#.to_vec())),
+                            other => Err((1, format!("unexpected exchange action: {other:?}"))),
+                        };
+                    }
+                    let body: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                    match body["type"].as_str() {
+                        Some("clearinghouseState") => Ok((200, br#"{"marginSummary":{"accountValue":"100","totalMarginUsed":"0"},"assetPositions":[],"withdrawable":"50"}"#.to_vec())),
+                        Some("userFills") => Ok((200, b"[]".to_vec())),
+                        Some("orderStatus") => Ok((200, br#"{"status":"open","order":{"oid":4242,"coin":"ETH","sz":"0.001"}}"#.to_vec())),
+                        other => Err((1, format!("unexpected info query: {other:?}"))),
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(swept.unwrap().dispatched, 1);
+        assert!(order_calls.iter().any(|call| {
+            serde_json::from_slice::<serde_json::Value>(&call.body)
+                .ok()
+                .is_some_and(|body| body["action"]["type"] == "order")
+        }));
     }
     // Install-code debit is replenished per execution round, not by jumping time.
     for _ in 0..200 {
@@ -365,7 +644,14 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
         canister,
         admin,
         "set_policy_version",
-        (2u64, vec!["BTC".to_string()]),
+        (
+            if std::env::var_os("PRIVATE_PERP_UNIFIED_MOCK").is_some() {
+                3u64
+            } else {
+                2u64
+            },
+            vec!["BTC".to_string()],
+        ),
     )
     .unwrap();
     configured.unwrap();

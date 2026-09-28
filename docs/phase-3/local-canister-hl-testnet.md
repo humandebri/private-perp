@@ -1,6 +1,6 @@
 # ローカルCanister + HL testnet
 
-確認日: 2026-09-26。ICネットワークはローカル、外部venueだけが実HL testnet。公開ICPへのデプロイと実cycles費用の測定は行っていない。
+確認日: 2026-09-26。以下の確認結果は当時の旧5 Canister構成の履歴であり、現行の単一 `private_perp` Wasmの検証結果ではない。ICネットワークはローカル、外部venueだけが実HL testnet。公開ICPへのデプロイと実cycles費用の測定は行っていない。
 
 ## 今回の確認結果
 
@@ -14,15 +14,16 @@
 
 ## 再実行
 
-プロジェクトの空のローカルネットワークを起動し、本番Wasmをデプロイした後:
+プロジェクトの空の専用ローカルネットワークを起動し、管理者Principalを指定して単一Wasmをデプロイした後、設置したIDを明示する:
 
 ```sh
+export TESTNET_APP_ID="$(icp canister status private_perp --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 bash scripts/prepare-local-testnet.sh
 ```
 
 スクリプトはこのリポジトリの`.icp-home`を使い、mock issuerとテストEOAの秘密鍵をその中へ0600で保存する。鍵を表示・git登録・frontendへの埋め込みはしない。既知のE2E秘密鍵は使わない。ICの接続はloopbackだけで、HL接続先にはtestnetのみを指定する。実testnetの口座準備を実行するため、通常のunit試験からは隔離した。
 
-現在のブラウザ画面は模擬HL専用のまま。この試験は専用CLI/HPKEクライアントで実行する。模擬入金seedは使わない。`bootstrap-local.sh`の通常動作はmockのままで、`HL_NETWORK=testnet`を明示した場合だけ実HLに接続する。testnetを設定した状態へmock bootstrapを実行して環境を混ぜないこと。
+この試験は専用CLI/HPKEクライアントで実行する。模擬入金seedは使わない。`bootstrap-local.sh`の通常動作はmockのままで、`HL_NETWORK=testnet`を明示した場合だけ実HLに接続する。testnetを設定した状態へmock bootstrapを実行して環境を混ぜないこと。現行の単一Canister版スクリプトの再実行結果はまだない。
 
 ## 残件
 
