@@ -19,6 +19,8 @@ const amountMicros = (value: string) => {
   return result
 }
 
+const isTestnetStage = import.meta.env.VITE_APP_STAGE === 'testnet'
+
 function Workspace({
   children,
   publicContent = false,
@@ -47,7 +49,9 @@ function Workspace({
     <main className="local-workspace">
       <section className="workspace-bar">
         <div>
-          <div className="eyebrow">LOCAL CANISTER / REAL CONNECTION</div>
+          <div className="eyebrow">
+            {isTestnetStage ? 'ICP CANISTER / HL TESTNET' : 'LOCAL CANISTER / REAL CONNECTION'}
+          </div>
           <strong>
             {session.address
               ? `${session.address.slice(0, 10)}…${session.address.slice(-6)}`
@@ -70,8 +74,12 @@ function Workspace({
         </div>
       </section>
       <div className="local-strip">
-        <b>LOCAL MOCK</b>
-        <span>実Canister・模擬venue・実資金なし</span>
+        <b>{isTestnetStage ? 'HL TESTNET' : 'LOCAL MOCK'}</b>
+        <span>
+          {isTestnetStage
+            ? 'ICP公開Canister・HL testnet・模擬USDCのみ'
+            : '実Canister・模擬venue・実資金なし'}
+        </span>
       </div>
       {session.busy && (
         <output className="operation-status">

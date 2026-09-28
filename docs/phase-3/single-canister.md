@@ -29,8 +29,8 @@ PocketIC は管理者・非管理者の認可、署名ログイン、HPKE、口�
 
 ## ローカルと公開
 
-ローカル新規配置では `icp deploy private_perp --args '(principal "ADMIN_PRINCIPAL")'` とし、bootstrap を実行する identity を管理者に指定する。`scripts/local-e2e.sh` はこの指定と単一 ID の設定を行う。既存ローカルネットワークを共用している場合は実行しない。統合後のブラウザー実接続 E2E は未実施。
+ローカル新規配置では `icp deploy private_perp --args '(principal "ADMIN_PRINCIPAL")'` とし、bootstrap を実行する identity を管理者に指定する。`scripts/local-e2e.sh` はこの指定と単一 ID の設定を行う。既存ローカルネットワークを共用している場合は実行しない。公開環境のブラウザーで署名ログイン、資格登録、入金先表示まで実接続を確認した。
 
 UI は `VITE_PRIVATE_PERP_CANISTER_ID` 一つを使う。公開試験用の例は `frontend/.env.testnet.example`。設定を `.env.testnet.local` に保存し、`pnpm --dir frontend build --mode testnet` で `wrangler.testnet.jsonc` を選ぶ。testnet 画面は HL testnet 上での送金先・送金元を案内し、mock 入金を実行しない。
 
-公開には専用 Canister ID と管理者 Principal を確定し、HL testnet の接続・鍵・市場・利用資格設定、実入金・配分・注文・回収を確認する必要がある。HL testnet 実送金、公開 Canister 配置、Cloudflare 公開は未実施。既存の `xis3j-paaaa-aaaai-axumq-cai` は別アプリの Candid を公開しているため上書きしない。
+2026-09-28、ユーザー指定の既存 `xis3j-paaaa-aaaai-axumq-cai` を再インストールし、統合 Wasm を公開 ICP に配置した。管理者は `r75h6-lqd7b-5jack-at55d-vvti2-lg5qy-ly73a-5ezve-odnkc-kagu3-nae`。以前の Wiki データは再インストールで消去された。スナップショットは cycles 不足で作成できなかった。UI は [Cloudflare Workers](https://private-perp-ui-testnet.hude.workers.dev) に公開した。設定と未完了の受入条件は[受入記録](testnet-acceptance.md)を参照。

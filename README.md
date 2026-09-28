@@ -16,4 +16,4 @@
 
 ICPバックエンド（`crates/`）は、`private_perp` 一つの Canister に資金・取引・policy・journal のモジュールを統合しています。資金側は認証・複式台帳・予約・送金と照合、取引側は注文・Agent署名・照合を担います。旧 `control_guard` は現行の統合 Wasm に含めません。
 
-現行の統合 Wasm の送金・Agent承認・注文送信はPocketICと模擬HL応答で検証しています。旧5 Canister構成ではHL testnetの読取りまで確認しましたが、統合Wasmからの実HLへの送金・注文POST、公開ICPへの配置、実資金往復は未検証です。共通保管口座は直接送金の紐付けを減らしますが、[合成相関評価](docs/phase-3/privacy-local-eval.md)では現行B0のtop-1対応付け成功率が100%で、匿名性の基準には未達です。
+統合 Wasm は公開 ICP の `xis3j-paaaa-aaaai-axumq-cai` に配置し、[HL testnet UI](https://private-perp-ui-testnet.hude.workers.dev) を公開しています。署名ログイン、利用資格登録、入金先表示まで公開環境で確認しました。実 HL への送金・注文 POST、資金往復は未検証で、市場データ取得は IC ノード間の応答不一致により新規注文を停止しています。詳細は[受入記録](docs/phase-3/testnet-acceptance.md)。共通保管口座は直接送金の紐付けを減らしますが、[合成相関評価](docs/phase-3/privacy-local-eval.md)では現行B0のtop-1対応付け成功率が100%で、匿名性の基準には未達です。

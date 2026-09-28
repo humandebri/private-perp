@@ -3,12 +3,14 @@ import type { ReactNode } from 'react'
 import stylesheet from '../styles.css?url'
 import { LocalSessionProvider } from '../ui/local-session'
 
+const isTestnet = import.meta.env.VITE_APP_STAGE === 'testnet'
+
 export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { title: 'VEIL / Private Perpetuals — Local' },
+      { title: `VEIL / Private Perpetuals — ${isTestnet ? 'HL Testnet' : 'Local'}` },
     ],
     links: [{ rel: 'stylesheet', href: stylesheet }],
   }),
@@ -38,15 +40,19 @@ function Document({ children }: { children: ReactNode }) {
             <Link to="/history">履歴</Link>
             <Link to="/fallback">最小クライアント</Link>
           </nav>
-          <span className="badge">LOCAL MOCK</span>
+          <span className="badge">{isTestnet ? 'HL TESTNET' : 'LOCAL MOCK'}</span>
         </header>
         <LocalSessionProvider>{children}</LocalSessionProvider>
         <footer>
           <span>
             <i className="status-dot" />
-            ローカルCanister接続
+            {isTestnet ? 'ICP公開Canister接続' : 'ローカルCanister接続'}
           </span>
-          <span>loopback限定 · 実資金・testnet・mainnetは対象外</span>
+          <span>
+            {isTestnet
+              ? 'HL testnetの模擬USDCのみ · 本番資金は対象外'
+              : 'loopback限定 · 実資金・testnet・mainnetは対象外'}
+          </span>
         </footer>
         <Scripts />
       </body>

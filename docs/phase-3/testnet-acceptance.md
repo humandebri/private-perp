@@ -1,16 +1,20 @@
 # Phase 3 testnet受入記録
 
-更新: 2026-09-28。状態: **未合格**。[2026-09-26のローカルCanister + HL testnet](local-canister-hl-testnet.md)では旧5 Canister構成で口座準備・認証・実市場読取りまで成功した。現行の単一 `private_perp` Wasmでは実HLの送金・注文POST、実資金往復、公開ICPでの受入は未実施。PocketICのmock outcallによる結合試験と区別する。
+更新: 2026-09-28。状態: **未合格**。[2026-09-26のローカルCanister + HL testnet](local-canister-hl-testnet.md)では旧5 Canister構成で口座準備・認証・実市場読取りまで成功した。現行の単一 `private_perp` Wasmを公開ICPに配置し、Cloudflare UIから署名ログイン、利用資格登録、入金先表示まで確認した。実HLの送金・注文POST、資金往復は未実施。PocketICのmock outcallによる結合試験と区別する。
 
 ## GATE 0
 
 | 条件 | 現在の確認結果 |
 |---|---|
-| testnet用IC identity | 未確認。作業環境の`.icp-home`には`private-perp-local`とanonymousのみ |
-| 専用の単一 `private_perp` ID、設置時の管理者Principal、cycles | 未確認。`icp.yaml`はlocal networkのみ。旧5 IDは使用しない |
-| tECDSA key IDと署名可否 | 未確認 |
-| 独立したHL testnet口座2つ以上 | 未確認 |
-| 各口座のtest USDCと預入・回収に必要な残高 | 未確認 |
+| testnet用IC identity | `llm-wiki-mainnet` を既存 Canister の controller と管理者に使用 |
+| 単一 `private_perp` ID、管理者Principal、cycles | `xis3j-paaaa-aaaai-axumq-cai`、`r75h6-lqd7b-5jack-at55d-vvti2-lg5qy-ly73a-5ezve-odnkc-kagu3-nae`。設定後約961B cycles |
+| tECDSA key IDと署名可否 | `test_key_1` を設定。実署名・HL送金は未検証 |
+| 独立したHL testnet口座2つ以上 | 試験用EOA Bで署名ログインと資格登録を確認。ユーザーのEOA Aでの登録、2口座同時利用は未検証 |
+| 各口座のtest USDCと預入・回収に必要な残高 | 未確認。実送金は未実施 |
+
+公開 UI: <https://private-perp-ui-testnet.hude.workers.dev>。HL API/市況WebSocketは testnet、IC hostは `https://icp-api.io`。利用資格 issuer 公開アドレスは `0x79a503BfcDA54a66490E257d81C64980aD0fb60E`。署名秘密は git 管理外に保存する。testnet の試験用EOA Bで、公開UIの署名ログイン、資格登録、共通保管口座 `0xc59960cb75dbd9d92f9e5b3fc1833acb7315a378` の表示を確認した。Bを送金元にした試験であり、ユーザーのEOA Aの送金元確認や着金計上を示すものではない。
+
+BTC/ETH の市場観測は現在 `market_observation_stale` で新規注文を停止する。変動する HL `/info` 応答を複数 IC ノードが同一内容として取得できず、明示的な更新では `No consensus could be reached. Replicas had different responses` が返った。市場取得の修正と再検証が完了するまで注文の受入を合格にしない。`recovery_history_verified=false`、emergency stop は解除済み。
 
 秘密鍵、シード、API walletの署名秘密をこの記録やgit管理下に置かない。GATE 0の証明にはidentity名・canister ID・key ID・口座公開アドレス・残高の読み取り結果を使う。
 

@@ -30,7 +30,10 @@ export function FallbackClient() {
   }
   return (
     <main className="fallback-client">
-      <div className="eyebrow">MINIMUM RECOVERY CLIENT / LOCAL</div>
+      <div className="eyebrow">
+        MINIMUM RECOVERY CLIENT /{' '}
+        {import.meta.env.VITE_APP_STAGE === 'testnet' ? 'HL TESTNET' : 'LOCAL'}
+      </div>
       <h1>取消・出金クライアント</h1>
       <p>
         これはCanister停止を回避する仕組みではありません。取引口座は公開され、入出金の額と時刻から関連を推測される場合があります。

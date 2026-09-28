@@ -1,6 +1,6 @@
 # private-perp UI
 
-TanStack Start＋Reactで、ローカルICP replicaとローカルHyperliquid mockへ実接続する単一ユーザー開発UIです。公開市況WebSocket、建玉、SL/TP、決済、取消と最小クライアントを含みます。HL testnet 向け接続設定も用意しています。公開と実資金操作は未検証です。詳細は [単一 Canister 化](../docs/phase-3/single-canister.md)。
+TanStack Start＋Reactで、ローカルICP replicaとローカルHyperliquid mock、または公開 ICP と HL testnet に接続するUIです。公開市況WebSocket、建玉、SL/TP、決済、取消と最小クライアントを含みます。[公開 HL testnet UI](https://private-perp-ui-testnet.hude.workers.dev) は署名ログイン、利用資格登録、入金先表示まで検証済みです。実送金・注文は未検証です。詳細は [単一 Canister 化](../docs/phase-3/single-canister.md)。
 
 ## 一括起動・E2E
 
@@ -48,4 +48,4 @@ node --test ../tools/mock-hl/server.test.mjs
 - 注文の受付応答を失った場合は、HPKE経由の`get_order_by_request`で本人の受付結果を照合します。未観測は失敗確定ではなく、新規注文を再開する条件にはなりません。HTTPクライアントの自動再試行も無効です。
 - ログアウト・失効時は即座にセッション世代を無効化し、口座・履歴の追加ページ・未解決要求を破棄します。古い通信の成功・失敗は新セッションへ反映しません。未解決要求は再読込後に復元できないため、再読込を解決手段にしないでください。
 - mock seedは画面と応答の両方で`LOCAL MOCK`と表示します。一般ユーザー機能や本番APIではありません。
-- Cloudflare公開、SNS操作、controller変更、本番資金受付は行いません。
+- Cloudflare公開 UI は HL testnet の模擬USDC用です。SNS操作、controller変更、本番資金受付は行いません。

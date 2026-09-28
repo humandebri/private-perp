@@ -1,10 +1,14 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 
+const isTestnet = import.meta.env.VITE_APP_STAGE === 'testnet'
+
 export const Route = createFileRoute('/')({ component: Home })
 function Home() {
   return (
     <main className="landing">
-      <div className="eyebrow">PRIVATE PERPETUALS / LOCAL INTEGRATION</div>
+      <div className="eyebrow">
+        PRIVATE PERPETUALS / {isTestnet ? 'HL TESTNET' : 'LOCAL INTEGRATION'}
+      </div>
       <h1>
         取引に集中する。
         <br />
@@ -13,11 +17,13 @@ function Home() {
       <p className="lead">
         Hyperliquidの取引体験と、ICPによる資金管理をつなぐ。
         <br />
-        MetaMask認証と実Canisterを一巡させる、loopback限定の開発環境。
+        {isTestnet
+          ? 'MetaMask認証でICP公開CanisterとHyperliquid testnetに接続する試験環境。'
+          : 'MetaMask認証と実Canisterを一巡させる、loopback限定の開発環境。'}
       </p>
       <div className="hero-actions">
         <Link to="/trade" className="primary button">
-          ローカル取引画面を開く ↗
+          {isTestnet ? 'testnet取引画面を開く ↗' : 'ローカル取引画面を開く ↗'}
         </Link>
         <Link to="/funds" className="button secondary">
           資金フローを見る
@@ -41,8 +47,9 @@ function Home() {
         </article>
       </div>
       <aside className="notice">
-        LOCAL MOCKは実資金を扱いません。接続先はloopbackのIC replicaとmock
-        venueだけに制限され、testnet・mainnetでは起動しません。
+        {isTestnet
+          ? 'HL testnetの模擬USDCだけを使用します。HL上の送金や取引履歴は公開され、金額・時刻の相関への耐性は未検証です。'
+          : 'LOCAL MOCKは実資金を扱いません。接続先はloopbackのIC replicaとmock venueだけに制限され、testnet・mainnetでは起動しません。'}
       </aside>
     </main>
   )
