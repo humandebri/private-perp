@@ -14,6 +14,7 @@ crates=(
   "crates/trading-core/src"
   "crates/control-guard/src"
   "crates/policy/src"
+  "crates/private-perp/src"
 )
 
 # 生の秘密鍵で署名するヘルパ（`public_key_compressed` は導出鍵の照合に使うため許可する）。

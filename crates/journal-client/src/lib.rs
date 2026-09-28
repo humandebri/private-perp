@@ -113,7 +113,7 @@ pub fn require_management() -> Result<(), ErrorCode> {
     #[cfg(feature = "embedded")]
     {
         let caller = ic_cdk::api::msg_caller();
-        return if caller != Principal::anonymous()
+        if caller != Principal::anonymous()
             && db::tx::is_application_admin(caller.as_slice()).map_err(map_db)?
         {
             Ok(())
@@ -121,7 +121,7 @@ pub fn require_management() -> Result<(), ErrorCode> {
             Err(ErrorCode::Unauthenticated {
                 reason: "application administrator required".into(),
             })
-        };
+        }
     }
     #[cfg(not(feature = "embedded"))]
     {

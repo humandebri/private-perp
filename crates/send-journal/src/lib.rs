@@ -511,14 +511,15 @@ fn require_worker() -> Result<Vec<u8>, ErrorCode> {
     #[cfg(feature = "embedded")]
     {
         let role = ACTIVE_JOURNAL_ROLE.with(|active| active.get());
-        if caller == ic_cdk::api::canister_self() {
-            if let Some(role) = role {
-                return Ok(role.as_bytes().to_vec());
-            }
+        if caller == ic_cdk::api::canister_self()
+            && let Some(role) = role
+        {
+            Ok(role.as_bytes().to_vec())
+        } else {
+            Err(ErrorCode::Unauthenticated {
+                reason: "journal role requires a self-call".into(),
+            })
         }
-        return Err(ErrorCode::Unauthenticated {
-            reason: "journal role requires a self-call".into(),
-        });
     }
     #[cfg(not(feature = "embedded"))]
     {

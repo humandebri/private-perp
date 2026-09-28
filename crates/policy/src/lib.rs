@@ -269,7 +269,7 @@ fn require_role(caller: Principal, role: &str, reason: &str) -> Result<(), Error
     #[cfg(feature = "embedded")]
     {
         let _ = (role, reason);
-        return if caller != Principal::anonymous()
+        if caller != Principal::anonymous()
             && db::tx::is_application_admin(caller.as_slice()).map_err(map_db)?
         {
             Ok(())
@@ -277,7 +277,7 @@ fn require_role(caller: Principal, role: &str, reason: &str) -> Result<(), Error
             Err(ErrorCode::Unauthenticated {
                 reason: "application administrator required".into(),
             })
-        };
+        }
     }
     #[cfg(not(feature = "embedded"))]
     {

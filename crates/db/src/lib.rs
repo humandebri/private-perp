@@ -130,7 +130,7 @@ mod wasm {
                 MemoryManager::init_strict(DefaultMemoryImpl::default())
                     .expect("stable memory must either be empty or use the MemoryManager layout"),
             );
-        static SCOPED: RefCell<BTreeMap<DbScope, DbHandle>> = RefCell::new(BTreeMap::new());
+        static SCOPED: RefCell<BTreeMap<DbScope, DbHandle>> = const { RefCell::new(BTreeMap::new()) };
     }
 
     pub(super) fn init_scoped(scope: DbScope, migrations: &[Migration]) -> Result<(), String> {
