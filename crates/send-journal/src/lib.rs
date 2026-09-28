@@ -224,6 +224,25 @@ fn valid_event(event: &RecoveryEvent) -> bool {
                 && *amount_micros <= i64::MAX as u64
                 && *claimed_at_ms > 0
         }
+        RecoveryPayload::TradingBalanceObserved {
+            user_id,
+            account_id,
+            previous_equity,
+            equity,
+            observed_at_ms,
+        } => {
+            let mut logical = b"trading_balance_observed".to_vec();
+            logical.extend_from_slice(account_id.as_ref());
+            logical.extend_from_slice(&observed_at_ms.to_be_bytes());
+            let expected: [u8; 32] = Keccak256::digest(&logical).into();
+            event.logical_id.as_ref() == expected
+                && id(user_id)
+                && id(account_id)
+                && *previous_equity <= i64::MAX as u64
+                && *equity <= i64::MAX as u64
+                && *observed_at_ms > 0
+                && *observed_at_ms <= i64::MAX as u64
+        }
         RecoveryPayload::LedgerPosting {
             posting_id,
             user_id,
@@ -292,7 +311,7 @@ fn valid_event(event: &RecoveryEvent) -> bool {
             market,
             quantity,
             price,
-            fee,
+            fee: _,
             filled_at_ms,
         } => {
             let mut logical = b"fill_observed".to_vec();
@@ -311,7 +330,6 @@ fn valid_event(event: &RecoveryEvent) -> bool {
                 && quantity.len() <= 32
                 && !price.is_empty()
                 && price.len() <= 32
-                && *fee <= i64::MAX as u64
                 && *filled_at_ms > 0
                 && *filled_at_ms <= i64::MAX as u64
                 && event.logical_id.as_ref() == expected

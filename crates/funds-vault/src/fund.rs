@@ -59,7 +59,7 @@ pub fn fund_status(session: &VerifiedSession) -> Result<FundStatus, ErrorCode> {
         reserve_unallocated: balances.reserve_unallocated,
         in_transit: balances.in_transit,
         reserved_for_withdrawal: balances.reserved_for_withdrawal,
-        // ローカルキャッシュ値（モックベニューの照合値）。実HLの照合値ではない。
+        // 入出金仕訳と、最後に確認したHL残高観測から導出する。
         trading_equity: balances.trading_equity,
         trading_unrealized_pnl: 0,
         withdrawable: balances.withdrawable,
@@ -1090,6 +1090,13 @@ pub async fn request_recovery(
             code: BadRequestCode::MalformedPayload,
             detail: "client_request_id must be 1..=64 bytes".to_string(),
         });
+    }
+    // Preserve idempotent retries without another external observation.
+    if db::tx::query(|c| db::repo::funds::fund_request(c, &session.user_id, client_request_id))
+        .map_err(|e| map_db(e, None))?
+        .is_none()
+    {
+        crate::balance::refresh(&session.user_id).await?;
     }
     let trading = db::tx::query(|connection| {
         db::repo::ledger::custody_account(connection, &session.user_id, AccountKind::Trading)

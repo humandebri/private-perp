@@ -835,12 +835,26 @@ async fn reconcile_account(
     })
     .map_err(map_db)?;
 
+    // Recover exchange ids before ingesting fills; fills are matched by oid.
+    let cloids = db::tx::query(|c| db::repo::orders::unknown_cloids(c, &account.account_id))
+        .map_err(map_db)?;
+    let mut recovered_order = false;
+    for cloid in cloids {
+        db::tx::update(|c| db::repo::orders::note_cloid_check(c, &account.account_id, &cloid, now))
+            .map_err(map_db)?;
+        let key = format!("0x{}", hex::encode(&cloid));
+        let status = venue::order_status(&address, &key).await?;
+        recovered_order |=
+            apply_order_status_for_cloid(&account.account_id, &status, now, Some(&cloid)).await?;
+    }
+
     // userFills has a large variable weight. Poll active accounts at most every
     // two minutes, idle accounts every ten minutes; the schedule survives upgrade.
-    if db::tx::query(|connection| {
-        db::repo::accounts::fills_due(connection, &account.account_id, now)
-    })
-    .map_err(map_db)?
+    if recovered_order
+        || db::tx::query(|connection| {
+            db::repo::accounts::fills_due(connection, &account.account_id, now)
+        })
+        .map_err(map_db)?
     {
         let fills = venue::user_fills(&address).await?;
         ingest_fills_json(&account.user_id, &account.account_id, &fills, now).await?;
@@ -1042,10 +1056,12 @@ pub async fn ingest_fills_json(
         if size.as_str() == "0" || size.as_str().starts_with('-') || size.scale() > 18 {
             return Err(internal("invalid fill size".into()));
         }
-        let fee = fill
-            .get("fee")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0);
+        let fee = parse_signed_usdc_micros(
+            fill.get("fee")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| internal("missing decimal fill fee".into()))?,
+        )
+        .map_err(map_db)?;
         let at = fill
             .get("time")
             .and_then(|value| value.as_u64())
@@ -1117,6 +1133,15 @@ pub async fn apply_order_status_json(
     body: &str,
     now: u64,
 ) -> Result<bool, ErrorCode> {
+    apply_order_status_for_cloid(account_id, body, now, None).await
+}
+
+async fn apply_order_status_for_cloid(
+    account_id: &[u8; 32],
+    body: &str,
+    now: u64,
+    cloid: Option<&[u8]>,
+) -> Result<bool, ErrorCode> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|_| internal("invalid order status json".into()))?;
     let status = value
@@ -1142,8 +1167,19 @@ pub async fn apply_order_status_json(
     if state == "unknown" {
         return Ok(false);
     }
-    let target = db::tx::query(|connection| {
-        db::repo::orders::order_status_target(connection, account_id, oid)
+    if let Some(expected) = cloid {
+        let actual = value
+            .get("order")
+            .and_then(|v| v.get("cloid"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(s)).ok());
+        if actual.as_deref() != Some(expected) {
+            return Err(ErrorCode::PolicyUnavailable);
+        }
+    }
+    let target = db::tx::query(|connection| match cloid {
+        Some(key) => db::repo::orders::cloid_status_target(connection, account_id, key),
+        None => db::repo::orders::order_status_target(connection, account_id, oid),
     })
     .map_err(map_db)?;
     let Some((order_id, prior_state)) = target else {
@@ -1173,6 +1209,9 @@ pub async fn apply_order_status_json(
     let ack = journal_client::append_recovery_event("core", event.clone()).await?;
     let saved = db::tx::update(|connection| {
         journal_client::record_recovery_event(connection, &event, &ack)?;
+        if cloid.is_some() {
+            db::repo::orders::bind_observed_oid(connection, account_id, &order_id, oid)?;
+        }
         if db::repo::orders::order_status_target(connection, account_id, oid)?
             != Some((order_id, prior_state.clone()))
             || !db::repo::orders::apply_order_status(connection, account_id, oid, state, now)?
@@ -1268,6 +1307,7 @@ pub fn order_action_json(
             "s": order.quantity,
             "r": order.reduce_only,
             "t": order_type,
+            "c": format!("0x{}", hex::encode(order.cloid)),
         }],
         "grouping": if order.trigger.is_some() { "positionTpsl" } else { "na" },
     })

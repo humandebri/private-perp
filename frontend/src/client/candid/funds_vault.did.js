@@ -364,6 +364,7 @@ export const idlFactory = ({ IDL }) => {
     set_recovery_history_verified: IDL.Func([IDL.Bool], [Result_1], []),
     set_send_journal: IDL.Func([IDL.Principal], [Result_1], []),
     set_venue_endpoints: IDL.Func([IDL.Text, IDL.Text], [Result_1], []),
+    transform_balance: IDL.Func([TransformArgs], [HttpRequestResult], ['query']),
     transform_info: IDL.Func([TransformArgs], [HttpRequestResult], ['query']),
     version: IDL.Func([], [IDL.Text], ['query']),
   })

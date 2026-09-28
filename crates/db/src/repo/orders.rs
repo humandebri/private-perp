@@ -837,7 +837,7 @@ pub fn list_fills(
                     market: row.2,
                     price: row.3,
                     quantity: row.4,
-                    fee: u64::try_from(row.5).map_err(|_| Error::Invariant("bad fee"))?,
+                    fee: row.5,
                     at: u64::try_from(row.6).map_err(|_| Error::Invariant("bad time"))?,
                 },
             ))
@@ -853,7 +853,7 @@ pub struct NewFill<'a> {
     pub market: &'a str,
     pub price: &'a str,
     pub quantity: &'a str,
-    pub fee: u64,
+    pub fee: i64,
     pub filled_at: u64,
 }
 
@@ -999,7 +999,7 @@ pub fn ingest_fill(
                 market,
                 price,
                 quantity,
-                fee as i64,
+                fee,
                 filled_at as i64
             ],
         )
@@ -1096,6 +1096,7 @@ pub fn apply_order_status(
     connection
         .execute(
             "UPDATE orders SET state = ?3, updated_at = ?4,
+               dispatch_state = CASE WHEN dispatch_state IN ('unknown','dispatching') THEN 'reconciled' ELSE dispatch_state END,
                filled_quantity = CASE WHEN ?3 = 'filled' THEN quantity ELSE filled_quantity END
               WHERE hl_oid = ?1 AND account_id = ?2",
             params![hl_oid as i64, account_id.as_slice(), state, now as i64],
@@ -1918,4 +1919,45 @@ pub fn prune_terminal_history(
             params![delete_before as i64, limit as i64],
         )
         .map_err(sql)
+}
+
+/// Unknown sends retain their preassigned cloid even when the POST response is lost.
+pub fn unknown_cloids(c: &Connection, account_id: &[u8; 32]) -> Result<Vec<Vec<u8>>, Error> {
+    c.query_all("SELECT cloid FROM orders WHERE account_id=?1 AND hl_oid IS NULL AND state='unknown' AND preflight_state='reconciled' ORDER BY updated_at LIMIT 4", params![account_id.as_slice()], |r| r.get(0)).map_err(sql)
+}
+pub fn cloid_status_target(
+    c: &Connection,
+    account_id: &[u8; 32],
+    cloid: &[u8],
+) -> Result<Option<([u8; 32], String)>, Error> {
+    c.query_optional("SELECT order_id,state FROM orders WHERE account_id=?1 AND cloid=?2 AND hl_oid IS NULL AND state='unknown'",params![account_id.as_slice(),cloid],|r| Ok((r.get::<Vec<u8>>(0)?,r.get::<String>(1)?))).map_err(sql)?.map(|(id,state)| Ok((id.try_into().map_err(|_| Error::Conflict)?,state))).transpose()
+}
+pub fn bind_observed_oid(
+    c: &mut UpdateConnection<'_>,
+    account_id: &[u8; 32],
+    order_id: &[u8; 32],
+    oid: u64,
+) -> Result<(), Error> {
+    let oid = i64::try_from(oid).map_err(|_| Error::Overflow)?;
+    if c.query_optional_scalar::<i64>(
+        "SELECT 1 FROM orders WHERE account_id=?1 AND hl_oid=?2 AND order_id!=?3",
+        params![account_id.as_slice(), oid, order_id.as_slice()],
+    )
+    .map_err(sql)?
+    .is_some()
+    {
+        return Err(Error::Conflict);
+    }
+    c.execute("UPDATE orders SET hl_oid=?3 WHERE account_id=?1 AND order_id=?2 AND hl_oid IS NULL AND state='unknown'",params![account_id.as_slice(),order_id.as_slice(),oid]).map_err(sql)?;
+    Ok(())
+}
+
+pub fn note_cloid_check(
+    c: &mut UpdateConnection<'_>,
+    account_id: &[u8; 32],
+    cloid: &[u8],
+    now: u64,
+) -> Result<(), Error> {
+    c.execute("UPDATE orders SET updated_at=MAX(updated_at+1,?3) WHERE account_id=?1 AND cloid=?2 AND state='unknown'",params![account_id.as_slice(),cloid,now as i64]).map_err(sql)?;
+    Ok(())
 }

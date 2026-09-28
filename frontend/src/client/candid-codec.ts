@@ -118,7 +118,7 @@ const Fill = IDL.Record({
   market: IDL.Text,
   price: IDL.Text,
   quantity: IDL.Text,
-  fee: IDL.Nat64,
+  fee: IDL.Int64,
   at: IDL.Nat64,
 })
 const page = <T>(item: IDL.Type<T>) =>

@@ -29,6 +29,7 @@ const state = {
   nextOid: 1,
   nextTid: 1,
   deposits: new Map(),
+  balances: new Map(),
   orders: new Map(),
   fills: [],
   positions: new Map(),
@@ -77,6 +78,7 @@ export const reset = () => {
   state.nextOid = 1
   state.nextTid = 1
   state.deposits.clear()
+  state.balances.clear()
   state.orders.clear()
   state.fills.length = 0
   state.positions.clear()
@@ -129,6 +131,11 @@ export function exchange(body) {
         delta: { type: 'internalTransfer', user: sender, destination, usdc: String(action.amount) },
       })
       state.deposits.set(destination, entries)
+      const outgoing = state.deposits.get(sender) ?? []
+      outgoing.push(entries.at(-1))
+      state.deposits.set(sender, outgoing)
+      state.balances.set(sender, (state.balances.get(sender) ?? 0) - Number(action.amount))
+      state.balances.set(destination, (state.balances.get(destination) ?? 0) + Number(action.amount))
     }
     return { status: 'ok', response: { type: 'default' } }
   }
@@ -150,7 +157,7 @@ export function exchange(body) {
       applyFill(market, order, filledSize)
       state.fills.push({
         tid: state.nextTid++, oid, coin: market, px: String(order.p ?? '0'),
-        sz: filledSize, fee: 0, time: Number(body.nonce ?? Date.now()),
+        sz: filledSize, fee: "0", time: Number(body.nonce ?? Date.now()),
       })
     }
     return {
@@ -207,13 +214,16 @@ export function info(body) {
       0,
     )
     return {
-      marginSummary: { totalMarginUsed: margin.toFixed(6), totalNtlPos: (margin * 3).toFixed(6) },
+      time: Date.now(),
+      marginSummary: { accountValue: String(state.balances.get(normalizeAddress(body.user ?? "0x0000000000000000000000000000000000000000")) ?? 0), totalMarginUsed: margin.toFixed(6), totalNtlPos: (margin * 3).toFixed(6) },
       assetPositions: positionRows(),
     }
   }
   if (body.type === 'orderStatus') {
-    const order = state.orders.get(Number(body.oid))
-    return { status: order?.status ?? 'unknown', order: { oid: Number(body.oid) } }
+    const order = typeof body.oid === 'string' && body.oid.startsWith('0x')
+      ? [...state.orders.values()].find((v) => v.order.c === body.oid)
+      : state.orders.get(Number(body.oid))
+    return order ? { status: 'order', order: { status: order.status, order: { oid: order.oid, cloid: order.order.c } } } : { status: 'unknownOid' }
   }
   return { error: `unsupported info query: ${String(body.type)}` }
 }
@@ -232,7 +242,10 @@ export function seedDeposit(body) {
       ? { type: 'internalTransfer', user: normalizeAddress(body.sender), destination: address, usdc: String(body.amount) }
       : { type: 'deposit', usdc: String(body.amount) },
   }
-  if (!entries.some((entry) => entry.hash === event.hash)) entries.push(event)
+  if (!entries.some((entry) => entry.hash === event.hash)) {
+    entries.push(event)
+    state.balances.set(address, (state.balances.get(address) ?? 0) + Number(body.amount))
+  }
   state.deposits.set(address, entries)
   return { ok: true, event, mode: 'LOCAL MOCK' }
 }

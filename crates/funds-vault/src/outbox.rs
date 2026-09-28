@@ -14,7 +14,6 @@ use api_types::operations::BudgetClass;
 use db::repo::actions::FundActionRow;
 use db::repo::funds::fund_request;
 use db::repo::ledger::NewCustodyAccount;
-use db::repo::ledger::Posting;
 
 /// 1回のsweepで処理するaction数の上限。
 const MAX_ACTIONS_PER_SWEEP: u32 = 4;
@@ -80,7 +79,7 @@ fn recovery_settlement_event(
     }
 }
 
-fn fund_transfer_result_event(
+pub(crate) fn fund_transfer_result_event(
     action: &FundActionRow,
     request: &db::repo::funds::FundRequestRow,
     request_id: &[u8],
@@ -131,6 +130,7 @@ fn fund_transfer_result_event(
 /// 未処理のactionを有界に処理する。
 pub async fn sweep(now: u64) -> Result<u32, ErrorCode> {
     let _ = crate::cycles::status();
+    retry_transfer_results().await?;
     crate::recovery::sync_legacy(now).await?;
     crate::recovery::release_finished(now).await?;
     crate::recovery::reconcile_recoveries(now).await?;
@@ -451,64 +451,7 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
                 true,
                 &response,
             )?;
-            let result_ack =
-                match journal_client::append_recovery_event("vault", result.clone()).await {
-                    Ok(ack) => ack,
-                    Err(_) => {
-                        mark_post_unknown(action, &request_id, now)?;
-                        return Ok(());
-                    }
-                };
-            // 共通保管から出た（移動中）。着金の確定は照合で行う。
-            let amount = i64::try_from(request.amount).map_err(|_| internal("overflow".into()))?;
-            db::tx::update(|connection| {
-                journal_client::record_recovery_event(connection, &result, &result_ack)?;
-                db::repo::ledger::post_journal(
-                    connection,
-                    "allocation_start",
-                    now,
-                    None,
-                    Some(&request_id),
-                    &[
-                        Posting {
-                            account: db::repo::ledger::CASH_IN_TRANSIT.to_string(),
-                            kind: db::repo::ledger::AccountKind::Asset,
-                            amount,
-                        },
-                        Posting {
-                            account: db::repo::ledger::CASH_RESERVE.to_string(),
-                            kind: db::repo::ledger::AccountKind::Asset,
-                            amount: -amount,
-                        },
-                        Posting {
-                            account: db::repo::ledger::user_reserve(&action.user_id),
-                            kind: db::repo::ledger::AccountKind::Liability,
-                            amount,
-                        },
-                        Posting {
-                            account: db::repo::ledger::user_in_transit(&action.user_id),
-                            kind: db::repo::ledger::AccountKind::Liability,
-                            amount: -amount,
-                        },
-                    ],
-                )?;
-                // 仕訳で資金が動いたので予約は消費する。
-                db::repo::funds::consume_reservation(connection, &action.user_id, &request_id)?;
-                db::repo::funds::set_request_state(
-                    connection,
-                    &action.user_id,
-                    &request_id,
-                    FundRequestState::Executing,
-                    now,
-                )?;
-                db::repo::actions::mark_reconciled(
-                    connection,
-                    &action.action_id,
-                    action.worker_epoch,
-                    now,
-                )
-            })
-            .map_err(|error| map_db(error, None))?;
+            persist_transfer_result(&result).await?;
         }
         Ok((ExchangeOutcome::Rejected { .. }, response)) => {
             let result = fund_transfer_result_event(
@@ -519,46 +462,7 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
                 false,
                 &response,
             )?;
-            let result_ack =
-                match journal_client::append_recovery_event("vault", result.clone()).await {
-                    Ok(ack) => ack,
-                    Err(_) => {
-                        mark_post_unknown(action, &request_id, now)?;
-                        return Ok(());
-                    }
-                };
-            // 取引所が拒否した＝外部効果は無い。予約を解放して終端する。
-            db::tx::update(|connection| {
-                journal_client::record_recovery_event(connection, &result, &result_ack)?;
-                db::repo::funds::release_reservation(
-                    connection,
-                    &action.user_id,
-                    &request_id,
-                    now,
-                )?;
-                db::repo::funds::set_request_state(
-                    connection,
-                    &action.user_id,
-                    &request_id,
-                    FundRequestState::Rejected,
-                    now,
-                )?;
-                db::repo::events::insert_audit(
-                    connection,
-                    "system",
-                    "allocation_rejected",
-                    None,
-                    Some("venue_rejected"),
-                    now,
-                )?;
-                db::repo::actions::mark_reconciled(
-                    connection,
-                    &action.action_id,
-                    action.worker_epoch,
-                    now,
-                )
-            })
-            .map_err(|error| map_db(error, None))?;
+            persist_transfer_result(&result).await?;
         }
         Err(_error) => {
             // 送信した可能性がある。再送せず unknown として照合対象に残す。
@@ -677,44 +581,7 @@ async fn dispatch_withdrawal(
                 true,
                 &response,
             )?;
-            let result_ack =
-                match journal_client::append_recovery_event("vault", result.clone()).await {
-                    Ok(ack) => ack,
-                    Err(_) => {
-                        mark_post_unknown(action, request_id, now)?;
-                        return Ok(());
-                    }
-                };
-            // 払出しの証跡IDはactionのダイジェストから決定的に作る（実運用では取引所のtx）。
-            let mut evidence = b"payout".to_vec();
-            evidence.extend_from_slice(&action.digest);
-            let event_id = hl_sign::keccak256(&evidence);
-            db::tx::update(|connection| {
-                journal_client::record_recovery_event(connection, &result, &result_ack)?;
-                db::repo::ledger::payout_settled(
-                    connection,
-                    &action.user_id,
-                    request.amount,
-                    now,
-                    &event_id,
-                )?;
-                // 台帳で資金が動いたので予約（reservations表）も消費する。
-                db::repo::funds::consume_reservation(connection, &action.user_id, request_id)?;
-                db::repo::funds::set_request_state(
-                    connection,
-                    &action.user_id,
-                    request_id,
-                    FundRequestState::Settled,
-                    now,
-                )?;
-                db::repo::actions::mark_reconciled(
-                    connection,
-                    &action.action_id,
-                    action.worker_epoch,
-                    now,
-                )
-            })
-            .map_err(|error| map_db(error, None))?;
+            persist_transfer_result(&result).await?;
         }
         Ok((ExchangeOutcome::Rejected { .. }, response)) => {
             let result = fund_transfer_result_event(
@@ -725,48 +592,7 @@ async fn dispatch_withdrawal(
                 false,
                 &response,
             )?;
-            let result_ack =
-                match journal_client::append_recovery_event("vault", result.clone()).await {
-                    Ok(ack) => ack,
-                    Err(_) => {
-                        mark_post_unknown(action, request_id, now)?;
-                        return Ok(());
-                    }
-                };
-            db::tx::update(|connection| {
-                journal_client::record_recovery_event(connection, &result, &result_ack)?;
-                db::repo::funds::release_reservation(connection, &action.user_id, request_id, now)?;
-                // 台帳の予約も戻す（受付時の`withdrawal_reserve`の逆仕訳）。
-                db::repo::ledger::withdrawal_release(
-                    connection,
-                    &action.user_id,
-                    request.amount,
-                    now,
-                    request_id,
-                )?;
-                db::repo::funds::set_request_state(
-                    connection,
-                    &action.user_id,
-                    request_id,
-                    FundRequestState::Rejected,
-                    now,
-                )?;
-                db::repo::events::insert_audit(
-                    connection,
-                    "system",
-                    "payout_rejected",
-                    None,
-                    Some("venue_rejected"),
-                    now,
-                )?;
-                db::repo::actions::mark_reconciled(
-                    connection,
-                    &action.action_id,
-                    action.worker_epoch,
-                    now,
-                )
-            })
-            .map_err(|error| map_db(error, None))?;
+            persist_transfer_result(&result).await?;
         }
         Err(_error) => {
             let reason = "result_unknown";
@@ -1059,6 +885,46 @@ async fn dispatch_recovery(
             })
             .map_err(|error| map_db(error, None))?;
             let _ = crate::recovery::mark_unknown(fence).await;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn persist_transfer_result(event: &RecoveryEvent) -> Result<(), ErrorCode> {
+    let RecoveryPayload::FundTransferResult { action_id, .. } = &event.payload else {
+        return Err(ErrorCode::PolicyUnavailable);
+    };
+    let id: [u8; 32] = action_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let encoded = candid::encode_one(event).map_err(|_| ErrorCode::PolicyUnavailable)?;
+    db::tx::update(|c| db::repo::actions::save_transfer_result(c, &id, &encoded))
+        .map_err(|e| map_db(e, None))?;
+    retry_transfer_results().await
+}
+pub async fn retry_transfer_results() -> Result<(), ErrorCode> {
+    let pending =
+        db::tx::query(db::repo::actions::pending_transfer_results).map_err(|e| map_db(e, None))?;
+    for encoded in pending {
+        let event: RecoveryEvent =
+            candid::decode_one(&encoded).map_err(|_| ErrorCode::PolicyUnavailable)?;
+        let ack = match journal_client::append_recovery_event("vault", event.clone()).await {
+            Ok(ack) => ack,
+            Err(ErrorCode::JournalWriterBusy) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let result = db::tx::update(|c| {
+            journal_client::record_recovery_event(c, &event, &ack)?;
+            journal_client::apply_fund_transfer_result(c, &event)?;
+            let RecoveryPayload::FundTransferResult { action_id, .. } = &event.payload else {
+                return Err(db::error::Error::Conflict);
+            };
+            db::repo::actions::delete_transfer_result(c, action_id.as_ref())
+        });
+        if let Err(error) = result {
+            journal_client::lock()?;
+            return Err(map_db(error, None));
         }
     }
     Ok(())

@@ -12,6 +12,7 @@
 
 mod amount;
 mod auth;
+mod balance;
 mod builder_fee;
 mod clock;
 mod config;

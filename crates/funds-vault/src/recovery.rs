@@ -87,6 +87,16 @@ async fn reconcile_one(row: RecoveryCheck, now: u64) -> Result<(), ErrorCode> {
         return Ok(());
     }
     let (source, destination) = db::tx::query(|connection| {
+        if row.kind != "recovery" {
+            let reserve = db::repo::ledger::custody_account(
+                connection,
+                &row.user_id,
+                api_types::AccountKind::Reserve,
+            )?
+            .ok_or(db::error::Error::NotFound)?;
+            let destination = event_address(&row.destination).ok_or(db::error::Error::Conflict)?;
+            return Ok((reserve.master_address, destination));
+        }
         let trading = db::repo::ledger::custody_account(
             connection,
             &row.user_id,
@@ -107,6 +117,19 @@ async fn reconcile_one(row: RecoveryCheck, now: u64) -> Result<(), ErrorCode> {
     .map_err(map_db)?;
     if event_address(&row.destination) != Some(destination) {
         return Err(ErrorCode::PolicyUnavailable);
+    }
+    // History has no action nonce. Never assign the same evidence to two sends.
+    if db::tx::query(|c| {
+        db::repo::actions::transfer_has_competitor(
+            c,
+            &row,
+            NONCE_ACCEPT_MS + CLOCK_MARGIN_MS + EARLY_MATCH_MS,
+        )
+    })
+    .map_err(map_db)?
+    {
+        defer(&row, now)?;
+        return Ok(());
     }
     let start = row.nonce.saturating_sub(EARLY_MATCH_MS);
     let end = row
@@ -144,6 +167,7 @@ async fn reconcile_one(row: RecoveryCheck, now: u64) -> Result<(), ErrorCode> {
         serde_json::from_slice(&body).map_err(|_| ErrorCode::PolicyUnavailable)?;
     if entries.len() >= PAGE_LIMIT {
         if window <= 1 {
+            defer(&row, now)?;
             return Ok(());
         }
         // capに達した区間は完全とみなさない。次回、同じcursorを狭い窓で取得する。
@@ -249,6 +273,9 @@ async fn settle_positive(row: &RecoveryCheck, hash: [u8; 32], now: u64) -> Resul
     if !proven {
         return Err(ErrorCode::PolicyUnavailable);
     }
+    if row.kind != "recovery" {
+        return settle_transfer(row, true, hash, now).await;
+    }
     let settlement = settlement_event(row, true, hash, now);
     let ack = journal_client::append_recovery_event("vault", settlement.clone()).await?;
     let mut event_input = b"recovery".to_vec();
@@ -320,6 +347,9 @@ async fn finalize_if_proven(row: &RecoveryCheck, now: u64, end: u64) -> Result<(
     let mut proof_bytes = b"recovery_absent".to_vec();
     proof_bytes.extend_from_slice(&row.action_id);
     proof_bytes.extend_from_slice(&end.to_be_bytes());
+    if row.kind != "recovery" {
+        return settle_transfer(row, false, hl_sign::keccak256(&proof_bytes), now).await;
+    }
     let settlement = settlement_event(row, false, hl_sign::keccak256(&proof_bytes), now);
     let ack = journal_client::append_recovery_event("vault", settlement.clone()).await?;
     db::tx::update(|connection| {
@@ -533,4 +563,34 @@ pub async fn sync_legacy(now: u64) -> Result<(), ErrorCode> {
             .map_err(|_| call_error())??;
     }
     Ok(())
+}
+
+async fn settle_transfer(
+    row: &RecoveryCheck,
+    accepted: bool,
+    evidence: [u8; 32],
+    now: u64,
+) -> Result<(), ErrorCode> {
+    let (action, request, reserve) = db::tx::query(|c| {
+        Ok((
+            db::repo::actions::action_row(c, &row.action_id)?.ok_or(db::error::Error::NotFound)?,
+            db::repo::funds::fund_request(c, &row.user_id, &row.request_id)?
+                .ok_or(db::error::Error::NotFound)?,
+            db::repo::ledger::custody_account(c, &row.user_id, api_types::AccountKind::Reserve)?
+                .ok_or(db::error::Error::NotFound)?,
+        ))
+    })
+    .map_err(map_db)?;
+    let mut event = crate::outbox::fund_transfer_result_event(
+        &action,
+        &request,
+        &row.request_id,
+        &reserve.account_id,
+        accepted,
+        &evidence,
+    )?;
+    if let RecoveryPayload::FundTransferResult { observed_at_ms, .. } = &mut event.payload {
+        *observed_at_ms = now;
+    }
+    crate::outbox::persist_transfer_result(&event).await
 }

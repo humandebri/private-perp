@@ -976,189 +976,47 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                         accepted_at_ms,
                     )?;
                 }
-                RecoveryPayload::FundTransferResult {
-                    action_id,
-                    request_id,
+                RecoveryPayload::TradingBalanceObserved {
                     user_id,
-                    source_account_id,
-                    destination,
-                    kind,
-                    amount_micros,
-                    nonce,
-                    accepted,
-                    evidence_digest,
+                    account_id,
+                    previous_equity,
+                    equity,
                     observed_at_ms,
                 } => {
-                    let action_id: [u8; 32] = action_id
-                        .as_ref()
-                        .try_into()
-                        .map_err(|_| db::error::Error::Invariant("bad staged action"))?;
                     let user_id: [u8; 32] = user_id
                         .as_ref()
                         .try_into()
-                        .map_err(|_| db::error::Error::Invariant("bad staged user"))?;
-                    let source_account_id: [u8; 32] = source_account_id
+                        .map_err(|_| db::error::Error::Conflict)?;
+                    let account_id: [u8; 32] = account_id
                         .as_ref()
                         .try_into()
-                        .map_err(|_| db::error::Error::Invariant("bad staged source"))?;
-                    let request_id = request_id.as_ref();
-                    if request_id.is_empty()
-                        || request_id.len() > 64
-                        || evidence_digest.as_ref().len() != 32
-                        || amount_micros == 0
-                        || amount_micros > i64::MAX as u64
-                        || nonce == 0
-                        || observed_at_ms == 0
-                        || observed_at_ms > i64::MAX as u64
-                        || !matches!(kind.as_str(), "allocation" | "withdrawal")
-                    {
-                        return Err(db::error::Error::Invariant("bad staged transfer result"));
-                    }
-                    let mut id_material = b"fund_transfer_result".to_vec();
-                    id_material.extend_from_slice(&action_id);
-                    if hl_sign::keccak256(&id_material) != event.logical_id {
-                        return Err(db::error::Error::Invariant("staged transfer id mismatch"));
-                    }
-                    let action = db::repo::actions::action_row(c, &action_id)?
-                        .ok_or(db::error::Error::NotFound)?;
-                    let request = db::repo::funds::fund_request(c, &user_id, request_id)?
-                        .ok_or(db::error::Error::NotFound)?;
-                    let source = db::repo::ledger::custody_account(
-                        c,
-                        &user_id,
-                        api_types::AccountKind::Reserve,
-                    )?
-                    .ok_or(db::error::Error::NotFound)?;
-                    if action.user_id != user_id
-                        || action.client_request_id.as_deref() != Some(request_id)
-                        || action.kind != kind
-                        || action.nonce != nonce
-                        || action.dispatch_state != api_types::fund::ActionState::Dispatching
-                        || request.kind.as_str() != kind
-                        || request.state != api_types::fund::FundRequestState::Reserved
-                        || request.amount != amount_micros
-                        || source.account_id != source_account_id
-                        || source.state != "active"
-                        || !db::repo::send_journal_client::receipt_matches(
-                            c,
-                            &kind,
-                            &action_id,
-                            &source_account_id,
-                            nonce,
-                            &action.digest,
-                        )?
-                    {
+                        .map_err(|_| db::error::Error::Conflict)?;
+                    let mut logical = b"trading_balance_observed".to_vec();
+                    logical.extend_from_slice(&account_id);
+                    logical.extend_from_slice(&observed_at_ms.to_be_bytes());
+                    if hl_sign::keccak256(&logical) != event.logical_id {
                         return Err(db::error::Error::Conflict);
                     }
-                    match kind.as_str() {
-                        "allocation" => {
-                            let trading_id =
-                                request.account_id.ok_or(db::error::Error::Conflict)?;
-                            let trading = db::repo::ledger::custody_account(
-                                c,
-                                &user_id,
-                                api_types::AccountKind::Trading,
-                            )?
-                            .ok_or(db::error::Error::NotFound)?;
-                            if destination.as_ref() != trading_id.as_slice()
-                                || trading.account_id != trading_id
-                                || trading.state != "active"
-                            {
-                                return Err(db::error::Error::Conflict);
-                            }
-                            if accepted {
-                                db::repo::ledger::allocation_start(
-                                    c,
-                                    &user_id,
-                                    amount_micros,
-                                    observed_at_ms,
-                                    request_id,
-                                )?;
-                                db::repo::funds::consume_reservation(c, &user_id, request_id)?;
-                                db::repo::funds::set_request_state(
-                                    c,
-                                    &user_id,
-                                    request_id,
-                                    api_types::fund::FundRequestState::Executing,
-                                    observed_at_ms,
-                                )?;
-                            } else {
-                                db::repo::funds::release_reservation(
-                                    c,
-                                    &user_id,
-                                    request_id,
-                                    observed_at_ms,
-                                )?;
-                                db::repo::funds::set_request_state(
-                                    c,
-                                    &user_id,
-                                    request_id,
-                                    api_types::fund::FundRequestState::Rejected,
-                                    observed_at_ms,
-                                )?;
-                            }
-                        }
-                        "withdrawal" => {
-                            let text = request
-                                .destination
-                                .as_deref()
-                                .ok_or(db::error::Error::Conflict)?;
-                            let bytes = hex::decode(text.strip_prefix("0x").unwrap_or(text))
-                                .map_err(|_| {
-                                    db::error::Error::Invariant("bad payout destination")
-                                })?;
-                            if bytes.as_slice() != destination.as_ref() || bytes.len() != 20 {
-                                return Err(db::error::Error::Conflict);
-                            }
-                            if accepted {
-                                let mut evidence = b"payout".to_vec();
-                                evidence.extend_from_slice(&action.digest);
-                                let event_id = hl_sign::keccak256(&evidence);
-                                db::repo::ledger::payout_settled(
-                                    c,
-                                    &user_id,
-                                    amount_micros,
-                                    observed_at_ms,
-                                    &event_id,
-                                )?;
-                                db::repo::funds::consume_reservation(c, &user_id, request_id)?;
-                                db::repo::funds::set_request_state(
-                                    c,
-                                    &user_id,
-                                    request_id,
-                                    api_types::fund::FundRequestState::Settled,
-                                    observed_at_ms,
-                                )?;
-                            } else {
-                                db::repo::funds::release_reservation(
-                                    c,
-                                    &user_id,
-                                    request_id,
-                                    observed_at_ms,
-                                )?;
-                                db::repo::ledger::withdrawal_release(
-                                    c,
-                                    &user_id,
-                                    amount_micros,
-                                    observed_at_ms,
-                                    request_id,
-                                )?;
-                                db::repo::funds::set_request_state(
-                                    c,
-                                    &user_id,
-                                    request_id,
-                                    api_types::fund::FundRequestState::Rejected,
-                                    observed_at_ms,
-                                )?;
-                            }
-                        }
-                        _ => return Err(db::error::Error::Invariant("bad transfer kind")),
-                    }
-                    db::repo::actions::mark_reconciled(
+                    db::repo::ledger::observe_trading_balance(
                         c,
-                        &action_id,
-                        action.worker_epoch,
+                        &user_id,
+                        &account_id,
+                        previous_equity,
+                        equity,
                         observed_at_ms,
+                        &event.logical_id,
+                    )?;
+                }
+                RecoveryPayload::FundTransferResult { .. } => {
+                    let payload = candid::decode_one(&event.payload)
+                        .map_err(|_| db::error::Error::Invariant("invalid transfer payload"))?;
+                    apply_fund_transfer_result(
+                        c,
+                        &RecoveryEvent {
+                            version: 1,
+                            logical_id: event.logical_id.to_vec().into(),
+                            payload,
+                        },
                     )?;
                 }
                 RecoveryPayload::RecoveryPostResult {
@@ -1483,6 +1341,7 @@ fn replay_core_prefix() -> Result<(), ErrorCode> {
                             "staged order status id mismatch",
                         ));
                     }
+                    db::repo::orders::bind_observed_oid(c, &account_id, &order_id, hl_oid)?;
                     let Some((matched_id, prior_state)) =
                         db::repo::orders::order_status_target(c, &account_id, hl_oid)?
                     else {
@@ -1534,7 +1393,6 @@ fn replay_core_prefix() -> Result<(), ErrorCode> {
                         || hl_oid > i64::MAX as u64
                         || filled_at_ms == 0
                         || filled_at_ms > i64::MAX as u64
-                        || fee > i64::MAX as u64
                         || !matches!(market.as_str(), "BTC" | "ETH")
                         || quantity.is_empty()
                         || price.is_empty()
@@ -2181,4 +2039,211 @@ pub fn intent(
         nonce,
         digest: digest.to_vec().into(),
     }
+}
+
+/// Apply a journaled result without posting the external transfer again.
+pub fn apply_fund_transfer_result(
+    c: &mut ic_sqlite_vfs::db::UpdateConnection<'_>,
+    event: &RecoveryEvent,
+) -> Result<(), db::error::Error> {
+    match event.payload.clone() {
+        RecoveryPayload::FundTransferResult {
+            action_id,
+            request_id,
+            user_id,
+            source_account_id,
+            destination,
+            kind,
+            amount_micros,
+            nonce,
+            accepted,
+            evidence_digest,
+            observed_at_ms,
+        } => {
+            let action_id: [u8; 32] = action_id
+                .as_ref()
+                .try_into()
+                .map_err(|_| db::error::Error::Invariant("bad staged action"))?;
+            let user_id: [u8; 32] = user_id
+                .as_ref()
+                .try_into()
+                .map_err(|_| db::error::Error::Invariant("bad staged user"))?;
+            let source_account_id: [u8; 32] = source_account_id
+                .as_ref()
+                .try_into()
+                .map_err(|_| db::error::Error::Invariant("bad staged source"))?;
+            let request_id = request_id.as_ref();
+            if request_id.is_empty()
+                || request_id.len() > 64
+                || evidence_digest.as_ref().len() != 32
+                || amount_micros == 0
+                || amount_micros > i64::MAX as u64
+                || nonce == 0
+                || observed_at_ms == 0
+                || observed_at_ms > i64::MAX as u64
+                || !matches!(kind.as_str(), "allocation" | "withdrawal")
+            {
+                return Err(db::error::Error::Invariant("bad staged transfer result"));
+            }
+            let mut id_material = b"fund_transfer_result".to_vec();
+            id_material.extend_from_slice(&action_id);
+            if hl_sign::keccak256(&id_material) != event.logical_id.as_ref() {
+                return Err(db::error::Error::Invariant("staged transfer id mismatch"));
+            }
+            let action =
+                db::repo::actions::action_row(c, &action_id)?.ok_or(db::error::Error::NotFound)?;
+            let request = db::repo::funds::fund_request(c, &user_id, request_id)?
+                .ok_or(db::error::Error::NotFound)?;
+            let source =
+                db::repo::ledger::custody_account(c, &user_id, api_types::AccountKind::Reserve)?
+                    .ok_or(db::error::Error::NotFound)?;
+            if action.user_id != user_id
+                || action.client_request_id.as_deref() != Some(request_id)
+                || action.kind != kind
+                || action.nonce != nonce
+                || !matches!(
+                    action.dispatch_state,
+                    api_types::fund::ActionState::Dispatching
+                        | api_types::fund::ActionState::Unknown
+                )
+                || request.kind.as_str() != kind
+                || !matches!(
+                    request.state,
+                    api_types::fund::FundRequestState::Reserved
+                        | api_types::fund::FundRequestState::Unknown
+                )
+                || request.amount != amount_micros
+                || source.account_id != source_account_id
+                || source.state != "active"
+                || !db::repo::send_journal_client::receipt_matches(
+                    c,
+                    &kind,
+                    &action_id,
+                    &source_account_id,
+                    nonce,
+                    &action.digest,
+                )?
+            {
+                return Err(db::error::Error::Conflict);
+            }
+            match kind.as_str() {
+                "allocation" => {
+                    let trading_id = request.account_id.ok_or(db::error::Error::Conflict)?;
+                    let trading = db::repo::ledger::custody_account(
+                        c,
+                        &user_id,
+                        api_types::AccountKind::Trading,
+                    )?
+                    .ok_or(db::error::Error::NotFound)?;
+                    if destination.as_ref() != trading_id.as_slice()
+                        || trading.account_id != trading_id
+                        || trading.state != "active"
+                    {
+                        return Err(db::error::Error::Conflict);
+                    }
+                    if accepted {
+                        db::repo::ledger::allocation_start(
+                            c,
+                            &user_id,
+                            amount_micros,
+                            observed_at_ms,
+                            request_id,
+                        )?;
+                        db::repo::funds::consume_reservation(c, &user_id, request_id)?;
+                        db::repo::funds::set_request_state(
+                            c,
+                            &user_id,
+                            request_id,
+                            api_types::fund::FundRequestState::Executing,
+                            observed_at_ms,
+                        )?;
+                    } else {
+                        db::repo::funds::release_reservation(
+                            c,
+                            &user_id,
+                            request_id,
+                            observed_at_ms,
+                        )?;
+                        db::repo::funds::set_request_state(
+                            c,
+                            &user_id,
+                            request_id,
+                            api_types::fund::FundRequestState::Rejected,
+                            observed_at_ms,
+                        )?;
+                    }
+                }
+                "withdrawal" => {
+                    let text = request
+                        .destination
+                        .as_deref()
+                        .ok_or(db::error::Error::Conflict)?;
+                    let bytes = hex::decode(text.strip_prefix("0x").unwrap_or(text))
+                        .map_err(|_| db::error::Error::Invariant("bad payout destination"))?;
+                    if bytes.as_slice() != destination.as_ref() || bytes.len() != 20 {
+                        return Err(db::error::Error::Conflict);
+                    }
+                    if accepted {
+                        let mut evidence = b"payout".to_vec();
+                        evidence.extend_from_slice(&action.digest);
+                        let event_id = hl_sign::keccak256(&evidence);
+                        db::repo::ledger::payout_settled(
+                            c,
+                            &user_id,
+                            amount_micros,
+                            observed_at_ms,
+                            &event_id,
+                        )?;
+                        db::repo::funds::consume_reservation(c, &user_id, request_id)?;
+                        db::repo::funds::set_request_state(
+                            c,
+                            &user_id,
+                            request_id,
+                            api_types::fund::FundRequestState::Settled,
+                            observed_at_ms,
+                        )?;
+                    } else {
+                        db::repo::funds::release_reservation(
+                            c,
+                            &user_id,
+                            request_id,
+                            observed_at_ms,
+                        )?;
+                        db::repo::ledger::withdrawal_release(
+                            c,
+                            &user_id,
+                            amount_micros,
+                            observed_at_ms,
+                            request_id,
+                        )?;
+                        db::repo::funds::set_request_state(
+                            c,
+                            &user_id,
+                            request_id,
+                            api_types::fund::FundRequestState::Rejected,
+                            observed_at_ms,
+                        )?;
+                    }
+                }
+                _ => return Err(db::error::Error::Invariant("bad transfer kind")),
+            }
+            if action.dispatch_state == api_types::fund::ActionState::Unknown {
+                db::repo::actions::reconcile_unknown(
+                    c,
+                    &action_id,
+                    action.worker_epoch,
+                    observed_at_ms,
+                )?;
+            } else {
+                db::repo::actions::mark_reconciled(
+                    c,
+                    &action_id,
+                    action.worker_epoch,
+                    observed_at_ms,
+                )?;
+            }
+        }
+        _ => return Err(db::error::Error::Invariant("not a transfer result")),
+    }
+    Ok(())
 }

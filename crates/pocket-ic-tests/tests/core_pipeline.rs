@@ -33,7 +33,7 @@ const ACCEPTED: &[u8] =
 /// 建玉1件の照合応答。
 const POSITIONS: &[u8] = br#"{"marginSummary":{"accountValue":"100","totalMarginUsed":"0"},"assetPositions":[{"position":{"coin":"ETH","szi":"0.05","entryPx":"2500","liquidationPx":"2000","unrealizedPnl":"1.5","leverage":{"value":3},"marginMode":"cross"},"type":"oneWay"}],"withdrawable":"50"}"#;
 /// 約定1件の照合応答。
-const FILLS: &[u8] = br#"[{"tid":9001,"oid":4242,"coin":"ETH","px":"2500","sz":"0.05","fee":120,"time":1700000000000,"dir":"Open Long","users":["0xaa"],"extra":true}]"#;
+const FILLS: &[u8] = br#"[{"tid":9001,"oid":4242,"coin":"ETH","px":"2500","sz":"0.05","fee":"0.000120","time":1700000000000,"dir":"Open Long","users":["0xaa"],"extra":true}]"#;
 /// 注文が約定した状態の照合応答。
 const STATUS_FILLED: &[u8] =
     br#"{"status":"filled","order":{"oid":4242,"coin":"ETH","sz":"0.05"}}"#;
@@ -864,6 +864,20 @@ fn pending_order_prevents_recovery_before_any_transfer_post() {
     .expect("allocation sweep");
     assert_eq!(allocated.expect("allocation"), 1);
     submit(&pic, core, &user, b"fence-pending-order", "0.05").expect("pending order");
+    let arrived: Result<bool, ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "credit_venue_deposit",
+        (
+            blob(&[224; 32]),
+            5_000_000_000u64,
+            blob(&user.trading_address),
+            "usdc".to_string(),
+        ),
+    )
+    .unwrap();
+    arrived.unwrap();
     let accepted: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update_args(
         &pic,
         vault,
@@ -886,7 +900,7 @@ fn pending_order_prevents_recovery_before_any_transfer_post() {
     .expect("status");
     let status = status.expect("fund status");
     assert!(status.recovery_fence.is_none());
-    assert_eq!(status.trading_equity, 5_000_000_000);
+    assert_eq!(status.trading_equity, 10_000_000_000);
     let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
         &pic,
         vault,
@@ -903,4 +917,58 @@ fn pending_order_prevents_recovery_before_any_transfer_post() {
         list_orders(&pic, core, user.caller, &user.session)[0].state,
         OrderState::Pending
     );
+}
+
+#[test]
+fn lost_order_reply_recovers_by_cloid_and_ingests_decimal_rebate() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 169, b"lost-reply");
+    let submitted = submit(&pic, core, &user, b"lost-order", "0.05").unwrap();
+    let cloid = std::cell::RefCell::new(String::new());
+    let (outcome, _): (Result<api_types::order::SweepOutcome, ErrorCode>, _) =
+        call_with_routed_outcalls(&pic, core, controller, "test_sweep_now", (), |call| {
+            let q: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+            if q["action"]["type"] == "order" {
+                *cloid.borrow_mut() = q["action"]["orders"][0]["c"].as_str().unwrap().into();
+                return Err((4, "lost order response".into()));
+            }
+            route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED)(call)
+        })
+        .unwrap();
+    outcome.unwrap();
+    assert_eq!(
+        list_orders(&pic, core, user.caller, &user.session)[0].state,
+        OrderState::Unknown
+    );
+    pic.advance_time(std::time::Duration::from_secs(130));
+    let (outcome,calls): (Result<api_types::order::SweepOutcome,ErrorCode>,_) = call_with_routed_outcalls(
+        &pic,core,controller,"test_sweep_now",(),|call| {
+            let q: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+            assert!(q.get("action").is_none(),"must not resend exchange action");
+            if q["type"] == "orderStatus" {
+                assert_eq!(q["oid"],*cloid.borrow());
+                return Ok((200,serde_json::json!({"status":"order","order":{"status":"filled","order":{"oid":4242,"cloid":*cloid.borrow()}}}).to_string().into_bytes()));
+            }
+            route(ACCEPTED,POSITIONS,&String::from_utf8(FILLS.to_vec()).unwrap().replace("0.000120","-0.000120").into_bytes(),STATUS_FILLED)(call)
+        }).unwrap();
+    outcome.unwrap();
+    assert!(
+        calls
+            .iter()
+            .any(|c| String::from_utf8_lossy(&c.body).contains("orderStatus"))
+    );
+    let orders = list_orders(&pic, core, user.caller, &user.session);
+    assert_eq!(orders[0].order_id, submitted.order_id);
+    assert_eq!(orders[0].state, OrderState::Filled);
+    assert_eq!(
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved,
+        0
+    );
+    let fills = envelope::list_fills(&pic, core, user.caller, &user.session, None, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(fills.items.len(), 1);
+    assert_eq!(fills.items[0].fee, -120);
 }

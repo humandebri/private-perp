@@ -170,7 +170,7 @@ pub async fn open_orders(user: &str) -> Result<String, ErrorCode> {
 }
 
 /// 注文の状態（orderStatus）を取得する（replicated＋変換）。
-pub async fn order_status(user: &str, oid: u64) -> Result<String, ErrorCode> {
+pub async fn order_status(user: &str, oid: impl serde::Serialize) -> Result<String, ErrorCode> {
     fetch_info(
         serde_json::json!({ "type": "orderStatus", "user": user, "oid": oid }),
         MAX_STATUS_RESPONSE_BYTES,
@@ -385,14 +385,16 @@ fn canonical_state(fields: &serde_json::Map<String, serde_json::Value>) -> serde
 fn canonical_order_status(
     fields: &serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "status": fields.get("status").cloned().unwrap_or(serde_json::Value::Null),
-        "order": {
-            "oid": fields
-                .get("order")
-                .and_then(|order| order.get("oid"))
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        },
+    // Real HL wraps the order and its state in {status:"order", order:{order:...,status:...}}.
+    let wrapper = fields.get("order");
+    let nested = wrapper.and_then(|v| v.get("order"));
+    let order = nested.or(wrapper);
+    let status = if nested.is_some() {
+        wrapper.and_then(|v| v.get("status"))
+    } else {
+        fields.get("status")
+    };
+    serde_json::json!({ "status": status,
+        "order": {"oid": order.and_then(|v| v.get("oid")), "cloid": order.and_then(|v| v.get("cloid"))}
     })
 }

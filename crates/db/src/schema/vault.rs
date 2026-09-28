@@ -46,6 +46,8 @@ CREATE INDEX sessions_by_user ON sessions (user_id, expires_at);
 /// `postings.amount` は符号付き整数（正=借方、負=貸方）で、journal内の合計が0で
 /// なければならない。残高はpostingsから導出する。
 const LEDGER: &str = "
+CREATE TABLE trading_balance_observations (account_id BLOB PRIMARY KEY, observed_at_ms INTEGER NOT NULL);
+
 CREATE TABLE custody_accounts (
     account_id BLOB PRIMARY KEY NOT NULL CHECK (length(account_id) = 32),
     user_id BLOB REFERENCES identities (user_id),
@@ -119,6 +121,8 @@ CREATE TABLE reservations (
     released_at INTEGER,
     PRIMARY KEY (user_id, client_request_id)
 );
+
+CREATE TABLE pending_transfer_results (action_id BLOB PRIMARY KEY, event BLOB NOT NULL);
 
 CREATE TABLE fund_actions (
     action_id BLOB PRIMARY KEY NOT NULL CHECK (length(action_id) = 32),

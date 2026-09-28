@@ -514,6 +514,9 @@ p {
   border: 1px solid #33454d;
   border-radius: 6px;
 }
+.eligibility-panel:not([open]) > :not(summary) {
+  display: none;
+}
 .eligibility-panel {
   padding: 10px 12px;
 }

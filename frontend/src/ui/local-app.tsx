@@ -122,17 +122,17 @@ function StatusCards() {
   return (
     <div className="status-grid" data-testid="account-balances">
       <article>
-        <span>RESERVE</span>
+        <span>保管残高</span>
         <strong>{micros(data?.funds.reserve_unallocated)}</strong>
         <small>USDC</small>
       </article>
       <article>
-        <span>TRADING EQUITY</span>
+        <span>取引口座の残高</span>
         <strong>{micros(data?.funds.trading_equity)}</strong>
         <small>USDC</small>
       </article>
       <article>
-        <span>WITHDRAWABLE</span>
+        <span>保管残高から出金可能</span>
         <strong>{micros(data?.funds.withdrawable)}</strong>
         <small>USDC</small>
       </article>
@@ -175,8 +175,8 @@ export function FundsApp() {
     data.vaultJournal[0]
   const action = (kind: string) => async () => {
     const value = amountMicros(amount)
-    if (kind === 'seed') await gateway.depositForTrading(amount, value)
-    if (kind === 'allocate') await gateway.allocate(value)
+    if (kind === 'seed') await gateway.depositToReserve(amount, value)
+    if (kind === 'allocate') await gateway.allocateFromReserve(value)
     if (kind === 'recover') await gateway.recover(value)
     if (kind === 'withdraw') await gateway.withdraw(value)
   }
@@ -229,7 +229,7 @@ export function FundsApp() {
               </button>
             </details>
             <p>
-              共通保管口座への入金を確認してから、本人の取引口座へ配分します。出金時は必要額を自動で回収します。
+              入金した資金は保管残高に置いておけます。取引したいときに、必要な金額だけ「保管残高から取引に使う」で移してください。
             </p>
             <p>
               送金元は接続中の本人HL口座に限ります。共通口座経由でも、金額・時刻による対応付けへの耐性は未達です。
@@ -250,7 +250,14 @@ export function FundsApp() {
                   disabled={busy || newFundsStopped}
                   onClick={() => void execute(action('seed'))}
                 >
-                  LOCAL MOCK 入金して取引に使う
+                  LOCAL MOCK 保管残高に入金
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || newFundsStopped}
+                  onClick={() => void execute(action('allocate'))}
+                >
+                  保管残高から取引に使う
                 </button>
                 <button
                   type="button"
@@ -263,22 +270,15 @@ export function FundsApp() {
               <details>
                 <summary>残高の調整</summary>
                 <p>
-                  途中で止まった配分の再開や、取引せず保管する場合に使います。履歴を確認してから操作してください。
+                  取引口座の資金を保管残高に戻せます。通常の出金では、不足額だけ自動で回収します。
                 </p>
                 <div className="action-grid">
-                  <button
-                    type="button"
-                    disabled={busy || newFundsStopped}
-                    onClick={() => void execute(action('allocate'))}
-                  >
-                    取引口座へ配分
-                  </button>
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => void execute(action('recover'))}
                   >
-                    reserveへ回収
+                    保管残高に戻す
                   </button>
                 </div>
               </details>
@@ -1020,7 +1020,7 @@ function SessionHistory() {
                   <td>{fill.market}</td>
                   <td>{fill.price}</td>
                   <td>{fill.quantity}</td>
-                  <td>{micros(fill.fee)}</td>
+                  <td>{signedMicros(fill.fee)}</td>
                 </tr>
               ))}
             </tbody>

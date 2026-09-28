@@ -121,7 +121,7 @@ test.describe('real local canister flow', () => {
     await page.getByRole('button', { name: '受付資格を登録' }).click()
     await expect(page.getByText('受付資格：登録済み')).toBeVisible({ timeout: 30_000 })
     await page.getByLabel('金額').fill('100')
-    const seedButton = page.getByRole('button', { name: 'LOCAL MOCK 入金して取引に使う' })
+    const seedButton = page.getByRole('button', { name: 'LOCAL MOCK 保管残高に入金' })
     await seedButton.click()
     await expect(seedButton).toBeEnabled({ timeout: 120_000 })
     await expect(page.getByRole('alert')).toHaveCount(0)
@@ -134,6 +134,23 @@ test.describe('real local canister flow', () => {
         { timeout: 30_000 },
       )
       .toContain('100.000000')
+
+    const balances = page.getByTestId('account-balances')
+    const reserve = balances.locator('article').filter({ hasText: '保管残高' }).first()
+    const trading = balances.locator('article').filter({ hasText: '取引口座の残高' })
+    await expect(reserve).toContainText('100.000000')
+    await expect(trading).toContainText('0.000000')
+    // Leaving and returning must not implicitly allocate the held balance.
+    await page.getByRole('link', { name: '履歴' }).click()
+    await page.getByRole('link', { name: '資金', exact: true }).click()
+    await expect(reserve).toContainText('100.000000')
+    await expect(trading).toContainText('0.000000')
+    const allocateButton = page.getByRole('button', { name: '保管残高から取引に使う' })
+    await allocateButton.click()
+    await expect(allocateButton).toBeEnabled({ timeout: 120_000 })
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(trading).toContainText('100.000000')
+    await expect(reserve).toContainText('0.000000')
 
     await page.getByRole('link', { name: '取引' }).click()
     await page.getByRole('button', { name: 'Agentを生成・承認' }).click()

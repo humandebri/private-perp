@@ -4,8 +4,8 @@ type ReadFunds = () => Promise<FundStatus>
 type Pause = () => Promise<void>
 const pause: Pause = () => new Promise((resolve) => setTimeout(resolve, 1_000))
 
-function requireKnownFunds(status: FundStatus) {
-  if (status.unknowns.length)
+function requireKnownFunds(status: FundStatus, allowDispatching = false) {
+  if (status.unknowns.some((action) => !allowDispatching || !('Dispatching' in action.state)))
     throw new Error('資金移動の結果を照合中です。履歴を確認してください。')
 }
 
@@ -17,8 +17,8 @@ export async function waitForFunds(
 ): Promise<FundStatus> {
   for (let attempt = 0; attempt < 45; attempt++) {
     const status = await read()
-    requireKnownFunds(status)
-    if (ready(status)) return status
+    requireKnownFunds(status, true)
+    if (!status.unknowns.length && ready(status)) return status
     await sleep()
   }
   throw new Error('資金移動の確認待ちです。再送せず、残高と履歴を確認してください。')

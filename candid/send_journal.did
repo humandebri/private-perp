@@ -215,6 +215,13 @@ type RecoveryPayload = variant {
     state : text;
     evidence_digest : blob;
   };
+  TradingBalanceObserved : record {
+    account_id : blob;
+    previous_equity : nat64;
+    observed_at_ms : nat64;
+    user_id : blob;
+    equity : nat64;
+  };
   DepositClaim : record {
     claimed_at_ms : nat64;
     user_id : blob;
@@ -232,7 +239,7 @@ type RecoveryPayload = variant {
   // Full venue fill evidence for replay. Kept separate from the legacy
   // placeholder variant so older journal payloads remain decodable.
   FillObserved : record {
-    fee : nat64;
+    fee : int64;
     tid : nat64;
     account_id : blob;
     hl_oid : nat64;

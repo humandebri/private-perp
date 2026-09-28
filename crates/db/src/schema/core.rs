@@ -193,7 +193,7 @@ CREATE TABLE fills (
     market TEXT NOT NULL,
     price TEXT NOT NULL,
     quantity TEXT NOT NULL,
-    fee INTEGER NOT NULL CHECK (fee >= 0),
+    fee INTEGER NOT NULL,
     filled_at INTEGER NOT NULL
 );
 ";

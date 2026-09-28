@@ -529,7 +529,7 @@ fn a_closed_position_reaches_zero_after_dispatch_and_fills() {
         "test_ingest_fills",
         (
             session.clone(),
-            r#"[{"tid":9001,"oid":4242,"coin":"ETH","px":"2480","sz":"0.05","fee":120,"time":1700000000000}]"#
+            r#"[{"tid":9001,"oid":4242,"coin":"ETH","px":"2480","sz":"0.05","fee":"0.000120","time":1700000000000}]"#
                 .to_string(),
         ),
     )

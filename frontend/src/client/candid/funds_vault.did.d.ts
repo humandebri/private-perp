@@ -543,6 +543,7 @@ export interface _SERVICE {
    * 設定済みのnetworkと整合しないhost（例：testnet設定にmainnet endpoint）は拒否する。
    */
   set_venue_endpoints: ActorMethod<[string, string], Result_1>
+  transform_balance: ActorMethod<[TransformArgs], HttpRequestResult>
   /**
    * 変換関数：必要な要素だけを決定論的に残す（順序・付随フィールドの揺れを除く）。
    */

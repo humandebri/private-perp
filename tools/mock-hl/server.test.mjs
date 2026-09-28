@@ -25,11 +25,11 @@ test('market fills, limit rests, and cancellation succeeds', () => {
   const limit = exchange({ nonce: 2, action: { type: 'order', orders: [{ a: 1, p: '3000', s: '0.1', t: { limit: { tif: 'Gtc' } } }] } })
   assert.ok(market.response.data.statuses[0].filled)
   const oid = limit.response.data.statuses[0].resting.oid
-  assert.equal(info({ type: 'orderStatus', oid }).status, 'open')
+  assert.equal(info({ type: 'orderStatus', oid }).order.status, 'open')
   assert.deepEqual(info({ type: 'openOrders' }), [{ oid }])
   const cancelled = exchange({ action: { type: 'cancel', cancels: [{ o: oid }] } })
   assert.equal(cancelled.response.data.statuses[0].success, true)
-  assert.equal(info({ type: 'orderStatus', oid }).status, 'canceled')
+  assert.equal(info({ type: 'orderStatus', oid }).order.status, 'canceled')
   assert.deepEqual(info({ type: 'openOrders' }), [])
   assert.equal(info({ type: 'userFills' }).length, 1)
   assert.equal(info({ type: 'clearinghouseState' }).assetPositions[0].position.coin, 'BTC')
@@ -65,6 +65,10 @@ test('usdSend appears as a destination ledger update', () => {
   assert.equal(entries[0].delta.type, 'internalTransfer')
   assert.equal(entries[0].delta.user, fixture.address)
   assert.equal(entries[0].delta.destination, destination)
+  assert.deepEqual(info({ type: 'userNonFundingLedgerUpdates', user: fixture.address }), entries)
+  assert.equal(info({ type: 'clearinghouseState', user: destination }).marginSummary.accountValue, '12.5')
+  exchange(fixture)
+  assert.equal(info({ type: 'clearinghouseState', user: destination }).marginSummary.accountValue, '12.5')
 })
 
 test('admin access only accepts loopback and configured browser origins', () => {

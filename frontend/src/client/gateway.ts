@@ -476,7 +476,7 @@ export class LocalGateway {
     )
   }
 
-  async depositForTrading(amount: string, value: bigint) {
+  async depositToReserve(amount: string, value: bigint) {
     const active = this.require()
     const read = async () => {
       if (this.active !== active) throw new Error('セッションが変更されました。')
@@ -489,6 +489,19 @@ export class LocalGateway {
       throw new Error('先の資金移動を照合中です。履歴を確認してください。')
     await this.seedDeposit(amount)
     await waitForFunds(read, (status) => status.withdrawable >= before.withdrawable + value)
+  }
+
+  async allocateFromReserve(value: bigint) {
+    const active = this.require()
+    const read = async () => {
+      if (this.active !== active) throw new Error('セッションが変更されました。')
+      const status = unwrap(await active.clients.vault.get_fund_status(active.session))
+      if (this.active !== active) throw new Error('セッションが変更されました。')
+      return status
+    }
+    const before = await read()
+    if (before.unknowns.length || before.recovery_fence.length)
+      throw new Error('先の資金移動を照合中です。履歴を確認してください。')
     const accepted = await this.allocate(value)
     await waitForFunds(
       read,

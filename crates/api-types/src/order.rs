@@ -188,7 +188,7 @@ pub struct FillView {
     pub market: String,
     pub price: String,
     pub quantity: String,
-    pub fee: Micros,
+    pub fee: i64,
     pub at: Timestamp,
 }
 

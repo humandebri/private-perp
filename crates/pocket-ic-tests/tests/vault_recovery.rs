@@ -814,10 +814,7 @@ fn a_recovery_over_the_trading_equity_is_rejected() {
     )
     .expect("call");
     let error = second.expect_err("must reject a second concurrent recovery");
-    assert!(
-        matches!(error, ErrorCode::InsufficientFunds { .. }),
-        "{error:?}"
-    );
+    assert!(matches!(error, ErrorCode::ReservationConflict), "{error:?}");
 
     // 外部注文が残っていればprepareで未送信のまま中止し、予約を戻す。
     let (blocked, calls): (Result<u32, ErrorCode>, _) =
@@ -1482,4 +1479,188 @@ fn absent_transfer_is_released_only_after_full_history_and_nonce_window() {
             ..
         }
     )));
+}
+
+#[test]
+fn realized_profit_is_available_for_recovery_and_snapshot_replay() {
+    observed_equity_replays(500_000, true);
+}
+#[test]
+fn realized_loss_reduces_recovery_limit_and_survives_replay() {
+    observed_equity_replays(300_000, false);
+}
+fn observed_equity_replays(equity: u64, accepted: bool) {
+    let pic = pic();
+    let controller = principal(97);
+    let caller = principal(95);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    enable_recovery_core(&pic, vault, controller);
+    let session = open_session(&pic, vault, caller, &secret(165));
+    credit(&pic, vault, caller, &session, 1_000_000, 5);
+    allocate(&pic, vault, caller, &session, b"profit-alloc", 400_000).unwrap();
+    let sent: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, ACCEPTED.to_vec())),
+    )
+    .unwrap();
+    sent.unwrap();
+    let trading: Result<Blob, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone()).unwrap();
+    let credited: Result<bool, ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "credit_venue_deposit",
+        (
+            blob(&[31; 32]),
+            400_000u64,
+            trading.unwrap(),
+            "usdc".to_string(),
+        ),
+    )
+    .unwrap();
+    credited.unwrap();
+    let before = pic
+        .take_canister_snapshot(vault, Some(controller), None)
+        .unwrap();
+    let client = pocket_ic_tests::envelope::client(233);
+    let plaintext =
+        candid::encode_args((session.clone(), blob(b"profit-recovery"), 500_000u64)).unwrap();
+    let (request, aad) = client
+        .prepare_encoded(&pic, vault, caller, "request_recovery", &plaintext)
+        .unwrap();
+    let (response,_)=call_with_routed_outcalls(&pic,vault,caller,"private_call",(request.clone(),),|call| {
+        let q:serde_json::Value=serde_json::from_slice(&call.body).unwrap(); assert_eq!(q["type"],"clearinghouseState");
+        Ok((200,serde_json::json!({"marginSummary":{"accountValue":format!("0.{:06}",equity)},"time":pocket_ic_tests::envelope::now_ms(&pic),"assetPositions":[]}).to_string().into_bytes()))
+    }).unwrap();
+    let result: Result<FundRequestAccepted, ErrorCode> =
+        client.decode_encoded(response, &request, &aad).unwrap();
+    if accepted {
+        result.unwrap();
+    } else {
+        assert!(
+            matches!(result, Err(ErrorCode::InsufficientFunds { .. })),
+            "{result:?}"
+        );
+    }
+    let status: Result<FundStatus, ErrorCode> =
+        query(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    assert_eq!(status.unwrap().trading_equity, equity);
+    // A late history arrival must not add to an already observed absolute balance.
+    let address: Result<Blob, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone()).unwrap();
+    let late: Result<bool, ErrorCode> = update_args(
+        &pic,
+        vault,
+        controller,
+        "credit_venue_deposit",
+        (
+            blob(&[32; 32]),
+            100_000u64,
+            address.unwrap(),
+            "usdc".to_string(),
+        ),
+    )
+    .unwrap();
+    assert!(late.unwrap());
+    let status: Result<FundStatus, ErrorCode> =
+        query(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    assert_eq!(
+        status.unwrap().trading_equity,
+        equity,
+        "no additive double credit after an observation"
+    );
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).unwrap();
+    pic.load_canister_snapshot(vault, Some(controller), before.id)
+        .unwrap();
+    let _: Result<(), ErrorCode> = update(
+        &pic,
+        guard.unwrap().unwrap(),
+        principal(239),
+        "resume_journal",
+        vault,
+    )
+    .unwrap();
+    let status: Result<FundStatus, ErrorCode> =
+        query(&pic, vault, caller, "get_fund_status", session).unwrap();
+    assert_eq!(
+        status.unwrap().trading_equity,
+        equity,
+        "observed equity must survive replay"
+    );
+}
+
+#[test]
+fn lost_allocation_reply_is_reconciled_without_resending() {
+    let pic = pic();
+    let controller = principal(97);
+    let caller = principal(95);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let session = open_session(&pic, vault, caller, &secret(165));
+    credit(&pic, vault, caller, &session, 1_000_000, 5);
+    allocate(&pic, vault, caller, &session, b"lost-alloc", 400_000).unwrap();
+    let reserve: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .unwrap();
+    let reserve = format!("0x{}", hex::encode(reserve.unwrap()));
+    let (sent, calls): (Result<u32, ErrorCode>, _) =
+        call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |_| {
+            Err((4, "lost reply".into()))
+        })
+        .unwrap();
+    sent.unwrap();
+    let q: serde_json::Value = serde_json::from_slice(&calls[0].body).unwrap();
+    let nonce = q["nonce"].as_u64().unwrap();
+    let destination = q["action"]["destination"].as_str().unwrap();
+    let history=serde_json::json!([{"time":nonce,"hash":format!("0x{}",hex::encode([91;32])),"delta":{"type":"internalTransfer","user":reserve,"destination":destination,"usdc":"0.4"}}]).to_string().into_bytes();
+    pic.advance_time(std::time::Duration::from_secs(61));
+    let (result, calls): (Result<u32, ErrorCode>, _) =
+        call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |call| {
+            assert!(call.url.ends_with("/info"), "no second transfer POST");
+            Ok((200, history.clone()))
+        })
+        .unwrap();
+    result.unwrap();
+    assert!(!calls.is_empty());
+    let status: Result<FundStatus, ErrorCode> =
+        query(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    let status = status.unwrap();
+    assert!(status.unknowns.is_empty());
+    assert_eq!(status.in_transit, 400_000);
+    let address = hex::decode(destination.trim_start_matches("0x")).unwrap();
+    let arrived: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        controller,
+        "reconcile_deposits",
+        (blob(&address),),
+        Ok((200, history)),
+    )
+    .unwrap();
+    assert_eq!(arrived.unwrap(), 1);
+    let status: Result<FundStatus, ErrorCode> =
+        query(&pic, vault, caller, "get_fund_status", session).unwrap();
+    let status = status.unwrap();
+    assert_eq!(status.trading_equity, 400_000);
+    assert_eq!(status.in_transit, 0);
 }

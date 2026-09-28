@@ -906,3 +906,81 @@ pub fn advance_deposit_history(
     ).map_err(sql)?;
     Ok(())
 }
+
+/// A balance observation must not straddle any locally outstanding transfer.
+pub fn trading_observation_base(
+    c: &Connection,
+    user_id: &[u8; 32],
+    account_id: &[u8; 32],
+) -> Result<(u64, u64), Error> {
+    let owner =
+        custody_account(c, user_id, api_types::AccountKind::Trading)?.ok_or(Error::NotFound)?;
+    if owner.account_id != *account_id {
+        return Err(Error::Conflict);
+    }
+    if c.query_optional_scalar::<i64>("SELECT 1 FROM fund_requests WHERE user_id=?1 AND state IN ('accepted','reserved','executing','unknown') LIMIT 1", params![user_id.as_slice()]).map_err(sql)?.is_some() { return Err(Error::Conflict); }
+    let revision = c.query_scalar::<i64>("SELECT COALESCE(MAX(p.journal_id),0) FROM postings p JOIN accounts a ON a.account_id=p.account_id WHERE a.name=?1",params![user_trading(account_id)]).map_err(sql)?;
+    Ok((
+        liability_balance(c, &user_trading(account_id))?,
+        revision as u64,
+    ))
+}
+pub fn trading_observed_at(c: &Connection, account_id: &[u8; 32]) -> Result<u64, Error> {
+    Ok(c.query_optional_scalar::<i64>(
+        "SELECT observed_at_ms FROM trading_balance_observations WHERE account_id=?1",
+        params![account_id.as_slice()],
+    )
+    .map_err(sql)?
+    .unwrap_or(0) as u64)
+}
+pub fn observe_trading_balance(
+    c: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    account_id: &[u8; 32],
+    previous: u64,
+    equity: u64,
+    observed_at_ms: u64,
+    event_id: &[u8; 32],
+) -> Result<(), Error> {
+    if trading_observation_base(c, user_id, account_id)?.0 != previous
+        || observed_at_ms <= trading_observed_at(c, account_id)?
+        || observed_at_ms > i64::MAX as u64
+    {
+        return Err(Error::Conflict);
+    }
+    let latest = c.query_scalar::<i64>("SELECT COALESCE(MAX(j.at),0) FROM postings p JOIN accounts a ON a.account_id=p.account_id JOIN journals j ON j.journal_id=p.journal_id WHERE a.name=?1",params![user_trading(account_id)]).map_err(sql)?;
+    if observed_at_ms < latest as u64 {
+        return Err(Error::Conflict);
+    }
+    let delta = i64::try_from(equity)
+        .map_err(|_| Error::Overflow)?
+        .checked_sub(i64::try_from(previous).map_err(|_| Error::Overflow)?)
+        .ok_or(Error::Overflow)?;
+    if delta != 0 {
+        post_journal(
+            c,
+            "trading_balance_observed",
+            observed_at_ms,
+            Some(event_id),
+            None,
+            &[
+                Posting {
+                    account: CASH_TRADING.into(),
+                    kind: AccountKind::Asset,
+                    amount: delta,
+                },
+                Posting {
+                    account: user_trading(account_id),
+                    kind: AccountKind::Liability,
+                    amount: -delta,
+                },
+            ],
+        )?;
+    }
+    c.execute("INSERT INTO trading_balance_observations(account_id,observed_at_ms) VALUES (?1,?2) ON CONFLICT(account_id) DO UPDATE SET observed_at_ms=excluded.observed_at_ms",params![account_id.as_slice(),observed_at_ms as i64]).map_err(sql)?;
+    Ok(())
+}
+
+pub fn trading_latest_posting_at(c: &Connection, account_id: &[u8; 32]) -> Result<u64, Error> {
+    Ok(c.query_scalar::<i64>("SELECT COALESCE(MAX(j.at),0) FROM postings p JOIN accounts a ON a.account_id=p.account_id JOIN journals j ON j.journal_id=p.journal_id WHERE a.name=?1",params![user_trading(account_id)]).map_err(sql)? as u64)
+}

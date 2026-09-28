@@ -45,8 +45,20 @@ impl EnvelopeClient {
         plaintext: &[u8],
     ) -> Result<R, String> {
         let (envelope, aad) = self.prepare_encoded(pic, canister, caller, method, plaintext)?;
-        let response: Result<HpkeResponse, ErrorCode> =
-            crate::update(pic, canister, caller, "private_call", envelope.clone())?;
+        let response: Result<HpkeResponse, ErrorCode> = if method == "request_recovery" {
+            let (session, _, _): (api_types::auth::SessionHandle, api_types::Blob, u64) =
+                candid::decode_args(plaintext).map_err(|e| e.to_string())?;
+            let status: Result<api_types::fund::FundStatus, ErrorCode> =
+                crate::query(pic, canister, caller, "get_fund_status", session)?;
+            let equity = status.map(|s| s.trading_equity).unwrap_or(0);
+            crate::call_with_routed_outcalls(pic,canister,caller,"private_call",(envelope.clone(),),|call| {
+                let request: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                assert_eq!(request["type"],"clearinghouseState");
+                Ok((200,serde_json::json!({"marginSummary":{"accountValue":format!("{}.{:06}",equity/1_000_000,equity%1_000_000)},"assetPositions":[],"time":now_ms(pic)}).to_string().into_bytes()))
+            })?.0
+        } else {
+            crate::update(pic, canister, caller, "private_call", envelope.clone())?
+        };
         self.decode_encoded(response, &envelope, &aad)
     }
 

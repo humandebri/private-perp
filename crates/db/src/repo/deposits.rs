@@ -3,6 +3,7 @@
 use crate::error::Error;
 use crate::repo::{auth, events, funds, ledger};
 use ic_sqlite_vfs::db::UpdateConnection;
+use ic_sqlite_vfs::params;
 
 #[allow(clippy::too_many_arguments)]
 pub fn credit_external_deposit(
@@ -34,6 +35,7 @@ pub fn credit_external_deposit(
     {
         return Ok(false);
     }
+    ensure_allocation_ready(connection, address, sender)?;
     let event = events::ExternalEvent {
         event_id: *event_id,
         network: network.to_string(),
@@ -74,7 +76,10 @@ pub fn credit_external_deposit(
                 )?;
             }
             let excess = amount - confirmed;
-            if excess > 0 {
+            // Once observations begin, direct arrivals are included in the next
+            // absolute equity observation. Never add them again: the response
+            // may already contain an arrival whose history was ingested later.
+            if excess > 0 && ledger::trading_observed_at(connection, &owner.account_id)? == 0 {
                 ledger::trading_deposit_confirmed(connection, &owner.account_id, excess, now)?;
                 events::insert_audit(
                     connection,
@@ -110,4 +115,24 @@ pub fn credit_external_deposit(
         }
     }
     Ok(true)
+}
+
+pub fn ensure_allocation_ready(
+    c: &ic_sqlite_vfs::db::connection::Connection,
+    address: &[u8; 20],
+    sender: Option<&[u8; 20]>,
+) -> Result<(), Error> {
+    let Some(sender) = sender else {
+        return Ok(());
+    };
+    if !ledger::custody_account_by_address(c, sender)?.is_some_and(|a| a.kind == "reserve") {
+        return Ok(());
+    }
+    let Some(owner) = ledger::custody_account_by_address(c, address)? else {
+        return Ok(());
+    };
+    if owner.kind == "trading" && c.query_optional_scalar::<i64>("SELECT 1 FROM fund_requests WHERE account_id=?1 AND kind='allocation' AND state IN ('reserved','unknown') LIMIT 1", params![owner.account_id.as_slice()]).map_err(super::sql)?.is_some() {
+        return Err(Error::Conflict);
+    }
+    Ok(())
 }

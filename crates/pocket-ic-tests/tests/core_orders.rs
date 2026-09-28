@@ -1401,7 +1401,7 @@ fn fills_are_ingested_idempotently() {
         sweep_with_venue_outcalls(&pic, core, caller, venue_body).expect("call");
     assert_eq!(swept.expect("sweep").dispatched, 1);
 
-    let fills = r#"[{"tid":1,"oid":777,"coin":"ETH","px":"2500","sz":"0.02","fee":12,"time":1758000000000}]"#;
+    let fills = r#"[{"tid":1,"oid":777,"coin":"ETH","px":"2500","sz":"0.02","fee":"0.000012","time":1758000000000}]"#;
     let journal: Result<Option<Principal>, ErrorCode> =
         pocket_ic_tests::query(&pic, core, controller, "get_send_journal", ()).unwrap();
     let journal = journal.unwrap().unwrap();
@@ -1429,7 +1429,7 @@ fn fills_are_ingested_idempotently() {
         "test_ingest_fills",
         (
             session.clone(),
-            r#"[{"tid":2,"oid":777,"coin":"BTC","px":"2500","sz":"0.05","fee":12,"time":1758000000000}]"#
+            r#"[{"tid":2,"oid":777,"coin":"BTC","px":"2500","sz":"0.05","fee":"0.000012","time":1758000000000}]"#
                 .to_string(),
         ),
     )
@@ -1442,7 +1442,7 @@ fn fills_are_ingested_idempotently() {
         "test_ingest_fills",
         (
             session.clone(),
-            r#"[{"tid":4,"oid":777,"coin":"ETH","px":"2500","sz":"-0.01","fee":1,"time":1758000000000}]"#
+            r#"[{"tid":4,"oid":777,"coin":"ETH","px":"2500","sz":"-0.01","fee":"0.000001","time":1758000000000}]"#
                 .to_string(),
         ),
     )
@@ -1482,7 +1482,7 @@ fn fills_are_ingested_idempotently() {
         "test_ingest_fills",
         (
             session.clone(),
-            r#"[{"tid":3,"oid":777,"coin":"ETH","px":"2500","sz":"0.03","fee":18,"time":1758000000001}]"#
+            r#"[{"tid":3,"oid":777,"coin":"ETH","px":"2500","sz":"0.03","fee":"0.000018","time":1758000000001}]"#
                 .to_string(),
         ),
     )
@@ -1724,7 +1724,7 @@ fn order_status_updates_are_reflected() {
         "test_ingest_fills",
         (
             session.clone(),
-            r#"[{"tid":1801,"oid":888,"coin":"ETH","px":"2500","sz":"0.01","fee":1,"time":1758000000000}]"#
+            r#"[{"tid":1801,"oid":888,"coin":"ETH","px":"2500","sz":"0.01","fee":"0.000001","time":1758000000000}]"#
                 .to_string(),
         ),
     )
@@ -1737,7 +1737,7 @@ fn order_status_updates_are_reflected() {
         "test_ingest_fills",
         (
             session.clone(),
-            r#"[{"tid":1802,"oid":888,"coin":"ETH","px":"2500","sz":"0.02","fee":1,"time":1758000000001}]"#
+            r#"[{"tid":1802,"oid":888,"coin":"ETH","px":"2500","sz":"0.02","fee":"0.000001","time":1758000000001}]"#
                 .to_string(),
         ),
     )

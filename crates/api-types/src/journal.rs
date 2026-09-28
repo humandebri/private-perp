@@ -107,6 +107,13 @@ pub enum RecoveryPayload {
         amount_micros: u64,
         claimed_at_ms: u64,
     },
+    TradingBalanceObserved {
+        user_id: Blob,
+        account_id: Blob,
+        previous_equity: u64,
+        equity: u64,
+        observed_at_ms: u64,
+    },
     LedgerPosting {
         posting_id: Blob,
         user_id: Blob,
@@ -159,7 +166,7 @@ pub enum RecoveryPayload {
         market: String,
         quantity: String,
         price: String,
-        fee: u64,
+        fee: i64,
         filled_at_ms: u64,
     },
     /// Venue-observed order state; terminal states release the risk hold.

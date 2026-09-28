@@ -489,7 +489,10 @@ fn journal_outage_after_allocation_post_keeps_reservation_for_reconciliation() {
     });
     let reply = pic.await_call(message_id).expect("sweep reply");
     let swept: Result<u32, ErrorCode> = candid::decode_one(&reply).expect("decode sweep");
-    assert_eq!(swept.expect("unknown is persisted"), 1);
+    assert!(
+        swept.is_err(),
+        "journal outage is surfaced; POST evidence remains durable"
+    );
     let funds = status(&pic, vault, caller, &session);
     assert_eq!(funds.in_transit, 0);
     assert_eq!(funds.withdrawable, 600_000);
@@ -503,8 +506,19 @@ fn journal_outage_after_allocation_post_keeps_reservation_for_reconciliation() {
     .expect("events call");
     assert_eq!(
         events.expect("events").items[0].state,
-        FundRequestState::Unknown
+        FundRequestState::Reserved
     );
+    pic.start_canister(journal, Some(controller)).unwrap();
+    let retried: Result<u32, ErrorCode> =
+        update(&pic, vault, caller, "test_sweep_now", ()).unwrap();
+    assert_eq!(
+        retried.unwrap(),
+        0,
+        "retry persists result without another POST"
+    );
+    let funds = status(&pic, vault, caller, &session);
+    assert_eq!(funds.in_transit, 400_000);
+    assert_eq!(funds.withdrawable, 600_000);
 }
 
 #[test]
@@ -609,8 +623,15 @@ fn an_uncertain_send_is_not_resent() {
     assert_eq!(after.unknowns.len(), 1, "未解決actionとして残る");
 
     // 再sweepしても送信しない（未解決actionはclaimされない）。
-    let swept_again: Result<u32, ErrorCode> =
-        update_args(&pic, vault, caller, "test_sweep_now", ()).expect("call");
+    let swept_again: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, b"[]".to_vec())),
+    )
+    .expect("history query");
     assert_eq!(swept_again.expect("sweep"), 0, "自動再送しない");
 
     // 時間が経過しても解放・確定しない（T-206: 不明を勝手に解消しない）。
@@ -620,8 +641,15 @@ fn an_uncertain_send_is_not_resent() {
     assert_eq!(after_wait.unknowns.len(), 1, "不明なactionを保持し続ける");
     assert_eq!(after_wait.withdrawable, 700_000, "予約は保持されたまま");
     assert_eq!(after_wait.in_transit, 0, "確定残高へ含めない");
-    let swept_after_wait: Result<u32, ErrorCode> =
-        update_args(&pic, vault, caller, "test_sweep_now", ()).expect("call");
+    let swept_after_wait: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, b"[]".to_vec())),
+    )
+    .expect("history query");
     assert_eq!(
         swept_after_wait.expect("sweep"),
         0,
@@ -1044,7 +1072,7 @@ fn payout_rejection_and_unknown_are_handled() {
         session.clone(),
     )
     .expect("call");
-    provisioned.expect("provisioned");
+    let reserve = provisioned.expect("provisioned");
 
     let eoa = address_from_secret(&key).expect("address");
     let withdraw = |request_id: &[u8], nonce: u64| -> Result<FundRequestAccepted, ErrorCode> {
@@ -1114,7 +1142,7 @@ fn payout_rejection_and_unknown_are_handled() {
 
     // 応答喪失 → unknownとして保持（再送しない）。
     withdraw(b"payout-unknown", 2).expect("accepted");
-    let swept: Result<u32, ErrorCode> = call_with_mocked_outcall(
+    let (swept, captured): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
         &pic,
         vault,
         caller,
@@ -1131,9 +1159,25 @@ fn payout_rejection_and_unknown_are_handled() {
     );
     assert_eq!(after.unknowns.len(), 1);
 
-    let swept_again: Result<u32, ErrorCode> =
-        update_args(&pic, vault, caller, "test_sweep_now", ()).expect("call");
-    assert_eq!(swept_again.expect("sweep"), 0, "自動再送しない");
+    let wire: serde_json::Value = serde_json::from_slice(&captured.unwrap().body).unwrap();
+    let nonce = wire["nonce"].as_u64().unwrap();
+    pic.advance_time(Duration::from_secs(61));
+    let history=serde_json::json!([{"time":nonce,"hash":format!("0x{}",hex::encode([68;32])),"delta":{"type":"internalTransfer","user":format!("0x{}",hex::encode(reserve)),"destination":format!("0x{}",hex::encode(eoa)),"usdc":"0.25"}}]).to_string().into_bytes();
+    let (swept_again, captured): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((200, history)),
+    )
+    .unwrap();
+    assert_eq!(swept_again.unwrap(), 0, "never resend the payout");
+    assert!(captured.unwrap().url.ends_with("/info"));
+    let after = status(&pic, vault, caller, &session);
+    assert!(after.unknowns.is_empty());
+    assert_eq!(after.reserved_for_withdrawal, 0);
+    assert_eq!(after.withdrawable, 750_000);
 }
 
 #[test]

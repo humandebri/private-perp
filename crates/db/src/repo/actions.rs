@@ -751,6 +751,7 @@ pub fn mark_recovery_fence_released(
 
 #[derive(Debug, Clone)]
 pub struct RecoveryCheck {
+    pub kind: String,
     pub action_id: [u8; 32],
     pub account_id: [u8; 32],
     pub user_id: [u8; 32],
@@ -770,13 +771,13 @@ pub struct RecoveryCheck {
 pub fn recovery_checks(connection: &Connection, limit: u32) -> Result<Vec<RecoveryCheck>, Error> {
     let rows = connection
         .query_all(
-            "SELECT a.action_id, r.account_id, a.user_id, a.client_request_id, r.amount,
-                r.destination, a.nonce, a.worker_epoch, a.recovery_fence_epoch,
+            "SELECT a.action_id, COALESCE(r.account_id, zeroblob(32)), a.user_id, a.client_request_id, r.amount,
+                r.destination, a.nonce, a.worker_epoch, COALESCE(a.recovery_fence_epoch, 0),
                 a.recovery_checked_until, a.recovery_window_ms, a.dispatch_state,
-                a.recovery_match_hash, a.recovery_ambiguous
+                a.recovery_match_hash, a.recovery_ambiguous, a.kind
            FROM fund_actions a JOIN fund_requests r
              ON r.user_id = a.user_id AND r.client_request_id = a.client_request_id
-          WHERE a.kind = 'recovery' AND a.recovery_fence_epoch IS NOT NULL
+          WHERE ((a.kind = 'recovery' AND a.recovery_fence_epoch IS NOT NULL) OR (a.kind IN ('allocation','withdrawal') AND a.dispatch_state = 'unknown'))
             AND a.recovery_ambiguous = 0
             AND r.state IN ('unknown', 'executing')
             AND a.dispatch_state IN ('unknown', 'reconciled')
@@ -798,6 +799,7 @@ pub fn recovery_checks(connection: &Connection, limit: u32) -> Result<Vec<Recove
                     row.get::<String>(11)?,
                     row.get::<Option<Vec<u8>>>(12)?,
                     row.get::<i64>(13)?,
+                    row.get::<String>(14)?,
                 ))
             },
         )
@@ -805,6 +807,7 @@ pub fn recovery_checks(connection: &Connection, limit: u32) -> Result<Vec<Recove
     rows.into_iter()
         .map(|row| {
             Ok(RecoveryCheck {
+                kind: row.14,
                 action_id: row
                     .0
                     .try_into()
@@ -893,7 +896,7 @@ pub fn advance_recovery_check(
 ) -> Result<(), Error> {
     connection.execute(
         "UPDATE fund_actions SET recovery_checked_until = ?3, recovery_window_ms = ?4, updated_at = ?5
-          WHERE action_id = ?1 AND worker_epoch = ?2 AND kind = 'recovery'
+          WHERE action_id = ?1 AND worker_epoch = ?2 AND kind IN ('recovery','allocation','withdrawal')
             AND dispatch_state IN ('unknown', 'reconciled')
             AND (recovery_checked_until IS NULL OR recovery_checked_until <= ?3)",
         params![action_id.as_slice(), epoch as i64, checked_until as i64, window_ms as i64, now as i64],
@@ -972,7 +975,7 @@ pub fn recovery_proof(
     let row = connection
         .query_optional(
             "SELECT worker_epoch, recovery_checked_until, recovery_match_hash, recovery_ambiguous
-           FROM fund_actions WHERE action_id = ?1 AND kind = 'recovery'
+           FROM fund_actions WHERE action_id = ?1 AND kind IN ('recovery','allocation','withdrawal')
              AND dispatch_state IN ('unknown', 'reconciled')",
             params![action_id.as_slice()],
             |row| {
@@ -1096,4 +1099,37 @@ pub fn record_legacy_recovery_fence(
         "legacy recovery",
         "stale legacy recovery",
     )
+}
+
+pub fn save_transfer_result(
+    c: &mut UpdateConnection<'_>,
+    action_id: &[u8; 32],
+    event: &[u8],
+) -> Result<(), Error> {
+    c.execute("INSERT INTO pending_transfer_results(action_id,event) VALUES (?1,?2) ON CONFLICT(action_id) DO NOTHING", params![action_id.as_slice(),event]).map_err(sql)?;
+    Ok(())
+}
+pub fn pending_transfer_results(c: &Connection) -> Result<Vec<Vec<u8>>, Error> {
+    c.query_all(
+        "SELECT event FROM pending_transfer_results ORDER BY rowid LIMIT 4",
+        params![],
+        |r| r.get(0),
+    )
+    .map_err(sql)
+}
+pub fn delete_transfer_result(c: &mut UpdateConnection<'_>, action_id: &[u8]) -> Result<(), Error> {
+    c.execute(
+        "DELETE FROM pending_transfer_results WHERE action_id=?1",
+        params![action_id],
+    )
+    .map_err(sql)?;
+    Ok(())
+}
+
+pub fn transfer_has_competitor(
+    c: &Connection,
+    row: &RecoveryCheck,
+    window: u64,
+) -> Result<bool, Error> {
+    Ok(c.query_optional_scalar::<i64>("SELECT 1 FROM fund_actions a JOIN fund_requests r ON r.user_id=a.user_id AND r.client_request_id=a.client_request_id WHERE a.action_id != ?1 AND a.signer_id = (SELECT signer_id FROM fund_actions WHERE action_id=?1) AND (a.kind != 'recovery' OR r.account_id=?6) AND r.state != 'rejected' AND r.destination=?2 AND r.amount=?3 AND a.nonce BETWEEN ?4 AND ?5 AND a.dispatch_state IN ('dispatching','unknown','reconciled') LIMIT 1",params![row.action_id.as_slice(),row.destination.as_str(),row.amount as i64,row.nonce.saturating_sub(window) as i64,row.nonce.saturating_add(window) as i64,row.account_id.as_slice()]).map_err(sql)?.is_some())
 }

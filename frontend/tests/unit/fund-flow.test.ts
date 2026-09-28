@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { prepareWithdrawal } from '../../src/client/fund-flow'
+import { prepareWithdrawal, waitForFunds } from '../../src/client/fund-flow'
 import type { FundStatus } from '../../src/client/candid/funds_vault.did.js'
 
 const funds = (withdrawable: bigint, extras: Partial<FundStatus> = {}): FundStatus => ({
@@ -72,4 +72,26 @@ describe('automatic withdrawal recovery', () => {
     )
     expect(recover).not.toHaveBeenCalled()
   })
+})
+
+it('polls an in-flight POST instead of treating it as an unknown outcome', async () => {
+  const read = vi
+    .fn()
+    .mockResolvedValueOnce(
+      funds(10n, {
+        unknowns: [
+          {
+            action_id: new Uint8Array(32),
+            kind: { Allocation: null },
+            state: { Dispatching: null },
+            since: 1n,
+          },
+        ],
+      }),
+    )
+    .mockResolvedValueOnce(funds(10n))
+  const sleep = vi.fn().mockResolvedValue(undefined)
+  await waitForFunds(read, (status) => status.withdrawable === 10n, sleep)
+  expect(read).toHaveBeenCalledTimes(2)
+  expect(sleep).toHaveBeenCalledTimes(1)
 })

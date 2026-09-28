@@ -214,6 +214,8 @@ pub async fn credit_journaled(
     {
         return Ok(false);
     }
+    db::tx::query(|c| db::repo::deposits::ensure_allocation_ready(c, address, sender.as_ref()))
+        .map_err(&internal)?;
     let mut logical = b"deposit_credit".to_vec();
     logical.extend_from_slice(network.as_bytes());
     logical.extend_from_slice(&event_id);
@@ -289,7 +291,18 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
     for (address, created_at) in addresses {
         last = Some((created_at, address));
         match reconcile_address(&address).await {
-            Ok(count) => credited += count,
+            Ok(count) => {
+                credited += count;
+                if let Some(owner) =
+                    db::tx::query(|c| db::repo::ledger::custody_account_by_address(c, &address))
+                        .map_err(internal)?
+                    && owner.kind == "trading"
+                    && let Some(user) = owner.user_id
+                {
+                    // Pending transfers intentionally defer observations; keep rotating accounts.
+                    let _ = crate::balance::refresh(&user).await;
+                }
+            }
             Err(error) => {
                 ic_cdk::println!("deposit page reconciliation failed: {error:?}");
                 // Continue rotating addresses; this address retains its page cursor.
