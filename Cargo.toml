@@ -13,6 +13,8 @@ members = [
     "crates/journal-client",
     "crates/trading-core",
     "crates/pocket-ic-tests",
+    "crates/scoped-entrypoint",
+    "crates/private-perp",
     "tools/e2e-signer",
     "tools/eligibility-issuer",
 ]

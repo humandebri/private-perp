@@ -10,10 +10,50 @@ import { Principal } from '@icp-sdk/core/principal'
 
 import { resolveConfig } from './config'
 import type { ClientConfig } from './config'
-import { idlFactory as fundsVaultIdl } from './candid/funds_vault.did.js'
-import { idlFactory as tradingCoreIdl } from './candid/trading_core.did.js'
+import { idlFactory as privatePerpIdl } from './candid/private_perp.did.js'
 import type { _SERVICE as FundsVaultService } from './candid/funds_vault.did.js'
 import type { _SERVICE as TradingCoreService } from './candid/trading_core.did.js'
+import type { _SERVICE as PrivatePerpService } from './candid/private_perp.did.js'
+
+const sharedMethodNames = new Set([
+  'configure_cycles',
+  'configure_eligibility',
+  'configure_market_threshold',
+  'configure_rest_budget',
+  'get_cycles_status',
+  'get_environment',
+  'get_hpke_public_key',
+  'get_journal_guard',
+  'get_journal_send_status',
+  'get_policy_principal',
+  'get_send_journal',
+  'journal_restore_status',
+  'private_call',
+  'recovery_replay_pending',
+  'recovery_stage_status',
+  'resume_journal',
+  'rotate_hpke_key',
+  'set_ecdsa_key_id',
+  'set_journal_guard',
+  'set_policy_principal',
+  'set_send_journal',
+  'set_sns_principal',
+  'set_venue_endpoints',
+  'test_sweep_now',
+  'version',
+])
+
+function roleView<T>(actor: PrivatePerpService, role: 'vault' | 'core'): T {
+  return new Proxy(actor, {
+    get(target, property) {
+      const name =
+        typeof property === 'string' && sharedMethodNames.has(property)
+          ? `${role}_${property}`
+          : property
+      return Reflect.get(target, name)
+    },
+  }) as T
+}
 
 /** 短命のIC identity（クライアント鍵。ページを閉じると失われる）。 */
 export function createSessionIdentity(): Ed25519KeyIdentity {
@@ -46,18 +86,16 @@ export async function createClients(
 ): Promise<CanisterClients> {
   const identity = createSessionIdentity()
   const agent = await createAgent(identity, config)
+  const combined = Actor.createActor<PrivatePerpService>(privatePerpIdl, {
+    agent,
+    canisterId: config.privatePerp,
+  })
   return {
     identity,
     principal: identity.getPrincipal(),
     agent,
-    vault: Actor.createActor<FundsVaultService>(fundsVaultIdl, {
-      agent,
-      canisterId: config.fundsVault,
-    }),
-    core: Actor.createActor<TradingCoreService>(tradingCoreIdl, {
-      agent,
-      canisterId: config.tradingCore,
-    }),
+    vault: roleView<FundsVaultService>(combined, 'vault'),
+    core: roleView<TradingCoreService>(combined, 'core'),
     config,
   }
 }

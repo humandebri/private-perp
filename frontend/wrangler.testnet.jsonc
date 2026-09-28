@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "private-perp-ui-testnet",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "binding": "ASSETS", "run_worker_first": true },
+  "observability": { "enabled": false },
+  "vars": {
+    "APP_STAGE": "testnet",
+    "IC_HOST": "https://icp-api.io",
+    "MOCK_HL_URL": "",
+    "MARKET_WS_URL": "wss://api.hyperliquid-testnet.xyz/ws",
+  },
+}

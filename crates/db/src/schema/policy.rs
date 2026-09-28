@@ -70,4 +70,8 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 3,
         sql: SHARED_BUDGET,
     },
+    Migration {
+        version: 4,
+        sql: "CREATE TABLE application_admin (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), principal BLOB NOT NULL CHECK(length(principal) BETWEEN 1 AND 29));",
+    },
 ];

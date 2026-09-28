@@ -5,7 +5,13 @@ import { bytesToHex } from './wallet'
 
 type Gateway = Pick<
   LocalGateway,
-  'login' | 'logout' | 'prepareTradingAccount' | 'refresh' | 'submitOrder' | 'lookupOrder'
+  | 'login'
+  | 'logout'
+  | 'prepareTradingAccount'
+  | 'refresh'
+  | 'submitOrder'
+  | 'lookupOrder'
+  | 'fundingInstructions'
 >
 export type OrderInput = Parameters<LocalGateway['submitOrder']>[0]
 export type TrackedOrder = {
@@ -20,6 +26,7 @@ export type SessionState = {
   generation: number
   address?: string
   data?: LiveData
+  fundingInstructions?: Awaited<ReturnType<LocalGateway['fundingInstructions']>>
   receivedAt?: number
   busy: boolean
   error?: string
@@ -113,6 +120,12 @@ export class SessionStore {
     this.state = { generation: this.state.generation + 1, busy: false, orders: [] }
     this.fetching = undefined
     this.listeners.forEach((listener) => listener())
+  }
+  loadFundingInstructions = async () => {
+    if (!this.state.address) return
+    const generation = this.state.generation
+    const fundingInstructions = await this.gateway.fundingInstructions()
+    if (this.isCurrent(generation)) this.publish({ fundingInstructions })
   }
   logout = async () => {
     this.reset()

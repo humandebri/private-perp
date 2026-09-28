@@ -8,6 +8,7 @@ playwright-report/
 .playwright-cli/
 .env*
 !.env.example
+!.env.testnet.example
 *.log
 
 # OS and Python caches

@@ -17,13 +17,12 @@ fi
 cargo build -p e2e-signer -p eligibility-issuer
 export LOCAL_ELIGIBILITY_ISSUER_ADDRESS="$(target/debug/eligibility-issuer address)"
 icp network start -d
-icp deploy
+icp deploy private_perp --args "(principal \"$(icp identity principal)\")"
 
 canister_id() {
   icp canister status "$1" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
 }
-funds_id="$(canister_id funds_vault)"
-core_id="$(canister_id trading_core)"
+app_id="$(canister_id private_perp)"
 MOCK_HL_ADMIN_ORIGINS='http://127.0.0.1:4173' node tools/mock-hl/server.mjs &
 mock_pid="$!"
 for _ in {1..50}; do
@@ -38,13 +37,12 @@ bash scripts/bootstrap-local.sh
 printf '%s\n' \
   'VITE_APP_STAGE=local' \
   'VITE_IC_HOST=http://127.0.0.1:18100' \
-  "VITE_FUNDS_VAULT_CANISTER_ID=$funds_id" \
-  "VITE_TRADING_CORE_CANISTER_ID=$core_id" \
+  "VITE_PRIVATE_PERP_CANISTER_ID=$app_id" \
   'VITE_MOCK_HL_URL=http://127.0.0.1:8080' \
   'VITE_MARKET_WS_URL=ws://127.0.0.1:8080/ws' > frontend/.env.local
 
 pnpm --dir frontend build
 if ! LOCAL_E2E=1 PLAYWRIGHT_HTML_OPEN=never pnpm --dir frontend test:e2e; then
-  icp canister logs trading_core || true
+  icp canister logs private_perp || true
   exit 1
 fi

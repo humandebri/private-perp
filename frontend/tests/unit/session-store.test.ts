@@ -49,6 +49,7 @@ function fixture() {
       async () => new Uint8Array(32),
     ),
     refresh: vi.fn(async () => data()),
+    fundingInstructions: vi.fn<LocalGateway['fundingInstructions']>(),
     lookupOrder: vi.fn<LocalGateway['lookupOrder']>(async () => undefined),
     submitOrder: vi.fn<LocalGateway['submitOrder']>(async (args) => ({
       request_id: args.clientRequestId!,
@@ -239,5 +240,47 @@ describe('session lifecycle and order reconciliation', () => {
     gateway.lookupOrder.mockResolvedValueOnce({ ...order, state: { Unknown: null } })
     await store.refresh()
     expect(orderBlockReason(store.getSnapshot(), 0)).toContain('照合中')
+  })
+})
+
+describe('funding instructions session ownership', () => {
+  const instructions = (source: number) =>
+    ({
+      source_hl_account_address: new Uint8Array(20).fill(source),
+      hl_account_address: new Uint8Array(20).fill(9),
+      asset: { Usdc: null },
+      network: { Testnet: null },
+      account_kind: { Reserve: null },
+      minimum_amount: [],
+      memo_required: false,
+    }) as Awaited<ReturnType<LocalGateway['fundingInstructions']>>
+
+  it('clears displayed instructions on logout and a new login', async () => {
+    const { store, gateway } = fixture()
+    gateway.fundingInstructions.mockResolvedValue(instructions(1))
+    await store.login()
+    await store.loadFundingInstructions()
+    expect(store.getSnapshot().fundingInstructions).toEqual(instructions(1))
+    await store.logout()
+    expect(store.getSnapshot().fundingInstructions).toBeUndefined()
+    gateway.login.mockResolvedValue({ address: 'user-b' } as SessionData)
+    await store.login()
+    expect(store.getSnapshot().fundingInstructions).toBeUndefined()
+  })
+
+  it('discards the old response when it arrives after the new account response', async () => {
+    const { store, gateway } = fixture()
+    const pending = deferred<Awaited<ReturnType<LocalGateway['fundingInstructions']>>>()
+    gateway.fundingInstructions.mockReturnValueOnce(pending.promise)
+    await store.login()
+    const old = store.loadFundingInstructions()
+    await store.logout()
+    gateway.login.mockResolvedValue({ address: 'user-b' } as SessionData)
+    await store.login()
+    gateway.fundingInstructions.mockResolvedValue(instructions(2))
+    await store.loadFundingInstructions()
+    pending.resolve(instructions(1))
+    await old
+    expect(store.getSnapshot().fundingInstructions).toEqual(instructions(2))
   })
 })

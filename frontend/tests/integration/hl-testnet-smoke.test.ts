@@ -14,10 +14,12 @@ test.skipIf(process.env.TESTNET_SMOKE !== '1')(
   'prepare local custody accounts on HL testnet',
   async () => {
     if (!process.env.PRIVATE_PERP_TESTNET_EOA_KEY) throw new Error('testnet owner key required')
-    const vaultId = process.env.TESTNET_VAULT_ID
-    const coreId = process.env.TESTNET_CORE_ID
+    const vaultId = process.env.TESTNET_APP_ID
+    const coreId = vaultId
     if (!vaultId || !coreId) throw new Error('local canister IDs required')
     const clients = await createClients({
+      stage: 'local',
+      privatePerp: vaultId,
       host: 'http://127.0.0.1:18100',
       fundsVault: vaultId,
       tradingCore: coreId,

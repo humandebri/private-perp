@@ -137,7 +137,7 @@ export class LocalGateway {
         await clients.vault.issue_challenge({
           principal: clients.principal,
           origin: location.origin,
-          network: { Local: null },
+          network: clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
           purpose: { Login: null },
           eoa_address: hexToBytes(address, 20),
         }),
@@ -198,7 +198,7 @@ export class LocalGateway {
     const expiresAt = nowMs() + 60_000n
     const canister = Principal.fromText(active.clients.config.tradingCore)
     const aad = envelopeAad(
-      'local',
+      active.clients.config.stage,
       canister.toUint8Array(),
       method,
       active.clients.principal.toUint8Array(),
@@ -208,7 +208,7 @@ export class LocalGateway {
     const response = unwrap(
       await active.clients.core[method]({
         key_id: serverKey,
-        network: { Local: null },
+        network: active.clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
         canister,
         method,
         request_id: id,
@@ -245,7 +245,7 @@ export class LocalGateway {
     const expiresAt = nowMs() + 60_000n
     const canister = Principal.fromText(active.clients.config.fundsVault)
     const aad = envelopeAad(
-      'local',
+      active.clients.config.stage,
       canister.toUint8Array(),
       method,
       active.clients.principal.toUint8Array(),
@@ -255,7 +255,7 @@ export class LocalGateway {
     const response = unwrap(
       await active.clients.vault.private_call({
         key_id: serverKey,
-        network: { Local: null },
+        network: active.clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
         canister,
         method,
         request_id: id,
@@ -286,7 +286,7 @@ export class LocalGateway {
     const expiresAt = nowMs() + 60_000n
     const canister = Principal.fromText(active.clients.config.tradingCore)
     const aad = envelopeAad(
-      'local',
+      active.clients.config.stage,
       canister.toUint8Array(),
       method,
       active.clients.principal.toUint8Array(),
@@ -296,7 +296,7 @@ export class LocalGateway {
     const response = unwrap(
       await active.clients.core.private_call({
         key_id: serverKey,
-        network: { Local: null },
+        network: active.clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
         canister,
         method,
         request_id: id,
@@ -453,6 +453,7 @@ export class LocalGateway {
 
   async seedDeposit(amount: string): Promise<void> {
     const active = this.require()
+    if (active.clients.config.stage !== 'local') throw new Error('mock 入金はローカル専用です')
     const instructions = await this.fundingInstructions()
     const response = await fetch(`${active.clients.config.mockHl}/admin/deposits`, {
       method: 'POST',
@@ -658,6 +659,7 @@ export class LocalGateway {
       nonce,
       expiresAt,
       canister: Principal.fromText(clients.config.fundsVault),
+      network: clients.config.stage,
     })
     const signature = await signTypedData(address, typedData)
     if (this.active !== active) throw new Error('セッションが変更されました。')
@@ -669,7 +671,7 @@ export class LocalGateway {
         amount,
         asset: { Usdc: null },
         destination: { AuthenticatedEoaHlAccount: null },
-        network: { Local: null },
+        network: clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
         nonce,
         expires_at: expiresAt,
         intent_signature: signature,

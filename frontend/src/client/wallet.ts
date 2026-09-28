@@ -67,6 +67,7 @@ export function withdrawalTypedData(args: {
   nonce: bigint
   expiresAt: bigint
   canister: Principal
+  network?: 'local' | 'testnet'
 }): string {
   return JSON.stringify({
     domain: {
@@ -99,7 +100,7 @@ export function withdrawalTypedData(args: {
       amount: args.amount.toString(),
       asset: 'usdc',
       destination: args.address,
-      network: 'local',
+      network: args.network ?? 'local',
       nonce: args.nonce.toString(),
       expiresAt: args.expiresAt.toString(),
       canister: bytesToHex(args.canister.toUint8Array()),

@@ -10,9 +10,13 @@ description = "Fail-closed send journal client for vault and core"
 api-types = { path = "../api-types" }
 candid.workspace = true
 db = { path = "../db" }
+
 hl-sign = { path = "../hl-sign" }
 hl-types = { path = "../hl-types" }
 hex.workspace = true
 ic-cdk.workspace = true
 ic-sqlite-vfs.workspace = true
 sha2.workspace = true
+
+[features]
+embedded = []

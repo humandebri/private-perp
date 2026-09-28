@@ -21,10 +21,12 @@ ic-sqlite-vfs.workspace = true
 hl-types = { path = "../hl-types" }
 hl-sign = { path = "../hl-sign" }
 journal-client = { path = "../journal-client" }
+scoped-entrypoint = { path = "../scoped-entrypoint" }
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [features]
 default = []
+embedded = ["journal-client/embedded"]
 test-venue = []

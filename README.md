@@ -1,6 +1,8 @@
 # private-perp
 
-機密資金管理＋Hyperliquid取引の設計と、ローカルCanisterへ実接続するTanStack Start UI。
+機密資金管理＋Hyperliquid取引を一つの ICP Canister にまとめ、TanStack Start UI から接続するアプリです。
+
+現在の配置・権限・検証手順は [単一 Canister 化](docs/phase-3/single-canister.md) を参照してください。旧設計書の五 Canister・SNS/guard 構成は公開試験版の配置には適用しません。
 
 - 実装：`frontend/`（ローカル実接続）、`crates/`（ICP Canister）、`tools/mock-hl/`（ローカルvenue）
 - 起動・試験・制限：`frontend/README.md`
