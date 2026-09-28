@@ -1,6 +1,5 @@
 name: Rust verification
-# Phase 0/1 のworkspaceを検証する。リモートCIは未実行である
-# （docs/implementation-status.md を正とする）。
+# Rust workspace と統合 Canister のデプロイ成果物を検証する。
 on:
   push:
     paths:
@@ -39,22 +38,26 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint (host, pure crates and test harness)
         # 既定メンバーだけでは crates/pocket-ic-tests が漏れるため --workspace を使う。
-        # Canisterクレートは `db` のwasm専用モジュール（repo/tx）に依存するためホストでは
-        # ビルドできず、wasmターゲットのlintステップで別途検査する。
-        run: cargo clippy --locked --workspace --all-targets --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy -- -D warnings
+        # Canisterとjournal-clientはwasm専用SQLiteへ依存するため除外し、
+        # wasmターゲットのlintステップで別途検査する。
+        run: cargo clippy --locked --workspace --all-targets --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy --exclude send-journal --exclude journal-client --exclude private-perp -- -D warnings
       - name: Test (host, pure crates and test harness)
-        # ホストでビルドできるメンバーだけを対象にする（Canisterクレートはwasm専用モジュールに
-        # 依存するためホストではテストをビルドできない）。既定メンバーの固定ではなく除外指定に
+        # ホストでビルドできるメンバーだけを対象にする。既定メンバーの固定ではなく除外指定に
         # することで、純粋クレートを追加したときに自動で対象になる。
-        run: cargo test --locked --workspace --exclude pocket-ic-tests --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy
+        run: cargo test --locked --workspace --exclude pocket-ic-tests --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy --exclude send-journal --exclude journal-client --exclude private-perp
       - name: Forbid async in hl-sign and db
         run: bash scripts/check-no-await.sh
       - name: Forbid raw-key signing in canister crates
         run: bash scripts/check-signing-boundary.sh
-      - name: Lint (wasm canisters)
-        run: cargo clippy --locked --all-targets --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -p db -- -D warnings
-      - name: Build canister wasm
-        run: cargo build --locked --release --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core
+      # 統合 crate の embedded feature が旧単体 Wasm に混入しないよう別プロセスで検査する。
+      - name: Lint (standalone wasm canisters)
+        run: cargo clippy --locked --all-targets --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -p send-journal -p db -- -D warnings
+      - name: Lint (unified wasm canister)
+        run: cargo clippy --locked --all-targets --target wasm32-unknown-unknown -p private-perp -- -D warnings
+      - name: Build standalone canister wasm
+        run: cargo build --locked --release --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -p send-journal
+      - name: Build unified canister wasm
+        run: cargo build --locked --release --target wasm32-unknown-unknown -p private-perp
       - name: Check the deployable wasm has no test-only entry points
         # test-venue 付きのビルドが本番成果物へ混ざっていないことを検査する。
         run: |
@@ -62,7 +65,8 @@ jobs:
           for wasm in target/wasm32-unknown-unknown/release/policy.wasm \
                       target/wasm32-unknown-unknown/release/funds_vault.wasm \
                       target/wasm32-unknown-unknown/release/control_guard.wasm \
-                      target/wasm32-unknown-unknown/release/trading_core.wasm; do
+                      target/wasm32-unknown-unknown/release/trading_core.wasm \
+                      target/wasm32-unknown-unknown/release/private_perp.wasm; do
             test -f "$wasm"
             for method in test_credit_deposit test_corrupt_action_digest test_hpke_seal \
                           test_hpke_open test_ecdsa_roundtrip test_sweep_now test_ingest_fills \

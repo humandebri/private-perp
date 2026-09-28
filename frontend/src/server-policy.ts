@@ -48,9 +48,10 @@ function securityHeaders(source: Headers): Headers {
   return headers
 }
 export function gateRequest(request: Request, stage: string): Response | null {
-  if (stage !== 'local') return new Response('Local service is not configured.', { status: 503 })
+  if (stage !== 'local' && stage !== 'testnet')
+    return new Response('Service is not configured.', { status: 503 })
   const hostname = new URL(request.url).hostname
-  if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) {
+  if (stage === 'local' && !['127.0.0.1', 'localhost', '::1'].includes(hostname)) {
     return new Response('Loopback access only.', { status: 403 })
   }
   if (!['GET', 'HEAD'].includes(request.method))

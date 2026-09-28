@@ -18,6 +18,7 @@ ic-sqlite-vfs.workspace = true
 hl-sign = { path = "../hl-sign" }
 hl-types = { path = "../hl-types" }
 journal-client = { path = "../journal-client" }
+scoped-entrypoint = { path = "../scoped-entrypoint" }
 hex.workspace = true
 ic-cdk.workspace = true
 ic-cdk-management-canister.workspace = true
@@ -29,4 +30,5 @@ serde_json = { workspace = true, features = ["arbitrary_precision"] }
 # テスト専用の入金計上（`test_credit_deposit`）を有効にする。
 # 本番ビルド（`icp build`、CIのwasmビルド）では有効にしない。
 default = []
+embedded = ["journal-client/embedded"]
 test-venue = []

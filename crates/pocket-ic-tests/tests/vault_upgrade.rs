@@ -11,8 +11,8 @@ use hl_sign::private_perp;
 use hl_sign::signature::address_from_secret;
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{
-    FUNDS_VAULT_WASM, call_with_mocked_outcall, deploy_default, pic, principal, update,
-    update_args, upgrade,
+    FUNDS_VAULT_WASM, call_with_mocked_outcall, call_with_routed_outcalls, deploy_default, pic,
+    principal, update, update_args, upgrade,
 };
 
 const ORIGIN: &str = "https://app.example.test";
@@ -143,8 +143,21 @@ fn an_upgrade_keeps_credentials_ledger_and_unresolved_actions() {
     assert_eq!(after.withdrawable, 800_000, "残高と予約が保存される");
 
     // アップグレード後のsweepでも再送しない。
-    let swept_again: Result<u32, ErrorCode> =
-        update_args(&pic, vault, caller, "test_sweep_now", ()).expect("call");
+    let (swept_again, calls): (Result<u32, ErrorCode>, _) =
+        call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |call| {
+            assert!(
+                call.url.ends_with("/info"),
+                "an unknown send must not be resent"
+            );
+            let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+            assert_eq!(query["type"], "userNonFundingLedgerUpdates");
+            Ok((200, b"[]".to_vec()))
+        })
+        .expect("call");
+    assert!(
+        !calls.is_empty(),
+        "the unknown send is checked against history"
+    );
     assert_eq!(
         swept_again.expect("sweep"),
         0,

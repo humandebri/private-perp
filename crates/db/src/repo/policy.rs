@@ -10,6 +10,26 @@ use ic_sqlite_vfs::db::UpdateConnection;
 use ic_sqlite_vfs::db::connection::Connection;
 use ic_sqlite_vfs::params;
 
+/// Set once at installation. A duplicate insertion is a constraint failure.
+pub fn initialize_administrator(
+    c: &mut UpdateConnection<'_>,
+    principal: &[u8],
+) -> Result<(), Error> {
+    c.execute(
+        "INSERT INTO application_admin(singleton, principal) VALUES(1, ?1)",
+        params![principal],
+    )
+    .map_err(sql)
+}
+
+pub fn administrator(c: &Connection) -> Result<Option<Vec<u8>>, Error> {
+    c.query_optional_scalar::<Vec<u8>>(
+        "SELECT principal FROM application_admin WHERE singleton = 1",
+        params![],
+    )
+    .map_err(sql)
+}
+
 /// 政策を設定する（版とallowlist）。版は厳密に増加させる（巻き戻しを拒否する）。
 pub fn set_policy(
     connection: &mut UpdateConnection<'_>,

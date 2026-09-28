@@ -45,6 +45,30 @@ pub mod memory_id {
     pub const MAX_APP_MEMORY_ID: u8 = 254;
 }
 
+/// Separate databases owned by one application Canister. Keeping the existing
+/// schemas in distinct stable-memory slots avoids table-name collisions during
+/// the single-Canister transition.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum DbScope {
+    Vault,
+    Core,
+    Policy,
+    Guard,
+    Journal,
+}
+
+impl DbScope {
+    pub const fn memory_id(self) -> u8 {
+        match self {
+            Self::Vault => 0,
+            Self::Core => 1,
+            Self::Policy => 2,
+            Self::Guard => 3,
+            Self::Journal => 4,
+        }
+    }
+}
+
 /// バージョン付きのMigrationステップ（`Implementation.md` 4.7）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Migration {
@@ -77,12 +101,28 @@ pub fn init(id: u8, migrations: &[Migration]) -> Result<(), String> {
     Ok(())
 }
 
+/// Initialize one database in a combined Canister. Each scope has a permanent
+/// MemoryId; the existing single-Canister `init` API remains available while
+/// callers are migrated to scoped transactions.
+pub fn init_scoped(scope: DbScope, migrations: &[Migration]) -> Result<(), String> {
+    #[cfg(target_family = "wasm")]
+    {
+        wasm::init_scoped(scope, migrations)?;
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = (scope, migrations);
+    }
+    Ok(())
+}
+
 #[cfg(target_family = "wasm")]
 mod wasm {
-    use super::Migration;
+    use super::{DbScope, Migration};
     use ic_sqlite_vfs::db::migrate::Migration as VfsMigration;
-    use ic_sqlite_vfs::{Db, DefaultMemoryImpl, MemoryId, MemoryManager};
+    use ic_sqlite_vfs::{Db, DbHandle, DefaultMemoryImpl, MemoryId, MemoryManager};
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
 
     thread_local! {
         static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -90,6 +130,25 @@ mod wasm {
                 MemoryManager::init_strict(DefaultMemoryImpl::default())
                     .expect("stable memory must either be empty or use the MemoryManager layout"),
             );
+        static SCOPED: RefCell<BTreeMap<DbScope, DbHandle>> = const { RefCell::new(BTreeMap::new()) };
+    }
+
+    pub(super) fn init_scoped(scope: DbScope, migrations: &[Migration]) -> Result<(), String> {
+        let handle = MEMORY_MANAGER.with(|manager| {
+            DbHandle::init(manager.borrow().get(MemoryId::new(scope.memory_id())))
+                .map_err(|error| error.to_string())
+        })?;
+        handle
+            .migrate(&convert_all(migrations))
+            .map_err(|error| error.to_string())?;
+        SCOPED.with(|handles| {
+            handles.borrow_mut().insert(scope, handle);
+        });
+        Ok(())
+    }
+
+    pub(super) fn scoped_handle(scope: DbScope) -> Option<DbHandle> {
+        SCOPED.with(|handles| handles.borrow().get(&scope).copied())
     }
 
     pub(super) fn init(id: u8, migrations: &[Migration]) -> Result<(), String> {
@@ -111,9 +170,29 @@ mod wasm {
     }
 }
 
+#[cfg(target_family = "wasm")]
+pub(crate) fn scoped_handle(scope: DbScope) -> Option<ic_sqlite_vfs::DbHandle> {
+    wasm::scoped_handle(scope)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Migration, init, memory_id, schema};
+    use super::{DbScope, Migration, init, memory_id, schema};
+
+    #[test]
+    fn combined_canister_scopes_have_distinct_memory_ids() {
+        let ids = [
+            DbScope::Vault,
+            DbScope::Core,
+            DbScope::Policy,
+            DbScope::Guard,
+            DbScope::Journal,
+        ]
+        .map(DbScope::memory_id);
+        let distinct = ids.into_iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(distinct.len(), ids.len());
+        assert!(ids.iter().all(|id| *id <= memory_id::MAX_APP_MEMORY_ID));
+    }
 
     fn all_migrations() -> Vec<(&'static str, &'static [Migration])> {
         vec![

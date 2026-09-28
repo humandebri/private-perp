@@ -16,3 +16,7 @@ db = { path = "../db" }
 ic-cdk.workspace = true
 ic-cdk-management-canister.workspace = true
 sha2.workspace = true
+scoped-entrypoint = { path = "../scoped-entrypoint" }
+
+[features]
+embedded = []

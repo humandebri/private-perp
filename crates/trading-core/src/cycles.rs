@@ -6,14 +6,7 @@ fn map_db(error: db::error::Error) -> ErrorCode {
 }
 
 pub fn configure(daily_floor: u128, exit_reserve: u128) -> Result<(), ErrorCode> {
-    let guard = db::tx::query(db::repo::send_journal_client::guard_principal)
-        .map_err(map_db)?
-        .ok_or(ErrorCode::PolicyUnavailable)?;
-    if ic_cdk::api::msg_caller().as_slice() != guard.as_slice() {
-        return Err(ErrorCode::Unauthenticated {
-            reason: "SNS guard required".into(),
-        });
-    }
+    journal_client::require_management()?;
     if daily_floor == 0 || exit_reserve == 0 {
         return Err(ErrorCode::PolicyUnavailable);
     }

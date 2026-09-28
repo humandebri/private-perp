@@ -13,7 +13,8 @@ use ic_cdk_management_canister::{HttpMethod, HttpRequest, transform_context_from
 use ic_sqlite_vfs::db::UpdateConnection;
 
 /// 変換関数：必要な要素だけを決定論的に残す（順序・付随フィールドの揺れを除く）。
-#[ic_cdk::query]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::query)]
+#[cfg_attr(feature = "embedded", ic_cdk::query(name = "vault_transform_info"))]
 fn transform_info(
     args: ic_cdk_management_canister::TransformArgs,
 ) -> ic_cdk_management_canister::HttpRequestResult {
@@ -81,7 +82,11 @@ pub async fn fetch_ledger_updates_range(
         .with_body(body.into_bytes())
         .with_max_response_bytes(512 * 1024)
         .with_transform(transform_context_from_query(
-            "transform_info".to_string(),
+            if cfg!(feature = "embedded") {
+                "vault_transform_info".to_string()
+            } else {
+                "transform_info".to_string()
+            },
             Vec::new(),
         ))
         .send()

@@ -163,7 +163,18 @@ function TradeOverview() {
 }
 
 export function FundsApp() {
-  const { gateway, run: execute, busy, data, wallNow, age, fresh } = useLocalSession()
+  const {
+    gateway,
+    store,
+    fundingInstructions,
+    run: execute,
+    busy,
+    data,
+    wallNow,
+    age,
+    fresh,
+  } = useLocalSession()
+  const isTestnet = import.meta.env.VITE_APP_STAGE === 'testnet'
   const [amount, setAmount] = useState('100')
   const [eligibilityClaims, setEligibilityClaims] = useState('')
   const [eligibilitySignature, setEligibilitySignature] = useState('')
@@ -174,6 +185,10 @@ export function FundsApp() {
     !data.vaultJournal ||
     data.vaultJournal[0]
   const action = (kind: string) => async () => {
+    if (kind === 'seed' && isTestnet) {
+      await store.loadFundingInstructions()
+      return
+    }
     const value = amountMicros(amount)
     if (kind === 'seed') await gateway.depositToReserve(amount, value)
     if (kind === 'allocate') await gateway.allocateFromReserve(value)
@@ -250,7 +265,7 @@ export function FundsApp() {
                   disabled={busy || newFundsStopped}
                   onClick={() => void execute(action('seed'))}
                 >
-                  LOCAL MOCK 保管残高に入金
+                  {isTestnet ? 'HL testnet 入金先を表示' : 'LOCAL MOCK 保管残高に入金'}
                 </button>
                 <button
                   type="button"
@@ -267,6 +282,14 @@ export function FundsApp() {
                   MetaMask署名で出金
                 </button>
               </div>
+              {isTestnet && fundingInstructions && (
+                <p>
+                  接続中の HL testnet 口座{' '}
+                  <strong>{bytesToHex(fundingInstructions.source_hl_account_address)}</strong>{' '}
+                  から保管口座 <strong>{bytesToHex(fundingInstructions.hl_account_address)}</strong>{' '}
+                  に USDC を送金してください。送金後は残高を更新して反映を確認してください。
+                </p>
+              )}
               <details>
                 <summary>残高の調整</summary>
                 <p>

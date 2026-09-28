@@ -1,6 +1,8 @@
 # private-perp
 
-機密資金管理＋Hyperliquid取引の設計と、ローカルCanisterへ実接続するTanStack Start UI。
+機密資金管理＋Hyperliquid取引を一つの ICP Canister にまとめ、TanStack Start UI から接続するアプリです。
+
+現在の配置・権限・検証手順は [単一 Canister 化](docs/phase-3/single-canister.md) を参照してください。旧設計書の五 Canister・SNS/guard 構成は公開試験版の配置には適用しません。
 
 - 実装：`frontend/`（ローカル実接続）、`crates/`（ICP Canister）、`tools/mock-hl/`（ローカルvenue）
 - 起動・試験・制限：`frontend/README.md`
@@ -12,6 +14,6 @@
 - 完了範囲と残件：`docs/implementation-status.md`
 - 共通入金口座の実装と制限：`docs/phase-3/shared-reserve.md`
 
-ICPバックエンド（`crates/`）は雛形ではなく、資金・署名・認証を担うCanisterを実装済みです。`funds_vault`（認証・セッション・複式台帳・予約・outboxの署名送信と照合・入金計上・回収・HPKE・Agent承認要求）、`trading_core`（認可境界・注文受付・取消送信・Agent鍵署名・照合）、`policy_registry`、`control_guard` が該当します。
+ICPバックエンド（`crates/`）は、`private_perp` 一つの Canister に資金・取引・policy・journal のモジュールを統合しています。資金側は認証・複式台帳・予約・送金と照合、取引側は注文・Agent署名・照合を担います。旧 `control_guard` は現行の統合 Wasm に含めません。
 
-検証はローカルに限られます。MetaMask EIP-1193、短命IC identity、HPKE封筒、資金・Agent・注文を実Canisterへ接続しますが、venueは決定的mockです。**testnet・mainnet・実資金は未検証**です。ローカル試験の成功を本番の資金安全性やプライバシーの実証と解釈しないでください。
+現行の統合 Wasm の送金・Agent承認・注文送信はPocketICと模擬HL応答で検証しています。旧5 Canister構成ではHL testnetの読取りまで確認しましたが、統合Wasmからの実HLへの送金・注文POST、公開ICPへの配置、実資金往復は未検証です。共通保管口座は直接送金の紐付けを減らしますが、[合成相関評価](docs/phase-3/privacy-local-eval.md)では現行B0のtop-1対応付け成功率が100%で、匿名性の基準には未達です。

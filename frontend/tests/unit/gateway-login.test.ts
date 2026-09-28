@@ -26,6 +26,7 @@ function fixture(results: Array<{ Ok: object } | { Err: object }>) {
   })
   const open_session = vi.fn(async (_request: { challenge_id: Uint8Array }) => results.shift())
   vi.mocked(createClients).mockResolvedValue({
+    config: { stage: 'local' },
     principal: {} as CanisterClients['principal'],
     vault: { issue_challenge, open_session },
   } as unknown as CanisterClients)

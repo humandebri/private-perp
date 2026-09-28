@@ -18,3 +18,7 @@ sha3.workspace = true
 ic-cdk.workspace = true
 ic-sqlite-vfs.workspace = true
 sha2.workspace = true
+scoped-entrypoint = { path = "../scoped-entrypoint" }
+
+[features]
+embedded = []

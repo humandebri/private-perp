@@ -77,6 +77,8 @@ export POCKET_IC_WASM_DIR="$test_venue_target/wasm32-unknown-unknown/release"
 echo "pocket-ic-test: 本番feature無しのwasmをビルドします（デプロイ成果物の検査用）"
 CARGO_TARGET_DIR="$production_target" run_step cargo build --locked --release --target wasm32-unknown-unknown \
   -p policy -p funds-vault -p control-guard -p trading-core -p send-journal
+CARGO_TARGET_DIR="$production_target" run_step cargo build --locked --release --target wasm32-unknown-unknown \
+  -p private-perp
 
 echo "pocket-ic-test: test-venue付きのwasmをビルドします（POCKET_IC_WASM_DIR=${POCKET_IC_WASM_DIR}）"
 CARGO_TARGET_DIR="$test_venue_target" run_step cargo build --locked --release --target wasm32-unknown-unknown \
@@ -84,6 +86,10 @@ CARGO_TARGET_DIR="$test_venue_target" run_step cargo build --locked --release --
 CARGO_TARGET_DIR="$test_venue_target" run_step cargo build --locked --release --target wasm32-unknown-unknown \
   -p funds-vault -p trading-core \
   --features funds-vault/test-venue,trading-core/test-venue
+CARGO_TARGET_DIR="$test_venue_target" run_step cargo build --locked --release --target wasm32-unknown-unknown \
+  -p private-perp --features private-perp/test-venue
+export PRIVATE_PERP_UNIFIED_WASM="$test_venue_target/wasm32-unknown-unknown/release/private_perp.wasm"
+export PRIVATE_PERP_UNIFIED_MOCK=1
 
 echo "pocket-ic-test: 試験を実行します"
 # 20人/100人のPocketIC負荷試験を同一プロセスで並行実行すると、サーバが

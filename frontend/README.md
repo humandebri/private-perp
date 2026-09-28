@@ -1,6 +1,6 @@
 # private-perp UI
 
-TanStack Start＋Reactで、ローカルICP replicaとローカルHyperliquid mockへ実接続する単一ユーザー開発UIです。公開市況WebSocket、建玉、SL/TP、決済、取消と最小クライアントを含みます。testnet・mainnet・実資金には接続しません。
+TanStack Start＋Reactで、ローカルICP replicaとローカルHyperliquid mockへ実接続する単一ユーザー開発UIです。公開市況WebSocket、建玉、SL/TP、決済、取消と最小クライアントを含みます。HL testnet 向け接続設定も用意しています。公開と実資金操作は未検証です。詳細は [単一 Canister 化](../docs/phase-3/single-canister.md)。
 
 ## 一括起動・E2E
 
@@ -10,9 +10,9 @@ TanStack Start＋Reactで、ローカルICP replicaとローカルHyperliquid mo
 bash scripts/local-e2e.sh
 ```
 
-mock HL起動、ローカルIC network、4 Canisterのdeploy/bootstrap、短命の`frontend/.env.local`生成、frontend build、Playwrightを一括実行し、終了時に子プロセスとIC networkを停止します。Playwrightは固定秘密鍵を製品コードへ入れず、試験専用`e2e-signer`をEIP-1193 providerとして注入します。
+mock HL起動、ローカルIC network、単一 Canisterのdeploy/bootstrap、短命の`frontend/.env.local`生成、frontend build、Playwrightを一括実行し、終了時に子プロセスとIC networkを停止します。Playwrightは固定秘密鍵を製品コードへ入れず、試験専用`e2e-signer`をEIP-1193 providerとして注入します。
 
-手動起動では`.env.example`を`.env.local`へ写し、deploy後の2 Canister IDを設定してください。`VITE_APP_STAGE=local`、IC host、mock HTTP/WS URLの全てが必須で、loopback以外は拒否します。mockの管理APIを別のfrontendポートから使う場合は、起動時の`MOCK_HL_ADMIN_ORIGINS`へ完全なOriginをカンマ区切りで指定します（既定は`127.0.0.1:4173`と`:5173`）。
+手動起動では`.env.example`を`.env.local`へ写し、deploy後の `VITE_PRIVATE_PERP_CANISTER_ID`を設定してください。`VITE_APP_STAGE=local`、IC host、mock HTTP/WS URLの全てが必須で、loopback以外は拒否します。mockの管理APIを別のfrontendポートから使う場合は、起動時の`MOCK_HL_ADMIN_ORIGINS`へ完全なOriginをカンマ区切りで指定します（既定は`127.0.0.1:4173`と`:5173`）。
 
 ## 接続範囲
 
@@ -40,7 +40,7 @@ node --test ../tools/mock-hl/server.test.mjs
 
 ## 安全境界
 
-- Workersは`APP_STAGE=local`かつloopback requestだけを許可し、CSP `connect-src`は設定済みIC hostとmock hostだけです。
+- Workersは local 設定では loopback のみに制限し、testnet 設定では公開 GET/HEAD を許可します。CSP の接続先は設定された IC・市況ホストに制限します。
 - `/fallback`は通常の取引画面や市況接続に依存せず、認証・注文取消・本人EOA宛出金だけを提供します。Canister停止を回避するものではありません。
 - SSR/server functionsへ本人データを渡さず、localStorage・sessionStorage・Cookieへ鍵やセッションを保存しません。
 - unknownは画面へそのまま表示し、自動再送しません。古いsnapshot、未承認Agent、未観測口座では新規注文を停止します。

@@ -1,0 +1,23 @@
+[package]
+name = "private-perp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Single-canister private-perp testnet application"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ic-cdk.workspace = true
+candid.workspace = true
+db = { path = "../db" }
+funds-vault = { path = "../funds-vault", features = ["embedded"] }
+trading-core = { path = "../trading-core", features = ["embedded"] }
+policy = { path = "../policy", features = ["embedded"] }
+send-journal = { path = "../send-journal", features = ["embedded"] }
+
+[features]
+default = []
+test-venue = ["funds-vault/test-venue", "trading-core/test-venue"]

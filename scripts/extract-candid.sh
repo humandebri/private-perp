@@ -20,7 +20,7 @@ echo "extract-candid: 本番feature無しのwasmをビルドします"
 cargo build --release --target wasm32-unknown-unknown \
   -p policy -p funds-vault -p control-guard -p trading-core -p send-journal
 
-wasm_dir="target/wasm32-unknown-unknown/release"
+wasm_dir="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release"
 out_dir="candid"
 mkdir -p "$out_dir"
 
@@ -42,5 +42,9 @@ if grep -q "test_" "$out_dir/trading_core.did" "$out_dir/funds_vault.did"; then
   echo "extract-candid: 試験専用のメソッドがCandidに含まれています" >&2
   exit 1
 fi
+
+python3 scripts/build-single-candid.py
+cargo build --release --target wasm32-unknown-unknown -p private-perp
+python3 scripts/check-single-canister.py "$wasm_dir/private_perp.wasm"
 
 echo "extract-candid: ok"

@@ -7,6 +7,21 @@ export ICP_HOME="$repo_root/.icp-home"
 export PATH="$repo_root/.cargo-home/bin:$PATH"
 icp network status local --json >/dev/null
 
+# The script changes venue endpoints and keys. Require an explicit target and
+# the same identity that was installed as the application's administrator.
+: "${TESTNET_APP_ID:?set the dedicated private_perp canister ID before running this script}"
+deployed_id="$(icp canister status private_perp --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+if [[ "$deployed_id" != "$TESTNET_APP_ID" ]]; then
+  echo "prepare-local-testnet: private_perp ID does not match TESTNET_APP_ID" >&2
+  exit 1
+fi
+caller="$(icp identity principal)"
+administrator="$(icp canister call private_perp application_administrator '()' --args-format candid)"
+if [[ "$administrator" != *"principal \"$caller\""* ]]; then
+  echo "prepare-local-testnet: current identity is not the application administrator" >&2
+  exit 1
+fi
+
 # Separate test-only keys live in the ignored local identity directory.
 python3 - <<'PY'
 from pathlib import Path
@@ -26,6 +41,4 @@ cargo build --locked -p e2e-signer -p eligibility-issuer
 export LOCAL_ELIGIBILITY_ISSUER_ADDRESS="$(target/debug/eligibility-issuer address)"
 HL_NETWORK=testnet bash scripts/bootstrap-local.sh
 export TESTNET_SMOKE=1
-export TESTNET_VAULT_ID="$(icp canister status funds_vault --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
-export TESTNET_CORE_ID="$(icp canister status trading_core --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 pnpm --dir frontend exec vitest run --config vitest.testnet.config.ts

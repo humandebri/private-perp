@@ -13,14 +13,7 @@ fn threshold(market: &str) -> Result<db::repo::market::Threshold, ErrorCode> {
 }
 
 pub fn configure(input: MarketThreshold) -> Result<(), ErrorCode> {
-    let guard = db::tx::query(db::repo::send_journal_client::guard_principal)
-        .map_err(crate::map_db)?
-        .ok_or(ErrorCode::PolicyUnavailable)?;
-    if ic_cdk::api::msg_caller().as_slice() != guard.as_slice() {
-        return Err(ErrorCode::Unauthenticated {
-            reason: "SNS guard required".into(),
-        });
-    }
+    journal_client::require_management()?;
     if !matches!(input.market.as_str(), "BTC" | "ETH")
         || input.min_day_notional_usdc == 0
         || input.min_each_side_depth_usdc == 0
