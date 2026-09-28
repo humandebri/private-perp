@@ -494,7 +494,12 @@ pub fn configure_core_admission(pic: &PocketIc, core: Principal, controller: Pri
                 Some("metaAndAssetCtxs") => Ok((200, br#"[{"universe":[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]},[{"dayNtlVlm":"10000000"},{"dayNtlVlm":"100000000"},{"dayNtlVlm":"500000000"}]]"#.to_vec())),
                 Some("l2Book") => {
                     let mid = if query.get("coin").and_then(|v| v.as_str()) == Some("BTC") { 60000 } else { 3000 };
-                    Ok((200, format!(r#"{{"levels":[[{{"px":"{}","sz":"1.25"}}],[{{"px":"{}","sz":"1.10"}}]]}}"#, mid - 1, mid + 1).into_bytes()))
+                    Ok((200, serde_json::json!({
+                        "coin": query["coin"],
+                        "time": pic.get_time().as_nanos_since_unix_epoch() / 1_000_000,
+                        "levels": [[{"px":(mid - 1).to_string(),"sz":"1.25"}],
+                            [{"px":(mid + 1).to_string(),"sz":"1.10"}]]
+                    }).to_string().into_bytes()))
                 }
                 other => Err((1, format!("unexpected market query: {other:?}"))),
             }

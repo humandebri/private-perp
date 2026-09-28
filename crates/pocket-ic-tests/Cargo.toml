@@ -13,6 +13,7 @@ hl-sign = { path = "../hl-sign" }
 hl-types = { path = "../hl-types" }
 hpke-envelope = { path = "../hpke-envelope" }
 candid.workspace = true
+ic-cdk-management-canister.workspace = true
 pocket-ic.workspace = true
 serde.workspace = true
 serde_json.workspace = true

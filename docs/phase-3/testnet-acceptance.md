@@ -1,5 +1,13 @@
 # Phase 3 testnet受入記録
 
+## 2026-09-29 更新
+
+[市場判定に対する合意](market-consensus.md)の修正を実装し、本番・試験用 Wasm の PocketIC、115公開メソッドの Candid一致、Clippy を確認した。公開アップグレードは cycles 不足で拒否され、未反映。IC は約285.3B cyclesの追加を要求した。復旧用スナップショットも約1.34B不足で作成できなかった。
+
+指定 Canister は消費抑制のため **停止中**。拒否後の module hash は従前の `3cb739a6273717b0399b83eb4ec7251dafd0689394b898aecda346b96b7383fc` で、旧Wasmとデータを維持している。実行用残高は約85.6B cycles。Cloudflare UIは公開中だが、Canister操作は補充・アップグレード・起動後に再確認する必要がある。新Wasmは `060b61d4bfaaec525c7bb5a6e4dae4afb9a157ee9606ad2515535e76817ceedb`。公開subnetでの修正確認と実送金・注文は未実施。
+
+以下は2026-09-28の公開時点の記録。
+
 更新: 2026-09-28。状態: **未合格**。[2026-09-26のローカルCanister + HL testnet](local-canister-hl-testnet.md)では旧5 Canister構成で口座準備・認証・実市場読取りまで成功した。現行の単一 `private_perp` Wasmを公開ICPに配置し、Cloudflare UIから署名ログイン、利用資格登録、入金先表示まで確認した。実HLの送金・注文POST、資金往復は未実施。PocketICのmock outcallによる結合試験と区別する。
 
 ## GATE 0

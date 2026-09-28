@@ -1,5 +1,7 @@
 # private-perp UI
 
+2026-09-29現在、バックエンドCanisterは cycles 補充待ちで停止中です。UIは公開中ですがCanister操作は利用できません。[受入記録](../docs/phase-3/testnet-acceptance.md)を参照してください。
+
 TanStack Start＋Reactで、ローカルICP replicaとローカルHyperliquid mock、または公開 ICP と HL testnet に接続するUIです。公開市況WebSocket、建玉、SL/TP、決済、取消と最小クライアントを含みます。[公開 HL testnet UI](https://private-perp-ui-testnet.hude.workers.dev) は署名ログイン、利用資格登録、入金先表示まで検証済みです。実送金・注文は未検証です。詳細は [単一 Canister 化](../docs/phase-3/single-canister.md)。
 
 ## 一括起動・E2E

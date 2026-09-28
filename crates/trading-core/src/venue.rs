@@ -178,26 +178,37 @@ pub async fn order_status(user: &str, oid: impl serde::Serialize) -> Result<Stri
     .await
 }
 
-pub async fn meta_and_asset_ctxs() -> Result<String, ErrorCode> {
-    fetch_info(
-        serde_json::json!({ "type": "metaAndAssetCtxs" }),
-        128 * 1024,
-    )
-    .await
-}
-
-pub async fn l2_book(coin: &str) -> Result<String, ErrorCode> {
-    fetch_info(
-        serde_json::json!({ "type": "l2Book", "coin": coin }),
-        32 * 1024,
-    )
-    .await
+pub async fn market_check(
+    context: &crate::market::CheckContext,
+) -> Result<crate::market::Verdict, ErrorCode> {
+    let (query, limit) = if context.book {
+        (
+            serde_json::json!({ "type": "l2Book", "coin": context.threshold.market }),
+            32 * 1024,
+        )
+    } else {
+        (
+            serde_json::json!({ "type": "metaAndAssetCtxs" }),
+            128 * 1024,
+        )
+    };
+    let context = serde_json::to_vec(context).map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let raw = fetch_info_with_context(query, limit, context).await?;
+    serde_json::from_str(&raw).map_err(|_| ErrorCode::PolicyUnavailable)
 }
 
 /// `/info`へPOSTし、変換後の本文を返す。
 async fn fetch_info(
     query: serde_json::Value,
     max_response_bytes: u64,
+) -> Result<String, ErrorCode> {
+    fetch_info_with_context(query, max_response_bytes, Vec::new()).await
+}
+
+async fn fetch_info_with_context(
+    query: serde_json::Value,
+    max_response_bytes: u64,
+    context: Vec<u8>,
 ) -> Result<String, ErrorCode> {
     // userFills can return 2000 rows: 20 base + at most 100 row units.
     // There is no refund when fewer rows are returned.
@@ -227,10 +238,7 @@ async fn fetch_info(
         }])
         .with_body(query.to_string().into_bytes())
         .with_max_response_bytes(max_response_bytes)
-        .with_transform(transform_context_from_query(
-            transform.to_string(),
-            Vec::new(),
-        ))
+        .with_transform(transform_context_from_query(transform.to_string(), context))
         .send()
         .await
         .map_err(|error| ErrorCode::UpstreamUnavailable {
@@ -251,9 +259,8 @@ async fn fetch_info(
 fn transform_market_info(
     args: ic_cdk_management_canister::TransformArgs,
 ) -> ic_cdk_management_canister::HttpRequestResult {
-    let body = serde_json::from_slice::<serde_json::Value>(&args.response.body)
-        .map(|value| value.to_string().into_bytes())
-        .unwrap_or_default();
+    // Every replica evaluates the same thresholds; consensus remains replicated.
+    let body = crate::market::canonical_check(&args.response.body, &args.context);
     HttpRequestResult {
         status: args.response.status,
         headers: Vec::new(),

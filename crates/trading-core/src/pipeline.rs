@@ -75,7 +75,12 @@ pub async fn sweep_once(now: u64) -> Result<api_types::order::SweepOutcome, Erro
     let reconciled = reconcile_accounts(now).await?;
     // Market polling consumes reconciliation budget after exit work. A failed
     // observation closes new risk through the stored reason/age, not exits.
-    let _ = crate::market::poll_if_due(now).await;
+    // Market admission is unnecessary while cycles already prohibit new risk.
+    // Preserve the remaining budget for cancellations and reconciliation.
+    // A controller can still request one explicit refresh for diagnostics.
+    if crate::cycles::require_new().is_ok() {
+        let _ = crate::market::poll_if_due(now).await;
+    }
     let dispatched = dispatch_queued(now).await?;
     let outcome = api_types::order::SweepOutcome {
         dispatched,

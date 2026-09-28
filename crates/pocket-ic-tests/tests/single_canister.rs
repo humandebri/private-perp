@@ -489,7 +489,11 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
                 let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
                 match query["type"].as_str() {
                     Some("metaAndAssetCtxs") => Ok((200, br#"[{"universe":[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]},[{"dayNtlVlm":"10000000"},{"dayNtlVlm":"100000000"},{"dayNtlVlm":"500000000"}]]"#.to_vec())),
-                    Some("l2Book") => Ok((200, br#"{"levels":[[{"px":"2499","sz":"1.25"}],[{"px":"2501","sz":"1.10"}]]}"#.to_vec())),
+                    Some("l2Book") => Ok((200, serde_json::json!({
+                        "coin": query["coin"],
+                        "time": pic.get_time().as_nanos_since_unix_epoch() / 1_000_000,
+                        "levels": [[{"px":"2499","sz":"1.25"}],[{"px":"2501","sz":"1.10"}]]
+                    }).to_string().into_bytes())),
                     other => Err((1, format!("unexpected market query: {other:?}"))),
                 }
             },
