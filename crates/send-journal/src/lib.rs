@@ -77,12 +77,16 @@ fn valid_event(event: &RecoveryEvent) -> bool {
             network,
         } => {
             let mut logical = b"custody_account".to_vec();
-            logical.extend_from_slice(user_id.as_ref());
+            if let Some(user_id) = user_id {
+                logical.extend_from_slice(user_id.as_ref());
+            }
             logical.extend_from_slice(kind.as_bytes());
             let expected: [u8; 32] = Keccak256::digest(&logical).into();
-            id(user_id)
-                && id(account_id)
-                && matches!(kind.as_str(), "reserve" | "trading")
+            (match (kind.as_str(), user_id) {
+                ("reserve", None) => true,
+                ("trading", Some(user_id)) => id(user_id),
+                _ => false,
+            }) && id(account_id)
                 && derivation_path
                     == &format!("private-perp/{kind}/{}", hex::encode(account_id.as_ref()))
                 && address.len() == 20
@@ -180,6 +184,7 @@ fn valid_event(event: &RecoveryEvent) -> bool {
                 && event.logical_id.as_ref() == expected
         }
         RecoveryPayload::DepositCredit {
+            sender,
             tx_hash,
             network,
             address,
@@ -194,6 +199,7 @@ fn valid_event(event: &RecoveryEvent) -> bool {
             logical.extend_from_slice(&event_id);
             let expected: [u8; 32] = Keccak256::digest(&logical).into();
             event.logical_id.as_ref() == expected
+                && sender.as_ref().is_none_or(|address| address.len() == 20)
                 && !tx_hash.is_empty()
                 && tx_hash.len() <= 64
                 && matches!(network.as_str(), "local" | "testnet")

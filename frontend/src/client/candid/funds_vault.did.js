@@ -189,6 +189,7 @@ export const idlFactory = ({ IDL }) => {
     Trading: IDL.Null,
   })
   const FundingInstructions = IDL.Record({
+    source_hl_account_address: IDL.Vec(IDL.Nat8),
     asset: AssetId,
     network: Network,
     minimum_amount: IDL.Opt(IDL.Nat64),

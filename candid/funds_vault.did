@@ -161,6 +161,8 @@ type FundStatus = record {
   observed_at : nat64;
 };
 type FundingInstructions = record {
+  // Only transfers from this authenticated HL address are automatically attributed.
+  source_hl_account_address : blob;
   asset : AssetId;
   network : Network;
   // 最小額。Phase 1の実測で確定するまでは `None`。

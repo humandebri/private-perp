@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 
@@ -117,13 +119,14 @@ export function exchange(body) {
   }
   if (action.type === 'usdSend') {
     const destination = normalizeAddress(action.destination)
+    const sender = normalizeAddress(execFileSync(fileURLToPath(new URL('../../target/debug/recover-usd-send', import.meta.url)), [], { input: JSON.stringify(body), encoding: 'utf8', timeout: 5000 }).trim())
     const key = hash(`usdSend:${body.nonce}:${destination}:${action.amount}`)
     const entries = state.deposits.get(destination) ?? []
     if (!entries.some((entry) => entry.hash === key)) {
       entries.push({
         hash: key,
         time: Number(action.time),
-        delta: { type: 'deposit', usdc: String(action.amount) },
+        delta: { type: 'internalTransfer', user: sender, destination, usdc: String(action.amount) },
       })
       state.deposits.set(destination, entries)
     }
@@ -190,7 +193,12 @@ export function info(body) {
     ] }
   }
   if (body.type === 'userNonFundingLedgerUpdates') {
-    return state.deposits.get(normalizeAddress(body.user)) ?? []
+    return (state.deposits.get(normalizeAddress(body.user)) ?? [])
+      .filter((entry) => entry.time >= Number(body.startTime ?? 0) && entry.time <= Number(body.endTime ?? Number.MAX_SAFE_INTEGER))
+      .sort((a, b) => a.time - b.time).slice(0, 500)
+  }
+  if (body.type === 'openOrders') {
+    return [...state.orders.values()].filter((order) => order.status === 'open').map(({ oid }) => ({ oid }))
   }
   if (body.type === 'userFills') return state.fills
   if (body.type === 'clearinghouseState') {
@@ -220,7 +228,9 @@ export function seedDeposit(body) {
   const event = {
     hash: hash(`deposit:${id}`),
     time: Number(body.time ?? Date.now()),
-    delta: { type: 'deposit', usdc: String(body.amount) },
+    delta: body.sender
+      ? { type: 'internalTransfer', user: normalizeAddress(body.sender), destination: address, usdc: String(body.amount) }
+      : { type: 'deposit', usdc: String(body.amount) },
   }
   if (!entries.some((entry) => entry.hash === event.hash)) entries.push(event)
   state.deposits.set(address, entries)

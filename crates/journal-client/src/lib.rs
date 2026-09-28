@@ -322,10 +322,14 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                     address,
                     network,
                 } => {
-                    let user_id: [u8; 32] = user_id
-                        .as_ref()
-                        .try_into()
-                        .map_err(|_| db::error::Error::Invariant("bad staged user"))?;
+                    let owner_id: Option<[u8; 32]> = user_id
+                        .map(|id| {
+                            id.as_ref()
+                                .try_into()
+                                .map_err(|_| db::error::Error::Invariant("bad staged user"))
+                        })
+                        .transpose()?;
+                    let user_id = owner_id.unwrap_or([0; 32]);
                     let account_id: [u8; 32] = account_id
                         .as_ref()
                         .try_into()
@@ -339,6 +343,9 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                         "trading" => api_types::AccountKind::Trading,
                         _ => return Err(db::error::Error::Invariant("bad staged account kind")),
                     };
+                    if (kind == api_types::AccountKind::Reserve) != owner_id.is_none() {
+                        return Err(db::error::Error::Invariant("bad custody ownership"));
+                    }
                     let configured = db::repo::vault_config::environment(c)?;
                     if configured.network.as_deref().unwrap_or("local") != network {
                         return Err(db::error::Error::Invariant(
@@ -354,13 +361,15 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                         return Err(db::error::Error::Invariant("staged account path mismatch"));
                     }
                     let mut id_material = b"custody_account".to_vec();
-                    id_material.extend_from_slice(&user_id);
+                    if let Some(owner_id) = owner_id {
+                        id_material.extend_from_slice(&owner_id);
+                    }
                     id_material.extend_from_slice(kind_name(kind).as_bytes());
                     if hl_sign::keccak256(&id_material) != event.logical_id {
                         return Err(db::error::Error::Invariant("staged account id mismatch"));
                     }
                     if let Some(owner) = db::repo::ledger::custody_account_by_address(c, &address)?
-                        && (owner.user_id != user_id
+                        && (owner.user_id != owner_id
                             || owner.account_id != account_id
                             || owner.kind != kind_name(kind))
                     {
@@ -390,12 +399,21 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                     }
                 }
                 RecoveryPayload::DepositCredit {
+                    sender,
                     tx_hash,
                     network,
                     address,
                     amount_micros,
                     observed_at_ms,
                 } => {
+                    let sender: Option<[u8; 20]> = sender
+                        .map(|value| {
+                            value
+                                .as_ref()
+                                .try_into()
+                                .map_err(|_| db::error::Error::Invariant("bad deposit sender"))
+                        })
+                        .transpose()?;
                     let tx_hash = tx_hash.as_ref();
                     let address: [u8; 20] = address
                         .as_ref()
@@ -438,7 +456,7 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                     }
                     let account = db::repo::ledger::custody_account(
                         c,
-                        &owner.user_id,
+                        &[0; 32],
                         api_types::AccountKind::Reserve,
                     )?
                     .ok_or(db::error::Error::NotFound)?;
@@ -455,6 +473,7 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                             &address,
                             "usdc",
                             observed_at_ms,
+                            sender.as_ref(),
                         )?
                     {
                         return Err(db::error::Error::Conflict);

@@ -201,13 +201,15 @@ pub(crate) async fn ensure_custody_account(
     }
 
     let mut logical_id = b"custody_account".to_vec();
-    logical_id.extend_from_slice(user_id);
+    if kind == api_types::AccountKind::Trading {
+        logical_id.extend_from_slice(user_id);
+    }
     logical_id.extend_from_slice(kind_name.as_bytes());
     let event = RecoveryEvent {
         version: 1,
         logical_id: hl_sign::keccak256(&logical_id).to_vec().into(),
         payload: RecoveryPayload::CustodyAccount {
-            user_id: user_id.to_vec().into(),
+            user_id: (kind == api_types::AccountKind::Trading).then(|| user_id.to_vec().into()),
             account_id: account_id.to_vec().into(),
             kind: kind_name.to_string(),
             derivation_path: derivation_path.clone(),
@@ -215,7 +217,17 @@ pub(crate) async fn ensure_custody_account(
             network: network.clone(),
         },
     };
-    let ack = journal_client::append_recovery_event("vault", event.clone()).await?;
+    let ack = journal_client::append_recovery_event_if("vault", event.clone(), |connection| {
+        Ok(db::repo::ledger::custody_account(connection, user_id, kind)?.is_none())
+    })
+    .await?;
+    let Some(ack) = ack else {
+        return db::tx::query(|connection| {
+            db::repo::ledger::custody_account(connection, user_id, kind)
+        })
+        .map_err(|error| map_db(error, None))?
+        .ok_or(ErrorCode::PolicyUnavailable);
+    };
 
     let account = NewCustodyAccount {
         account_id: &account_id,

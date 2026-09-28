@@ -92,7 +92,8 @@ fn market_monitor_accounts_24_weight_and_closes_on_index_change() {
     )
     .unwrap();
     configured.unwrap();
-    let meta = br#"[{"universe":[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]},[{"dayNtlVlm":"10000000"},{"dayNtlVlm":"100000000"},{"dayNtlVlm":"500000000"}]]"#;
+    // Real HL rolling volumes can have more than six fractional digits.
+    let meta = br#"[{"universe":[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]},[{"dayNtlVlm":"10000000"},{"dayNtlVlm":"1125741.0633699989"},{"dayNtlVlm":"2945429.7254399993"}]]"#;
     let (result, calls): (Result<(), ErrorCode>, _) = call_with_routed_outcalls(&pic, core, sns, "refresh_market", (), |call| {
         let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
         match query.get("type").and_then(|v| v.as_str()) {

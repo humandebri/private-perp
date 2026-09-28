@@ -23,10 +23,15 @@ pub fn funding_instructions(session: &VerifiedSession) -> Result<FundingInstruct
     })
     .map_err(|error| map_db(error, None))?;
 
+    let identity =
+        db::tx::query(|connection| db::repo::auth::identity_by_user(connection, &session.user_id))
+            .map_err(|error| map_db(error, None))?
+            .ok_or(ErrorCode::PolicyUnavailable)?;
     match account {
         Some(account) => Ok(FundingInstructions {
             account_kind: AccountKind::Reserve,
             hl_account_address: account.master_address.to_vec().into(),
+            source_hl_account_address: identity.eoa_address.to_vec().into(),
             asset: api_types::AssetId::Usdc,
             network: crate::environment::network()?,
             minimum_amount: None,

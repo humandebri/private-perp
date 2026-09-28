@@ -627,7 +627,7 @@ pub struct CustodyAccount {
     pub state: String,
 }
 
-/// 本人の保管口座を1件返す。
+/// 共通保管口座、または本人専用の取引口座を返す。
 pub fn custody_account(
     connection: &Connection,
     user_id: &[u8; 32],
@@ -640,7 +640,7 @@ pub fn custody_account(
     let raw = connection
         .query_optional(
             "SELECT account_id, derivation_path, master_address, network, state
-               FROM custody_accounts WHERE user_id = ?1 AND kind = ?2 LIMIT 1",
+               FROM custody_accounts WHERE kind = ?2 AND (kind = 'reserve' OR user_id = ?1) LIMIT 1",
             params![user_id.as_slice(), kind_name],
             |row| {
                 Ok((
@@ -712,7 +712,7 @@ pub fn ensure_custody_account(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7)",
             params![
                 account_id.as_slice(),
-                user_id.as_slice(),
+                if kind == api_types::AccountKind::Reserve { ic_sqlite_vfs::db::Value::Null } else { ic_sqlite_vfs::db::Value::Blob(user_id.as_slice()) },
                 kind_name,
                 derivation_path,
                 master_address.as_slice(),
@@ -735,7 +735,7 @@ pub fn custody_account_by_address(
             params![address.as_slice()],
             |row| {
                 Ok((
-                    row.get::<Vec<u8>>(0)?,
+                    row.get::<Option<Vec<u8>>>(0)?,
                     row.get::<Vec<u8>>(1)?,
                     row.get::<String>(2)?,
                 ))
@@ -745,8 +745,11 @@ pub fn custody_account_by_address(
     row.map(|(user_id, account_id, kind)| {
         Ok(CustodyOwner {
             user_id: user_id
-                .try_into()
-                .map_err(|_| Error::Invariant("expected a 32-byte user id"))?,
+                .map(|id| {
+                    id.try_into()
+                        .map_err(|_| Error::Invariant("expected a 32-byte user id"))
+                })
+                .transpose()?,
             account_id: account_id
                 .try_into()
                 .map_err(|_| Error::Invariant("expected a 32-byte account id"))?,
@@ -759,7 +762,7 @@ pub fn custody_account_by_address(
 /// 導出アドレスの所有者（利用者・口座・種別）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustodyOwner {
-    pub user_id: [u8; 32],
+    pub user_id: Option<[u8; 32]>,
     pub account_id: [u8; 32],
     pub kind: String,
 }
@@ -870,4 +873,36 @@ pub fn custody_addresses_after(
             ))
         })
         .collect()
+}
+
+/// Inclusive venue timestamp: replay the boundary and deduplicate by event ID.
+pub fn deposit_history_start(
+    connection: &Connection,
+    network: &str,
+    address: &[u8; 20],
+) -> Result<u64, Error> {
+    let time = connection
+        .query_optional_scalar::<i64>(
+            "SELECT start_time FROM deposit_history_cursors WHERE network = ?1 AND address = ?2",
+            params![network, address.as_slice()],
+        )
+        .map_err(sql)?
+        .unwrap_or(0);
+    u64::try_from(time).map_err(|_| Error::Invariant("invalid deposit cursor"))
+}
+
+/// Only called after every credit in a page commits. Concurrent old reads cannot rewind it.
+pub fn advance_deposit_history(
+    connection: &mut UpdateConnection<'_>,
+    network: &str,
+    address: &[u8; 20],
+    time: u64,
+) -> Result<(), Error> {
+    let time = i64::try_from(time).map_err(|_| Error::Overflow)?;
+    connection.execute(
+        "INSERT INTO deposit_history_cursors (network, address, start_time) VALUES (?1, ?2, ?3)
+         ON CONFLICT (network, address) DO UPDATE SET start_time = MAX(start_time, excluded.start_time)",
+        params![network, address.as_slice(), time],
+    ).map_err(sql)?;
+    Ok(())
 }

@@ -53,6 +53,8 @@ pub enum FundActionKind {
 pub struct FundingInstructions {
     pub account_kind: AccountKind,
     pub hl_account_address: Blob,
+    /// Only transfers from this authenticated HL address are automatically attributed.
+    pub source_hl_account_address: Blob,
     pub asset: AssetId,
     pub network: Network,
     /// 最小額。Phase 1の実測で確定するまでは `None`。

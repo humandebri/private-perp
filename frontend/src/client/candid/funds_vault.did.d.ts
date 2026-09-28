@@ -194,6 +194,10 @@ export interface FundStatus {
   observed_at: bigint
 }
 export interface FundingInstructions {
+  /**
+   * Only transfers from this authenticated HL address are automatically attributed.
+   */
+  source_hl_account_address: Uint8Array | number[]
   asset: AssetId
   network: Network
   /**

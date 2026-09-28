@@ -82,13 +82,20 @@ fn credit(
     tx: &[u8],
     amount: u64,
     address: &Blob,
+    sender: Option<Blob>,
 ) -> Result<bool, ErrorCode> {
     update_args(
         pic,
         vault,
         caller,
         "credit_venue_deposit",
-        (blob(tx), amount, address.clone(), "usdc".to_string()),
+        (
+            blob(tx),
+            amount,
+            address.clone(),
+            "usdc".to_string(),
+            sender,
+        ),
     )
     .expect("call")
 }
@@ -129,7 +136,15 @@ fn venue_deposits_credit_the_owner_once() {
     assert_eq!(address.as_ref(), provisioned.as_slice());
 
     // 本人の入金先宛なら計上される。
-    let first = credit(&pic, vault, controller, &[7u8; 32], 1_000_000, &address);
+    let first = credit(
+        &pic,
+        vault,
+        controller,
+        &[7u8; 32],
+        1_000_000,
+        &address,
+        Some(blob(&address_from_secret(&secret(220)).unwrap())),
+    );
     assert!(first.expect("credited"), "新規の入金を計上する");
     let status: Result<FundStatus, ErrorCode> =
         update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
@@ -140,7 +155,15 @@ fn venue_deposits_credit_the_owner_once() {
     );
 
     // 同じtx_hashは二重計上しない。
-    let again = credit(&pic, vault, controller, &[7u8; 32], 1_000_000, &address);
+    let again = credit(
+        &pic,
+        vault,
+        controller,
+        &[7u8; 32],
+        1_000_000,
+        &address,
+        Some(blob(&address_from_secret(&secret(220)).unwrap())),
+    );
     assert!(!again.expect("deduped"), "同じtx_hashは計上しない");
     let status: Result<FundStatus, ErrorCode> =
         update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
@@ -154,6 +177,7 @@ fn venue_deposits_credit_the_owner_once() {
         &[8u8; 32],
         500_000,
         &blob(&[9u8; 20]),
+        None,
     );
     assert!(unknown.expect("recorded"));
     let status: Result<FundStatus, ErrorCode> =
@@ -161,11 +185,137 @@ fn venue_deposits_credit_the_owner_once() {
     assert_eq!(status.expect("status").reserve_unallocated, 1_000_000);
 
     // 非controllerは取り込めない。
-    let denied = credit(&pic, vault, principal(172), &[10u8; 32], 1, &address);
+    let denied = credit(&pic, vault, principal(172), &[10u8; 32], 1, &address, None);
     assert!(
         matches!(denied, Err(ErrorCode::Unauthenticated { .. })),
         "{denied:?}"
     );
+}
+
+#[test]
+fn shared_reserve_attributes_equal_deposits_by_sender_and_excludes_recoveries() {
+    let pic = pic();
+    let controller = principal(173);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let alice = principal(174);
+    let bob = principal(175);
+    let alice_session = open_session(&pic, vault, alice, &secret(231));
+    let bob_session = open_session(&pic, vault, bob, &secret(232));
+    let provision = |caller, session: &SessionHandle| {
+        let result: Result<Vec<u8>, ErrorCode> = update(
+            &pic,
+            vault,
+            caller,
+            "provision_reserve_account",
+            session.clone(),
+        )
+        .unwrap();
+        blob(&result.unwrap())
+    };
+    let reserve = provision(alice, &alice_session);
+    assert_eq!(reserve, provision(bob, &bob_session));
+    let balance = |caller, session: &SessionHandle| {
+        let result: Result<FundStatus, ErrorCode> =
+            update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+        result.unwrap().reserve_unallocated
+    };
+    let from_alice = blob(&address_from_secret(&secret(231)).unwrap());
+    let from_bob = blob(&address_from_secret(&secret(232)).unwrap());
+    assert!(
+        credit(
+            &pic,
+            vault,
+            controller,
+            &[31; 32],
+            1_000_000,
+            &reserve,
+            Some(from_alice.clone())
+        )
+        .unwrap()
+    );
+    assert_eq!(balance(alice, &alice_session), 1_000_000);
+    assert_eq!(balance(bob, &bob_session), 0);
+    assert!(
+        credit(
+            &pic,
+            vault,
+            controller,
+            &[32; 32],
+            1_000_000,
+            &reserve,
+            Some(from_bob.clone())
+        )
+        .unwrap()
+    );
+    assert_eq!(balance(bob, &bob_session), 1_000_000);
+    // Replaying the same public hash with a different claimed sender cannot steal a deposit.
+    assert!(
+        !credit(
+            &pic,
+            vault,
+            controller,
+            &[31; 32],
+            1_000_000,
+            &reserve,
+            Some(from_bob)
+        )
+        .unwrap()
+    );
+    // Bridge/CEX deposits without authenticated source evidence remain in suspense.
+    assert!(
+        credit(
+            &pic, vault, controller, &[33; 32], 2_000_000, &reserve, None
+        )
+        .unwrap()
+    );
+    assert!(
+        credit(
+            &pic,
+            vault,
+            controller,
+            &[34; 32],
+            2_000_000,
+            &reserve,
+            Some(blob(&[9; 20]))
+        )
+        .unwrap()
+    );
+    let prepared: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        alice,
+        "prepare_trading_account",
+        alice_session.clone(),
+    )
+    .unwrap();
+    prepared.unwrap();
+    let trading: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        alice,
+        "get_trading_address",
+        alice_session.clone(),
+    )
+    .unwrap();
+    assert!(
+        !credit(
+            &pic,
+            vault,
+            controller,
+            &[35; 32],
+            2_000_000,
+            &reserve,
+            Some(trading.unwrap())
+        )
+        .unwrap()
+    );
+    assert_eq!(balance(alice, &alice_session), 1_000_000);
+    assert_eq!(balance(bob, &bob_session), 1_000_000);
 }
 
 /// イベントID（`keccak256("deposit" ‖ tx_hash)`）をテスト側で独立に計算する。
@@ -199,7 +349,15 @@ fn an_unmatched_deposit_can_be_claimed_by_the_controller() {
     // 未知の宛先への入金（500,000マイクロUSDC）。
     let tx_hash = [21u8; 32];
     let unknown_address = blob(&[9u8; 20]);
-    let recorded = credit(&pic, vault, controller, &tx_hash, 500_000, &unknown_address);
+    let recorded = credit(
+        &pic,
+        vault,
+        controller,
+        &tx_hash,
+        500_000,
+        &unknown_address,
+        None,
+    );
     assert!(recorded.expect("recorded"), "未知宛先でも取り込む");
 
     let status: Result<FundStatus, ErrorCode> =
@@ -296,6 +454,7 @@ fn an_unmatched_deposit_can_be_claimed_by_the_controller() {
         &direct_tx,
         100_000,
         &blob(&address),
+        Some(blob(&address_from_secret(&secret(230)).unwrap())),
     );
     assert!(direct.expect("credited"));
     let direct_claim: Result<(), ErrorCode> = update_args(
@@ -319,7 +478,8 @@ fn an_unmatched_deposit_can_be_claimed_by_the_controller() {
             controller,
             &blocked_tx,
             700_000,
-            &unknown_address
+            &unknown_address,
+            None
         )
         .expect("second unmatched")
     );

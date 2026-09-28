@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
 
 process.env.MOCK_HL_IMPORT_ONLY = '1'
 const require = createRequire(new URL('../../frontend/package.json', import.meta.url))
@@ -25,9 +26,11 @@ test('market fills, limit rests, and cancellation succeeds', () => {
   assert.ok(market.response.data.statuses[0].filled)
   const oid = limit.response.data.statuses[0].resting.oid
   assert.equal(info({ type: 'orderStatus', oid }).status, 'open')
+  assert.deepEqual(info({ type: 'openOrders' }), [{ oid }])
   const cancelled = exchange({ action: { type: 'cancel', cancels: [{ o: oid }] } })
   assert.equal(cancelled.response.data.statuses[0].success, true)
   assert.equal(info({ type: 'orderStatus', oid }).status, 'canceled')
+  assert.deepEqual(info({ type: 'openOrders' }), [])
   assert.equal(info({ type: 'userFills' }).length, 1)
   assert.equal(info({ type: 'clearinghouseState' }).assetPositions[0].position.coin, 'BTC')
   assert.equal(info({ type: 'clearinghouseState' }).marginSummary.totalMarginUsed, '200.000000')
@@ -52,12 +55,16 @@ test('reduce-only closes positions and one-shot scenarios reset', () => {
 })
 
 test('usdSend appears as a destination ledger update', () => {
-  const destination = `0x${'22'.repeat(20)}`
+  const fixture = JSON.parse(readFileSync(new URL('../../crates/hl-sign/tests/fixtures/usd_send.json', import.meta.url), 'utf8'))
+  const destination = fixture.action.destination
   reset()
-  exchange({ nonce: 7, action: { type: 'usdSend', destination, amount: '5', time: 7 } })
+  exchange(fixture)
   const entries = info({ type: 'userNonFundingLedgerUpdates', user: destination })
   assert.equal(entries.length, 1)
-  assert.equal(entries[0].delta.usdc, '5')
+  assert.equal(entries[0].delta.usdc, '12.5')
+  assert.equal(entries[0].delta.type, 'internalTransfer')
+  assert.equal(entries[0].delta.user, fixture.address)
+  assert.equal(entries[0].delta.destination, destination)
 })
 
 test('admin access only accepts loopback and configured browser origins', () => {
@@ -119,4 +126,17 @@ test('public websocket emits market-only snapshots and pong', async () => {
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }
+})
+
+
+test('ledger history respects inclusive time bounds and page size', () => {
+  reset()
+  const address = `0x${'11'.repeat(20)}`
+  for (let i = 1; i <= 501; i++) seedDeposit({address, amount: '1', time: i, id: `page-${i}`})
+  const first = info({type: 'userNonFundingLedgerUpdates', user: address, startTime: 0})
+  assert.equal(first.length, 500)
+  assert.equal(first.at(-1).time, 500)
+  const next = info({type: 'userNonFundingLedgerUpdates', user: address, startTime: 500})
+  assert.deepEqual(next.map((entry) => entry.time), [500, 501])
+  assert.equal(info({type: 'userNonFundingLedgerUpdates', user: address, startTime: 500, endTime: 500}).length, 1)
 })

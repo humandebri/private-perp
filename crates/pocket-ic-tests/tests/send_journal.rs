@@ -94,7 +94,7 @@ fn guard_replays_vault_identity_but_keeps_sends_locked_without_baseline() {
         version: 1,
         logical_id: hl_sign::keccak256(&account_material).to_vec().into(),
         payload: RecoveryPayload::CustodyAccount {
-            user_id: user_id.to_vec().into(),
+            user_id: Some(user_id.to_vec().into()),
             account_id: account_id.to_vec().into(),
             kind: "trading".into(),
             derivation_path: format!("private-perp/trading/{}", hex::encode(account_id)),
@@ -222,7 +222,7 @@ fn foreign_network_custody_replay_stays_staged_without_creating_an_account() {
         version: 1,
         logical_id: hl_sign::keccak256(&account_material).to_vec().into(),
         payload: RecoveryPayload::CustodyAccount {
-            user_id: user_id.to_vec().into(),
+            user_id: Some(user_id.to_vec().into()),
             account_id: account_id.to_vec().into(),
             kind: "trading".into(),
             derivation_path: format!("private-perp/trading/{}", hex::encode(account_id)),
@@ -327,6 +327,7 @@ fn unmatched_deposit_without_account_mapping_stays_staged() {
         version: 1,
         logical_id: hl_sign::keccak256(&logical).to_vec().into(),
         payload: RecoveryPayload::DepositCredit {
+            sender: None,
             tx_hash: tx_hash.to_vec().into(),
             network: "local".into(),
             address: vec![42u8; 20].into(),
@@ -545,7 +546,7 @@ fn private_recovery_stream_is_idempotent_and_isolated() {
             network: "local".into(),
         },
         RecoveryPayload::CustodyAccount {
-            user_id: vec![7; 32].into(),
+            user_id: Some(vec![7; 32].into()),
             account_id: vec![8; 32].into(),
             kind: "trading".into(),
             derivation_path: format!("private-perp/trading/{}", hex::encode([8u8; 32])),
@@ -553,6 +554,7 @@ fn private_recovery_stream_is_idempotent_and_isolated() {
             network: "local".into(),
         },
         RecoveryPayload::DepositCredit {
+            sender: None,
             tx_hash: vec![3; 32].into(),
             network: "local".into(),
             address: vec![4; 20].into(),

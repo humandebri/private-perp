@@ -121,9 +121,9 @@ test.describe('real local canister flow', () => {
     await page.getByRole('button', { name: '受付資格を登録' }).click()
     await expect(page.getByText('受付資格：登録済み')).toBeVisible({ timeout: 30_000 })
     await page.getByLabel('金額').fill('100')
-    const seedButton = page.getByRole('button', { name: 'LOCAL MOCK 入金seed' })
+    const seedButton = page.getByRole('button', { name: 'LOCAL MOCK 入金して取引に使う' })
     await seedButton.click()
-    await expect(seedButton).toBeEnabled({ timeout: 15_000 })
+    await expect(seedButton).toBeEnabled({ timeout: 120_000 })
     await expect(page.getByRole('alert')).toHaveCount(0)
     await expect
       .poll(
@@ -135,17 +135,6 @@ test.describe('real local canister flow', () => {
       )
       .toContain('100.000000')
 
-    await page.getByLabel('金額').fill('20')
-    await page.getByRole('button', { name: '取引口座へ配分' }).click()
-    await expect
-      .poll(
-        async () => {
-          await page.getByRole('button', { name: '再読込' }).click()
-          return page.getByTestId('account-balances').textContent()
-        },
-        { timeout: 30_000 },
-      )
-      .toContain('20.000000')
     await page.getByRole('link', { name: '取引' }).click()
     await page.getByRole('button', { name: 'Agentを生成・承認' }).click()
     await expect(page.getByText('Active', { exact: true })).toBeVisible({ timeout: 30_000 })
@@ -234,10 +223,44 @@ test.describe('real local canister flow', () => {
       )
       .toBeGreaterThan(0)
 
+    // Recovery requires both the venue positions and open orders to be empty.
+    page.once('dialog', (dialog) => dialog.accept())
+    await page
+      .getByRole('navigation', { name: '退出操作' })
+      .getByRole('button', { name: '全取消' })
+      .click()
+    await expect
+      .poll(
+        async () => {
+          const response = await page.request.post('http://127.0.0.1:8080/info', {
+            data: { type: 'openOrders', user: address },
+          })
+          return (await response.json()).length
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(0)
+    await page.getByRole('button', { name: '100%決済', exact: true }).click()
+    await expect
+      .poll(
+        async () => {
+          const refresh = page.getByRole('button', { name: '再読込' })
+          if (await refresh.isEnabled()) await refresh.click()
+          const response = await page.request.post('http://127.0.0.1:8080/info', {
+            data: { type: 'clearinghouseState', user: address },
+          })
+          return (await response.json()).assetPositions.length
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(0)
+
     await page.getByRole('link', { name: '資金', exact: true }).click()
     await page.getByLabel('金額').fill('5')
-    await page.getByRole('button', { name: 'reserveへ回収' }).click()
-    await page.getByRole('button', { name: 'MetaMask署名で出金' }).click()
+    const withdrawButton = page.getByRole('button', { name: 'MetaMask署名で出金' })
+    await withdrawButton.click()
+    await expect(withdrawButton).toBeEnabled({ timeout: 60_000 })
+    await expect(page.getByRole('alert')).toHaveCount(0)
     await page.getByRole('link', { name: '履歴' }).click()
     await expect(page.getByRole('cell', { name: 'Withdrawal' })).toBeVisible()
     await expect(
@@ -393,6 +416,25 @@ test.describe('real local canister flow', () => {
           ),
         ),
       )
+      // Leave a separate confirmed reserve for the history-only allocation fixture.
+      const funding = unwrap(await clients.vault.get_funding_instructions(fixtureSession))
+      const seeded = await fetch(`${clients.config.mockHl}/admin/deposits`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          address: `0x${Buffer.from(funding.hl_account_address).toString('hex')}`,
+          sender: address,
+          amount: '1',
+          id: 'history-reserve',
+        }),
+      })
+      expect(seeded.ok).toBeTruthy()
+      await expect
+        .poll(
+          async () => unwrap(await clients.vault.get_fund_status(fixtureSession)).withdrawable,
+          { timeout: 30_000 },
+        )
+        .toBeGreaterThanOrEqual(1_000_000n)
       // This fixture creates enough entries for history pagination. The
       // journal intentionally serializes writes for one vault worker.
       for (let entry = 0; entry < 110; entry++) {

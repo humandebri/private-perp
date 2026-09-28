@@ -48,16 +48,19 @@ CREATE INDEX sessions_by_user ON sessions (user_id, expires_at);
 const LEDGER: &str = "
 CREATE TABLE custody_accounts (
     account_id BLOB PRIMARY KEY NOT NULL CHECK (length(account_id) = 32),
-    user_id BLOB NOT NULL REFERENCES identities (user_id),
+    user_id BLOB REFERENCES identities (user_id),
     kind TEXT NOT NULL CHECK (kind IN ('reserve', 'trading')),
     derivation_path TEXT NOT NULL UNIQUE,
     master_address BLOB NOT NULL CHECK (length(master_address) = 20),
     network TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'stopped')),
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    CHECK ((kind = 'reserve' AND user_id IS NULL) OR (kind = 'trading' AND user_id IS NOT NULL))
 );
 
-CREATE INDEX custody_accounts_by_user ON custody_accounts (user_id, kind);
+CREATE UNIQUE INDEX custody_accounts_by_user ON custody_accounts (user_id, kind);
+CREATE UNIQUE INDEX custody_shared_reserve ON custody_accounts (kind) WHERE kind = 'reserve';
+CREATE UNIQUE INDEX custody_addresses ON custody_accounts (master_address);
 
 CREATE TABLE accounts (
     account_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,6 +238,13 @@ CREATE TABLE hpke_keys (
 ///   （`journals.request_id` は一意制約を持てないため別表で担保する。予約と解放のように
 ///   1つの要求に複数種別の仕訳が対応するため、要求IDだけでは一意にできない）。
 const RECONCILE_AND_UNIQUENESS: &str = "
+CREATE TABLE deposit_history_cursors (
+    network TEXT NOT NULL,
+    address BLOB NOT NULL CHECK (length(address) = 20),
+    start_time INTEGER NOT NULL CHECK (start_time >= 0),
+    PRIMARY KEY (network, address)
+);
+
 CREATE TABLE reconcile_cursor (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     last_created_at INTEGER NOT NULL,

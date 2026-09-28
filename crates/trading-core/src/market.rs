@@ -90,6 +90,17 @@ pub fn require(market: &str) -> Result<(), ErrorCode> {
 }
 
 fn micro(value: &serde_json::Value) -> Option<u128> {
+    decimal_micro(value, false)
+}
+
+// HL reports rolling market volume with more than six decimal places. Floor
+// this observation so admission never overstates volume. Money, book prices
+// and sizes retain their existing strict precision checks.
+fn volume_micro(value: &serde_json::Value) -> Option<u128> {
+    decimal_micro(value, true)
+}
+
+fn decimal_micro(value: &serde_json::Value, floor_extra_precision: bool) -> Option<u128> {
     let owned;
     let input = if let Some(text) = value.as_str() {
         text
@@ -102,12 +113,13 @@ fn micro(value: &serde_json::Value) -> Option<u128> {
     }
     let (whole, fractional) = input.split_once('.').unwrap_or((input, ""));
     if whole.is_empty()
-        || fractional.len() > 6
+        || (!floor_extra_precision && fractional.len() > 6)
         || !whole.bytes().all(|b| b.is_ascii_digit())
         || !fractional.bytes().all(|b| b.is_ascii_digit())
     {
         return None;
     }
+    let fractional = &fractional[..fractional.len().min(6)];
     let whole: u128 = whole.parse().ok()?;
     let fraction: u128 = if fractional.is_empty() {
         0
@@ -153,7 +165,7 @@ fn evaluate(
         .position(|entry| entry.get("name").and_then(|name| name.as_str()) == Some(market))?;
     let entry = universe.get(index)?;
     let actual_index = u32::try_from(index).ok()?;
-    let volume = dollars(micro(contexts.get(index)?.get("dayNtlVlm")?)?)?;
+    let volume = dollars(volume_micro(contexts.get(index)?.get("dayNtlVlm")?)?)?;
     let levels = book.get("levels")?.as_array()?;
     if levels.len() != 2 {
         return None;
@@ -280,4 +292,27 @@ pub async fn poll_if_due(now: u64) -> Result<(), ErrorCode> {
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dollars, micro, volume_micro};
+
+    #[test]
+    fn rolling_volume_is_floored_without_relaxing_money_precision() {
+        let observation = serde_json::json!("2945429.7254399993");
+        assert_eq!(volume_micro(&observation), Some(2_945_429_725_439));
+        assert_eq!(
+            dollars(volume_micro(&observation).unwrap()),
+            Some(2_945_429)
+        );
+        assert_eq!(micro(&observation), None);
+        assert_eq!(
+            dollars(volume_micro(&serde_json::json!("999999.9999999999")).unwrap()),
+            Some(999_999)
+        );
+        for input in ["-1.2", "+1.2", "1e6", "1.000000bad", "NaN"] {
+            assert_eq!(volume_micro(&serde_json::json!(input)), None);
+        }
+    }
 }

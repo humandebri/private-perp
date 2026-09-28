@@ -19,6 +19,19 @@ const ORIGIN: &str = "https://app.example.test";
 const INFO_BODY: &[u8] =
     br#"[{"time":1758000000000,"hash":"0xaa","delta":{"type":"deposit","usdc":"100.5"},"extra":1}]"#;
 
+fn inbound(body: &[u8], destination: &[u8]) -> Vec<u8> {
+    let mut entries: serde_json::Value = serde_json::from_slice(body).unwrap();
+    let sender = address_from_secret(&secret(240)).unwrap();
+    for entry in entries.as_array_mut().unwrap() {
+        if entry["delta"]["type"] == "deposit" {
+            entry["delta"]["type"] = "internalTransfer".into();
+            entry["delta"]["user"] = format!("0x{}", hex::encode(sender)).into();
+            entry["delta"]["destination"] = format!("0x{}", hex::encode(destination)).into();
+        }
+    }
+    serde_json::to_vec(&entries).unwrap()
+}
+
 fn secret(seed: u8) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     bytes[31] = seed;
@@ -131,7 +144,7 @@ fn fetched_deposits_are_credited_once() {
         (blob(&address),),
         |call| {
             assert!(call.url.contains("/info"));
-            Ok((200, INFO_BODY.to_vec()))
+            Ok((200, inbound(INFO_BODY, &address)))
         },
     )
     .expect("call");
@@ -172,7 +185,7 @@ fn fetched_deposits_are_credited_once() {
         controller,
         "reconcile_deposits",
         (blob(&address),),
-        Ok((200, INFO_BODY.to_vec())),
+        Ok((200, inbound(INFO_BODY, &address))),
     )
     .expect("call");
     assert_eq!(second.expect("reconciled"), 0);
@@ -203,7 +216,7 @@ fn fetched_deposits_are_credited_once() {
         controller,
         "reconcile_deposits",
         (blob(&address),),
-        Ok((200, numeric.to_vec())),
+        Ok((200, inbound(numeric, &address))),
     )
     .expect("numeric call");
     assert_eq!(numeric_result.expect("numeric deposits"), 2);
@@ -248,6 +261,74 @@ fn fetched_deposits_are_credited_once() {
     );
     pic.start_canister(journal, Some(controller))
         .expect("restart journal");
+    // Failed journal writes must leave the inclusive page cursor unchanged.
+    let base = 1_758_000_000_100u64;
+    let sender = format!(
+        "0x{}",
+        hex::encode(address_from_secret(&secret(240)).unwrap())
+    );
+    let destination = format!("0x{}", hex::encode(&address));
+    let incoming = |hash: &str, time| {
+        serde_json::json!({
+            "time": time, "hash": hash,
+            "delta": {"type": "internalTransfer", "user": sender, "destination": destination, "usdc": "1"}
+        })
+    };
+    // 499 unrelated updates followed by an inbound transfer on the page boundary.
+    let mut page: Vec<_> = (0..499)
+        .map(|i| {
+            serde_json::json!({
+                "time": base + i, "hash": format!("0x{:064x}", i + 1000),
+                "delta": {"type": "withdrawal", "usdc": "1"}
+            })
+        })
+        .collect();
+    page.push(incoming("0xc1", base + 499));
+    let reconcile = |expected_start: u64, entries: Vec<serde_json::Value>| {
+        let (result, _): (Result<u32, ErrorCode>, _) = pocket_ic_tests::call_with_routed_outcalls(
+            &pic,
+            vault,
+            controller,
+            "reconcile_deposits",
+            (blob(&address),),
+            |call| {
+                let request: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                assert_eq!(request["startTime"].as_u64(), Some(expected_start));
+                Ok((200, serde_json::to_vec(&entries).unwrap()))
+            },
+        )
+        .unwrap();
+        result
+    };
+    assert_eq!(reconcile(1_758_000_000_007, page).unwrap(), 1);
+    // Inclusive boundary includes a duplicate plus another transfer at the SAME timestamp.
+    let next = vec![
+        incoming("0xc1", base + 499),
+        incoming("0xc2", base + 499),
+        incoming("0xc3", base + 500),
+    ];
+    assert_eq!(reconcile(base + 499, next).unwrap(), 2);
+    assert_eq!(
+        reconcile(base + 500, vec![incoming("0xc3", base + 500)]).unwrap(),
+        0
+    );
+    assert!(reconcile(base + 500, vec![incoming("0xc4", base + 500); 500]).is_err());
+    assert_eq!(
+        reconcile(base + 500, vec![incoming("0xc4", base + 501)]).unwrap(),
+        1
+    );
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    assert_eq!(status.unwrap().reserve_unallocated, 104_500_002);
+    // The page checkpoint survives a Wasm upgrade independently of the send lock.
+    pic.upgrade_canister(
+        vault,
+        pocket_ic_tests::wasm(FUNDS_VAULT_WASM),
+        candid::encode_one(()).unwrap(),
+        Some(controller),
+    )
+    .unwrap();
+    assert_eq!(reconcile(base + 501, vec![]).unwrap(), 0);
     pic.load_canister_snapshot(vault, Some(controller), before_deposits.id)
         .expect("restore before deposits");
     let resumed: Result<(), ErrorCode> =
@@ -255,7 +336,7 @@ fn fetched_deposits_are_credited_once() {
     assert!(resumed.is_err(), "external validation is still required");
     let restored: Result<FundStatus, ErrorCode> =
         update(&pic, vault, caller, "get_fund_status", session).unwrap();
-    assert_eq!(restored.unwrap().reserve_unallocated, 100_500_002);
+    assert_eq!(restored.unwrap().reserve_unallocated, 104_500_002);
     let pending: Result<bool, ErrorCode> =
         query(&pic, vault, controller, "recovery_replay_pending", ()).unwrap();
     assert!(pending.unwrap());

@@ -24,6 +24,12 @@ fn u64_value(value: &Value) -> u64 {
 
 fn main() {
     let mut secret = SECRET;
+    if let Ok(key) = std::env::var("PRIVATE_PERP_TESTNET_EOA_KEY") {
+        secret = hex::decode(key.trim_start_matches("0x"))
+            .expect("testnet key hex")
+            .try_into()
+            .expect("testnet key must be 32 bytes");
+    }
     if std::env::args().any(|arg| arg == "--secondary") {
         secret[31] = 43;
     }

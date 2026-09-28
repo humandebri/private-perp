@@ -313,7 +313,7 @@ fn two_users_run_the_full_funds_flow() {
     // 口座作成（以前は2人目がUNIQUE違反で失敗した）。
     let reserve_a = provision(&pic, vault, caller_a, &session_a);
     let reserve_b = provision(&pic, vault, caller_b, &session_b);
-    assert_ne!(reserve_a, reserve_b, "利用者ごとに入金先が異なる");
+    assert_eq!(reserve_a, reserve_b, "全員が同じ保管口座へ入金する");
 
     // 入金。
     credit(&pic, vault, caller_a, &session_a, 1_000_000, 61);

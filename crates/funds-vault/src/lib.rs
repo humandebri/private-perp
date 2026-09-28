@@ -799,6 +799,7 @@ fn credit_venue_deposit(
     amount: u64,
     address: api_types::Blob,
     asset: String,
+    sender: Option<api_types::Blob>,
 ) -> Result<bool, ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -819,6 +820,14 @@ fn credit_venue_deposit(
             code: api_types::error::BadRequestCode::MalformedPayload,
             detail: "address must be 20 bytes".to_string(),
         })?;
+    let sender: Option<[u8; 20]> = sender
+        .map(|value| {
+            value
+                .as_ref()
+                .try_into()
+                .map_err(|_| ErrorCode::PolicyUnavailable)
+        })
+        .transpose()?;
     let now = deposits::now_ms();
     let network = environment::network_name()?;
     if asset != "usdc" {
@@ -833,6 +842,7 @@ fn credit_venue_deposit(
             &address,
             "usdc",
             now,
+            sender.as_ref(),
         )
     })
     .map_err(|error| auth::map_db(error, None))
@@ -966,42 +976,7 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
             code: api_types::error::BadRequestCode::MalformedPayload,
             detail: "address must be 20 bytes".to_string(),
         })?;
-    let body = deposits::fetch_ledger_updates(&format!("0x{}", hex::encode(address))).await?;
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_slice(&body).map_err(|_| ErrorCode::UpstreamRejected {
-            code: "unexpected info response".to_string(),
-            retryable: false,
-        })?;
-    let now = clock::now_ms();
-    let network = environment::network_name()?;
-    let mut credited = 0;
-    for entry in entries {
-        if !deposits::creditable_entry(&entry, &address)
-            .map_err(|error| auth::map_db(error, None))?
-        {
-            continue;
-        }
-        let Some(hash) = entry.get("hash").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        // 負値・ゼロ・非十進は入金ではない（送金・出金など）ため読み飛ばす。
-        let Some(amount) = entry.get("usdc").and_then(deposits::deposit_amount_micros) else {
-            continue;
-        };
-        let hash = hash.strip_prefix("0x").unwrap_or(hash);
-        let Ok(tx_hash) = hex::decode(hash) else {
-            continue;
-        };
-        let at = entry
-            .get("time")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(now);
-        let inserted = deposits::credit_journaled(&network, &tx_hash, amount, &address, at).await?;
-        if inserted {
-            credited += 1;
-        }
-    }
-    Ok(credited)
+    deposits::reconcile_address(&address).await
 }
 
 /// 不明なactionを「未実行」として解消する（controllerのみ）。

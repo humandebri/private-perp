@@ -48,7 +48,8 @@ pub enum RecoveryPayload {
         address: Blob,
     },
     CustodyAccount {
-        user_id: Blob,
+        /// None for the shared reserve; Some for a user-owned trading account.
+        user_id: Option<Blob>,
         account_id: Blob,
         kind: String,
         derivation_path: String,
@@ -92,6 +93,8 @@ pub enum RecoveryPayload {
         accepted_at_ms: u64,
     },
     DepositCredit {
+        /// Proven sender of an inbound HL internalTransfer; absent for unattributed deposits.
+        sender: Option<Blob>,
         tx_hash: Blob,
         network: String,
         address: Blob,

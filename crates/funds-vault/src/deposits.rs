@@ -1,8 +1,8 @@
 //! 取引所の入金の取得（replicatedな`/info`）と取り込み。
 //!
 //! 取得はreplicated outcall＋変換関数で行い、取り込みは正規化した
-//! イベントID（`keccak256("deposit" ‖ tx_hash)`）で二重計上を防ぐ。宛先が導出口座
-//! （`custody_accounts.master_address`）と一致すれば本人へ計上し、未知の宛先は記録のみ。
+//! イベントIDで二重計上を防ぐ。共通保管口座への入金はHLの送金元と認証EOAを
+//! 照合して本人へ計上する。送金元の証跡がない入金は未帰属勘定に保持する。
 
 use crate::clock;
 use api_types::error::ErrorCode;
@@ -54,10 +54,6 @@ fn transform_info(
 }
 
 /// 入金（non-funding ledger updates）をreplicated outcallで取得する。
-pub async fn fetch_ledger_updates(user: &str) -> Result<Vec<u8>, ErrorCode> {
-    fetch_ledger_updates_range(user, 0, None).await
-}
-
 pub async fn fetch_ledger_updates_range(
     user: &str,
     start_time: u64,
@@ -146,7 +142,7 @@ pub fn creditable_entry(entry: &serde_json::Value, address: &[u8; 20]) -> Result
                     db::repo::ledger::custody_account_by_address(connection, &sender_address)?;
                 let to = db::repo::ledger::custody_account_by_address(connection, address)?;
                 Ok::<bool, DbError>(matches!((from, to), (Some(from), Some(to))
-                    if from.kind == "trading" && to.kind == "reserve" && from.user_id == to.user_id))
+                    if from.kind == "trading" && to.kind == "reserve"))
             })?;
             Ok(!managed_recovery)
         }
@@ -154,11 +150,26 @@ pub fn creditable_entry(entry: &serde_json::Value, address: &[u8; 20]) -> Result
     }
 }
 
+/// Only an actual inbound internalTransfer supplies ownership evidence. A bridge
+/// deposit's `user` field is not proof of the depositor's EOA.
+pub fn transfer_sender(entry: &serde_json::Value) -> Option<[u8; 20]> {
+    let delta = entry.get("delta")?;
+    if delta.get("type")?.as_str()? != "internalTransfer" {
+        return None;
+    }
+    let value = delta.get("user")?.as_str()?;
+    hex::decode(value.strip_prefix("0x").unwrap_or(value))
+        .ok()?
+        .try_into()
+        .ok()
+}
+
 /// 入金を取り込む。既知の`tx_hash`なら`false`。
 ///
 /// 宛先が未知の入金も資金は既に動いているため、suspense勘定へ計上して記録に残す
 /// （イベント行を先に入れるため、後から `credit` を呼び直して計上することはできない。
 /// 写像が判明した時点で controller が `claim_unmatched_deposit` で本人へ振り替える）。
+#[allow(clippy::too_many_arguments)]
 pub fn credit(
     connection: &mut UpdateConnection<'_>,
     network: &str,
@@ -167,13 +178,14 @@ pub fn credit(
     address: &[u8; 20],
     asset: &str,
     now: u64,
+    sender: Option<&[u8; 20]>,
 ) -> Result<bool, DbError> {
     let mut input = b"deposit".to_vec();
     input.extend_from_slice(tx_hash);
     let event_id = hl_sign::keccak256(&input);
 
     db::repo::deposits::credit_external_deposit(
-        connection, &event_id, network, tx_hash, amount, address, asset, now,
+        connection, &event_id, network, tx_hash, amount, address, asset, now, sender,
     )
 }
 
@@ -185,6 +197,7 @@ pub async fn credit_journaled(
     amount: u64,
     address: &[u8; 20],
     at: u64,
+    sender: Option<[u8; 20]>,
 ) -> Result<bool, ErrorCode> {
     let internal = |error: DbError| ErrorCode::Internal {
         code: format!("{error:?}"),
@@ -208,6 +221,7 @@ pub async fn credit_journaled(
         version: 1,
         logical_id: hl_sign::keccak256(&logical).to_vec().into(),
         payload: RecoveryPayload::DepositCredit {
+            sender: sender.map(|address| address.to_vec().into()),
             tx_hash: tx_hash.to_vec().into(),
             network: network.to_string(),
             address: address.to_vec().into(),
@@ -215,10 +229,25 @@ pub async fn credit_journaled(
             observed_at_ms: at,
         },
     };
-    let ack = journal_client::append_recovery_event("vault", event.clone()).await?;
+    let ack = journal_client::append_recovery_event_if("vault", event.clone(), |connection| {
+        Ok(db::repo::events::find_external_event(connection, network, &event_id)?.is_none())
+    })
+    .await?;
+    let Some(ack) = ack else {
+        return Ok(false);
+    };
     let result = db::tx::update(|c| {
         journal_client::record_recovery_event(c, &event, &ack)?;
-        if !credit(c, network, tx_hash, amount, address, "usdc", at)? {
+        if !credit(
+            c,
+            network,
+            tx_hash,
+            amount,
+            address,
+            "usdc",
+            at,
+            sender.as_ref(),
+        )? {
             return Err(DbError::Conflict);
         }
         Ok(true)
@@ -255,55 +284,26 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
     })
     .map_err(internal)?;
 
-    let network = crate::environment::network_name()?;
     let mut credited = 0;
     let mut last = None;
     for (address, created_at) in addresses {
         last = Some((created_at, address));
-        let body = match fetch_ledger_updates(&format!("0x{}", hex::encode(address))).await {
-            Ok(body) => body,
-            Err(_error) => {
-                let now = now_ms();
+        match reconcile_address(&address).await {
+            Ok(count) => credited += count,
+            Err(error) => {
+                ic_cdk::println!("deposit page reconciliation failed: {error:?}");
+                // Continue rotating addresses; this address retains its page cursor.
                 db::tx::update(|connection| {
                     db::repo::events::insert_audit(
                         connection,
                         "system",
                         "reconcile_fetch_failed",
                         None,
-                        Some("upstream_unavailable"),
-                        now,
+                        Some("deposit_page_incomplete"),
+                        now_ms(),
                     )
                 })
                 .map_err(internal)?;
-                continue;
-            }
-        };
-        let Ok(entries) = serde_json::from_slice::<Vec<serde_json::Value>>(&body) else {
-            continue;
-        };
-        let now = now_ms();
-        for entry in entries {
-            if !creditable_entry(&entry, &address).map_err(&internal)? {
-                continue;
-            }
-            let Some(hash) = entry.get("hash").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            // 負値・ゼロ・非十進は入金ではない（送金・出金など）。
-            let Some(amount) = entry.get("usdc").and_then(deposit_amount_micros) else {
-                continue;
-            };
-            let hash = hash.strip_prefix("0x").unwrap_or(hash);
-            let Ok(tx_hash) = hex::decode(hash) else {
-                continue;
-            };
-            let at = entry
-                .get("time")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(now);
-            let inserted = credit_journaled(&network, &tx_hash, amount, &address, at).await?;
-            if inserted {
-                credited += 1;
             }
         }
     }
@@ -322,5 +322,77 @@ pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
                 .map_err(internal)?;
         }
     }
+    Ok(credited)
+}
+
+/// Fetch one bounded page per address/turn. The inclusive boundary is intentional:
+/// advancing by one millisecond can drop transfers sharing the last timestamp.
+pub async fn reconcile_address(address: &[u8; 20]) -> Result<u32, ErrorCode> {
+    let internal = |error: DbError| ErrorCode::Internal {
+        code: format!("{error:?}"),
+    };
+    let network = crate::environment::network_name()?;
+    let start = db::tx::query(|c| db::repo::ledger::deposit_history_start(c, &network, address))
+        .map_err(&internal)?;
+    let body =
+        fetch_ledger_updates_range(&format!("0x{}", hex::encode(address)), start, None).await?;
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_slice(&body).map_err(|_| ErrorCode::UpstreamRejected {
+            code: "unexpected deposit history response".into(),
+            retryable: true,
+        })?;
+    let mut last = start;
+    for entry in &entries {
+        let time = entry
+            .get("time")
+            .and_then(|v| v.as_u64())
+            .filter(|time| *time >= start && *time <= i64::MAX as u64 && *time > 0)
+            .ok_or_else(|| ErrorCode::UpstreamRejected {
+                code: "invalid deposit history timestamp".into(),
+                retryable: true,
+            })?;
+        last = last.max(time);
+    }
+    // The API has no offset within a timestamp. Never silently skip a saturated
+    // boundary: keep it pending for a complete evidence source instead.
+    if entries.len() >= 500 && last == start {
+        return Err(ErrorCode::UpstreamRejected {
+            code: "deposit history timestamp saturated; complete evidence required".into(),
+            retryable: false,
+        });
+    }
+    let mut credited = 0;
+    for entry in entries {
+        if !creditable_entry(&entry, address).map_err(&internal)? {
+            continue;
+        }
+        let Some(amount) = entry.get("usdc").and_then(deposit_amount_micros) else {
+            continue;
+        };
+        let tx_hash = entry
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .and_then(|hash| hex::decode(hash.strip_prefix("0x").unwrap_or(hash)).ok())
+            .filter(|hash| !hash.is_empty() && hash.len() <= 64)
+            .ok_or_else(|| ErrorCode::UpstreamRejected {
+                code: "invalid deposit history hash".into(),
+                retryable: true,
+            })?;
+        let at = entry["time"].as_u64().expect("validated timestamp");
+        if credit_journaled(
+            &network,
+            &tx_hash,
+            amount,
+            address,
+            at,
+            transfer_sender(&entry),
+        )
+        .await?
+        {
+            credited += 1;
+        }
+    }
+    db::tx::update(|c| db::repo::ledger::advance_deposit_history(c, &network, address, last))
+        .map_err(internal)?;
     Ok(credited)
 }

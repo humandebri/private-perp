@@ -76,7 +76,8 @@ type RecoveryPayload = variant {
     kind : text;
     derivation_path : text;
     network : text;
-    user_id : blob;
+    // None for the shared reserve; Some for a user-owned trading account.
+    user_id : opt blob;
     address : blob;
   };
   OrderRisk : record {
@@ -258,6 +259,8 @@ type RecoveryPayload = variant {
   DepositCredit : record {
     observed_at_ms : nat64;
     network : text;
+    // Proven sender of an inbound HL internalTransfer; absent for unattributed deposits.
+    sender : opt blob;
     amount_micros : nat64;
     address : blob;
     tx_hash : blob;

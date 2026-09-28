@@ -18,7 +18,8 @@ mock HL起動、ローカルIC network、4 Canisterのdeploy/bootstrap、短命�
 
 - MetaMask `eth_requestAccounts` / `eth_signTypedData_v4`によるEOA認証。
 - ページメモリだけに保持する短命Ed25519 identity、SessionHandle、HPKE秘密鍵。
-- 入金seed、配分、Agent生成・承認、market/limit注文、取消、回収、署名付き出金、資金・注文・約定履歴。
+- 共通保管口座への模擬入金と本人の取引口座への自動配分、Agent生成・承認、market/limit注文、取消、不足額の自動回収と署名付き出金、資金・注文・約定履歴。手動の配分・回収は「残高の調整」に残す。
+- 入金は認証済みEOAのHL口座を送金元にする。金額・時刻による相関耐性は未達。[共通口座の実装範囲](../docs/phase-3/shared-reserve.md)。旧schemaとの後方互換はない。
 - 個人参照と取消はCandidを一元codecで封入し、request ID再利用や復号失敗を自動再送しません。
 - marketは即時約定、limitはrestingとなる決定的なLOCAL MOCK。admin APIはloopback bindだけです。
 

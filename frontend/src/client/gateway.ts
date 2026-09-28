@@ -1,4 +1,5 @@
 import { Principal } from '@icp-sdk/core/principal'
+import { prepareWithdrawal, waitForFunds } from './fund-flow'
 import type {
   CyclesStatus as VaultCycles,
   EligibilityStatus,
@@ -459,6 +460,7 @@ export class LocalGateway {
       body: JSON.stringify({
         address: `0x${[...instructions.hl_account_address].map((value) => value.toString(16).padStart(2, '0')).join('')}`,
         amount,
+        sender: active.address,
         id: crypto.randomUUID(),
       }),
     })
@@ -472,6 +474,28 @@ export class LocalGateway {
       vaultPrivateCodec.allocation(session, requestId(), amount),
       vaultPrivateCodec.fund,
     )
+  }
+
+  async depositForTrading(amount: string, value: bigint) {
+    const active = this.require()
+    const read = async () => {
+      if (this.active !== active) throw new Error('セッションが変更されました。')
+      const status = unwrap(await active.clients.vault.get_fund_status(active.session))
+      if (this.active !== active) throw new Error('セッションが変更されました。')
+      return status
+    }
+    const before = await read()
+    if (before.unknowns.length || before.recovery_fence.length)
+      throw new Error('先の資金移動を照合中です。履歴を確認してください。')
+    await this.seedDeposit(amount)
+    await waitForFunds(read, (status) => status.withdrawable >= before.withdrawable + value)
+    const accepted = await this.allocate(value)
+    await waitForFunds(
+      read,
+      (status) =>
+        status.in_transit === 0n && status.trading_equity >= before.trading_equity + value,
+    )
+    return accepted
   }
 
   async recover(amount: bigint) {
@@ -603,7 +627,16 @@ export class LocalGateway {
   }
 
   async withdraw(amount: bigint) {
-    const { address, session, clients } = this.require()
+    const active = this.require()
+    const { address, session, clients } = active
+    const read = async () => {
+      if (this.active !== active) throw new Error('セッションが変更されました。')
+      const status = unwrap(await clients.vault.get_fund_status(session))
+      if (this.active !== active) throw new Error('セッションが変更されました。')
+      return status
+    }
+    await prepareWithdrawal(amount, read, (shortfall) => this.recover(shortfall))
+    if (this.active !== active) throw new Error('セッションが変更されました。')
     const nonce = nowMs()
     const expiresAt = nonce + 300_000n
     const typedData = withdrawalTypedData({
@@ -614,6 +647,7 @@ export class LocalGateway {
       canister: Principal.fromText(clients.config.fundsVault),
     })
     const signature = await signTypedData(address, typedData)
+    if (this.active !== active) throw new Error('セッションが変更されました。')
     return this.sealedVault(
       'request_withdrawal',
       vaultPrivateCodec.withdrawal({
