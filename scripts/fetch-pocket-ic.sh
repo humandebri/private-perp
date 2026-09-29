@@ -112,4 +112,4 @@ chmod +x "$dest"
 
 verify "$dest" || exit 1
 
-echo "fetch-pocket-ic: $dest"
+echo "$dest"
