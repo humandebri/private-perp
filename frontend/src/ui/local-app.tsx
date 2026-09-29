@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { bytesToHex } from '../client/wallet'
 import { variantName } from '../client/result'
-import type { Fill, OrderSummary, Position } from '../client/candid-codec'
+import type { Fill, OrderSummary, Position, ManualWork } from '../client/candid-codec'
 import type { FundEvent } from '../client/candid/funds_vault.did.js'
 import { useLocalSession } from './local-session'
 import { PriceChart, useMarket } from './market'
@@ -112,6 +112,7 @@ function Workspace({
           </p>
         </details>
       )}
+      {session.address && <ManualWorkPanel key={session.generation} />}
       {!session.address && !publicContent ? (
         <section className="empty-state">
           <h1>ローカルセッションを開始</h1>
@@ -122,6 +123,49 @@ function Workspace({
         children
       )}
     </main>
+  )
+}
+
+function ManualWorkPanel() {
+  const { gateway, run, busy } = useLocalSession()
+  const [items, setItems] = useState<{ role: 'vault' | 'core'; work: ManualWork }[]>()
+  const load = async () => {
+    const [vault, core] = await Promise.all([
+      gateway.manualWork('vault'),
+      gateway.manualWork('core'),
+    ])
+    setItems([
+      ...vault.map((work) => ({ role: 'vault' as const, work })),
+      ...core.map((work) => ({ role: 'core' as const, work })),
+    ])
+  }
+  return (
+    <details className="warning-banner account-notice">
+      <summary>停止中の処理・手動確認</summary>
+      <p>
+        失敗した処理は自動再試行しません。送信前の失敗は再試行し、結果不明の送金・注文は結果の確認だけを行います。
+      </p>
+      <button disabled={busy} onClick={() => void run(load)}>
+        停止中の処理を確認
+      </button>
+      {items?.length === 0 && <p>停止中の処理はありません。</p>}
+      {items?.map(({ role, work }) => (
+        <p key={`${role}:${work[0]}:${bytesToHex(work[1])}`}>
+          {role === 'vault' ? '資金' : '取引'} · {bytesToHex(work[1]).slice(0, 12)}
+          <button
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                await gateway.resumeManualWork(role, work)
+                setItems((current) => current?.filter((item) => item.work !== work))
+              })
+            }
+          >
+            {work[0] === 'monitor' ? '監視を再開' : '一度だけ再試行・結果確認'}
+          </button>
+        </p>
+      ))}
+    </details>
   )
 }
 
@@ -195,6 +239,10 @@ export function FundsApp() {
   const action = (kind: string) => async () => {
     if (kind === 'seed' && isTestnet) {
       await store.loadFundingInstructions()
+      return
+    }
+    if (kind === 'confirm') {
+      await gateway.confirmDeposit()
       return
     }
     const value = amountMicros(amount)
@@ -275,6 +323,15 @@ export function FundsApp() {
                 >
                   {isTestnet ? 'HL testnet 入金先を表示' : 'LOCAL MOCK 保管残高に入金'}
                 </button>
+                {isTestnet && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void execute(action('confirm'))}
+                  >
+                    入金を確認
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={busy || newFundsStopped}
@@ -295,7 +352,8 @@ export function FundsApp() {
                   接続中の HL testnet 口座{' '}
                   <strong>{bytesToHex(fundingInstructions.source_hl_account_address)}</strong>{' '}
                   から保管口座 <strong>{bytesToHex(fundingInstructions.hl_account_address)}</strong>{' '}
-                  に USDC を送金してください。送金後は残高を更新して反映を確認してください。
+                  に USDC
+                  を送金してください。送金後は「入金を確認」を押してください。確認は一度に履歴の一部を取得するため、反映されない場合は再度確認してください。
                 </p>
               )}
               <details>
@@ -644,6 +702,11 @@ export function TradeApp() {
               <p className="agent-line">
                 Agent <b>{activeAgent ? 'Active' : '未承認'}</b>
               </p>
+            )}
+            {data && (
+              <button disabled={busy} onClick={() => void execute(() => gateway.refreshTrading())}>
+                取引情報を確認
+              </button>
             )}
             {data && !activeAgent && (
               <button disabled={busy} onClick={() => void execute(() => gateway.approveAgent())}>

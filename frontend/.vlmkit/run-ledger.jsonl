@@ -1,0 +1,7 @@
+{"ts":"2026-09-29T00:30:36.287Z","tool":"check-integrity","source":"http://127.0.0.1:4173/account/funds","headline":{"verdict":"clean","findings":0,"fails":0,"warns":0,"exempted":0,"viewports":3}}
+{"ts":"2026-09-29T00:35:39.591Z","tool":"scan-handlers","source":"http://127.0.0.1:4173/trade","headline":{"registrations":173,"elements":20,"suspects":0}}
+{"ts":"2026-09-29T00:35:42.674Z","tool":"check-integrity","source":"http://127.0.0.1:4173/funds","headline":{"verdict":"clean","findings":0,"fails":0,"warns":0,"exempted":0,"viewports":3}}
+{"ts":"2026-09-29T00:39:18.800Z","tool":"check-interactions","source":"http://127.0.0.1:4173/trade","headline":{"elements":20,"suspects":0,"warns":6}}
+{"ts":"2026-09-29T01:21:43.136Z","tool":"check-integrity","source":"http://127.0.0.1:4173/funds","headline":{"verdict":"clean","findings":0,"fails":0,"warns":0,"exempted":0,"viewports":3}}
+{"ts":"2026-09-29T01:21:44.370Z","tool":"scan-handlers","source":"http://127.0.0.1:4173/trade","headline":{"registrations":173,"elements":20,"suspects":0}}
+{"ts":"2026-09-29T01:23:18.468Z","tool":"check-interactions","source":"http://127.0.0.1:4173/trade","headline":{"elements":20,"suspects":0,"warns":6}}

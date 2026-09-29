@@ -4,6 +4,131 @@ use pocket_ic_tests::{principal, query};
 use serde_json::{Value, json};
 
 #[test]
+fn market_reads_are_non_replicated_and_reject_invalid_observations() {
+    use api_types::{
+        error::ErrorCode,
+        operations_status::{MarketStatus, MarketThreshold},
+    };
+    use pocket_ic::common::rest::{
+        CanisterHttpReplication, CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse,
+    };
+    use pocket_ic_tests::update;
+    let pic = pocket_ic_tests::pic();
+    let canister = pic.create_canister();
+    let admin = principal(51);
+    pic.add_cycles(canister, 10_000_000_000_000_000);
+    pic.install_canister(
+        canister,
+        std::fs::read(std::env::var("PRIVATE_PERP_UNIFIED_WASM").unwrap()).unwrap(),
+        encode_args((admin,)).unwrap(),
+        None,
+    );
+    let configured: Result<(), ErrorCode> = update(
+        &pic,
+        canister,
+        admin,
+        "policy_configure_rest_budget",
+        api_types::operations::RestBudgetConfig {
+            capacity: 1200,
+            exit_reserve: 300,
+        },
+    )
+    .unwrap();
+    configured.unwrap();
+    for case in ["safe", "volume_low", "all_malformed", "stale_book"] {
+        for (market, expected_index) in [("BTC", 0), ("ETH", 1)] {
+            let configured: Result<(), ErrorCode> = update(
+                &pic,
+                canister,
+                admin,
+                "core_configure_market_threshold",
+                MarketThreshold {
+                    market: market.into(),
+                    expected_index,
+                    min_day_notional_usdc: 1_000_000,
+                    max_spread_bps: 20,
+                    min_each_side_depth_usdc: 1000,
+                },
+            )
+            .unwrap();
+            configured.unwrap();
+        }
+        let before = pic.cycle_balance(canister);
+        let id = pic
+            .submit_call(
+                canister,
+                Principal::anonymous(),
+                "refresh_market",
+                encode_args(()).unwrap(),
+            )
+            .unwrap();
+        let mut count = 0;
+        for _ in 0..200 {
+            pic.tick();
+            for request in pic.get_canister_http() {
+                assert_eq!(request.replication, CanisterHttpReplication::NonReplicated);
+                count += 1;
+                let q: Value = serde_json::from_slice(&request.body).unwrap();
+                let now = pic.get_time().as_nanos_since_unix_epoch() / 1_000_000;
+                let body = if q["type"] == "metaAndAssetCtxs" {
+                    let volume = if case == "volume_low" {
+                        "999999"
+                    } else {
+                        "2000000"
+                    };
+                    json!([{"universe":[{"name":"BTC"},{"name":"ETH"}]},
+                        [{"dayNtlVlm":volume},{"dayNtlVlm":volume}]])
+                } else {
+                    json!({"coin":q["coin"],"time":if case=="stale_book" {now-120_000} else {now},
+                        "levels":[[{"px":"59999","sz":"1"}],[{"px":"60001","sz":"1"}]]})
+                };
+                let response = CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: if case == "all_malformed" {
+                        b"malformed".to_vec()
+                    } else {
+                        body.to_string().into_bytes()
+                    },
+                });
+                pic.mock_canister_http_response(MockCanisterHttpResponse {
+                    subnet_id: request.subnet_id,
+                    request_id: request.request_id,
+                    response,
+                    additional_responses: vec![],
+                });
+            }
+            if pic.ingress_status(id.clone()).is_some() {
+                break;
+            }
+        }
+        assert!(pic.ingress_status(id.clone()).is_some(), "{case} timed out");
+        let result: Result<(), ErrorCode> =
+            candid::decode_one(&pic.await_call(id).unwrap()).unwrap();
+        let status: Result<MarketStatus, ErrorCode> = query(
+            &pic,
+            canister,
+            admin,
+            "get_market_status",
+            "BTC".to_string(),
+        )
+        .unwrap();
+        let allowed = case == "safe";
+        assert_eq!(
+            status.unwrap().eligible_for_new_risk,
+            allowed,
+            "{case}: {result:?}"
+        );
+        result.unwrap();
+        println!(
+            "MARKET_NON_REPLICATED {}",
+            json!({"case":case,"requests":count,
+            "cycles":before-pic.cycle_balance(canister)})
+        );
+    }
+}
+
+#[test]
 fn market_poll_rechecks_configuration_and_fails_closed_on_http_errors() {
     use api_types::{
         error::ErrorCode,
@@ -133,7 +258,7 @@ fn market_poll_rechecks_configuration_and_fails_closed_on_http_errors() {
 }
 
 #[test]
-fn replicated_transform_agrees_on_admission_without_hiding_unsafe_data() {
+fn market_transform_validates_admission_without_hiding_unsafe_data() {
     let pic = pocket_ic_tests::pic();
     let canister = pic.create_canister();
     pic.add_cycles(canister, 10_000_000_000_000_000);
@@ -242,4 +367,13 @@ fn replicated_transform_agrees_on_admission_without_hiding_unsafe_data() {
         candid::Nat::from(500u16),
         "HTTP error cannot become success"
     );
+}
+
+#[test]
+fn pinned_http_builder_selects_v2_and_disables_replication() {
+    let request =
+        ic_cdk_management_canister::HttpRequest::new("https://api.hyperliquid-testnet.xyz/info")
+            .non_replicated();
+    assert_eq!(request.args().pricing_version, Some(2));
+    assert_eq!(request.args().is_replicated, Some(false));
 }

@@ -121,7 +121,7 @@ Phase 2の既存実装・判定とは区別する。
 
 ## 既存環境の移行
 
-新しい`RecoveryPostResult`を理解できるよう、`send_journal`をvaultより先にupgradeする。旧`RecoverySettlement`は直接応答と履歴判定を区別できないため、復元差分に現れた場合は送信停止を維持する。coreを先にupgradeすると新規リスクが全体停止する。次にvaultをupgradeし、core principalを初回設定してvaultのsweepを実行する。vaultは旧未解決回収を世代付きフェンスへ移し、全件が移った場合だけcoreの移行ロックを解除する。`recovery_migration_locked`と本人の`FundStatus.recovery_fence`で状態を確認する。移行中も取消・reduce-only決済は続けられる。testnetではHL履歴の完全性を確認するまで`recovery_history_verified`を有効にしない。
+後方互換は不要との方針により、旧未解決回収を移行するAPI・全体移行ロック・vault sweepからの移行呼び出しは削除した。旧版の未解決回収の引き継ぎは非対応。現行の口座別フェンスと送信記録による復元時の安全確認は維持する。以下を含む過去の検証記録は当時の実装を示す。testnetではHL履歴の完全性を確認するまで`recovery_history_verified`を有効にしない。
 
 ## ローカルeligibility issuer
 

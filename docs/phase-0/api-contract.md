@@ -180,7 +180,7 @@ type AgentRevocationRequest = record {
 - 失効世代の再利用を禁止する。停止・解除はCanisterが実行し、ユーザー自身のHL直接解除を保証しない。
 - builder feeを有効にする場合は別途`approveBuilderFee`を要求し、Agent承認と兼ねない（Phase 3-6）。
 
-- 資金actionの送信と入金の定期照合は、本番はグローバルtimer（`ic-cdk-timers`の`set_timer_interval`・5秒間隔。`init`／`post_upgrade`で再arm）で起動する。heartbeatは使わない（メッセージが無くても毎ラウンド呼ばれ、アイドル時もコストが乗るため）。永続状態（action・仕訳）が正本であり、timerの継続を正しさの前提にしない（失敗は次の起動で再試行し、`trading_core`は手動`sweep`でも再開できる）。
+- 資金の自動処理はDB更新で起動し、未完了要求・着金確認・フェンス解除がある間だけ5秒間隔で直列実行する。保管口座の定期入金巡回は行わず、認証済みの `vault_private_call(confirm_deposit)` で明示的に確認する。アップグレード後は永続状態から必要なワーカーだけ再開する。
 
 ## 3. trading_core
 
@@ -313,11 +313,11 @@ type OrderSummary = record {
 
 ### 3.3 送信と照合（sweep）
 
-受付（`submit_order`・`cancel_order`・`cancel_all`・`close_position`・`close_all`）はローカル状態だけを確定し、署名・送信・照合は`sweep`が行う。本番はグローバルtimer（`ic-cdk-timers`の`set_timer_interval`）が5秒間隔で起動し（timerはアップグレードで失われるため`init`／`post_upgrade`で再armする）、停止時の手動実行は`sweep`（controllerのみ）が呼ぶ。heartbeatは使わない（メッセージが無くても毎ラウンド呼ばれ、アイドル時もコストが乗るため）。
+受付時には必要な市場・口座情報を取得する。署名・送信・照合は永続キューとワーカーが担う。注文・建玉・最終観測が残る間だけ5秒間隔で直列実行し、完了すればtimerを解除する。アップグレード時も未完了処理をDBから復元する。controller向けの手動 `sweep` は維持する。
 
 - 1回の上限：送信4件・取消4件・照合2口座・注文状態4件/口座（outcallの回数を抑える）。
 - 送信（`/exchange`）は**非replicated** POST。HTTP/外側の`ok`だけでなく各statusを解釈し、受理は`open`または即時`filled`、明示拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`とし**再送しない**（リスク予約も解放しない。解消は照合またはcontrollerの確認済み操作で行う）。
-- 照合（`/info`）は料金方式v2の**replicated** outcall＋変換関数（`transform_info`）で行う。約定（`userFills`）は`tid`で冪等に取り込み、建玉（`clearinghouseState`）は**観測の全量**で置き換え、注文状態（`orderStatus`）はoidが分かる未終端注文だけに反映する。replicatedでもHL自体の虚偽や履歴欠落は排除できないため、外部証跡の信頼条件と履歴の完全性は別途検証する。
+- 照合（`/info`）は料金方式v2の**非replicated** outcall＋変換関数（`transform_info`）で行う。約定（`userFills`）は`tid`で冪等に取り込み、建玉（`clearinghouseState`）は**観測の全量**で置き換え、注文状態（`orderStatus`）はoidが分かる未終端注文だけに反映する。単一ノードの応答を採用するため、外部証跡の信頼条件と履歴の完全性は別途検証する。
 - 照合の対象は`accounts`に取引所アドレスを保存済みの有効口座で、`account_id`順のカーソルで巡回する（先頭N件固定にしない）。アドレスは本人の署名済み要求の処理中にvaultから一度だけ取得して保存する。
 - 自動sweep（timer）は本番ビルドのみで組む。試験ビルドでは明示的な`test_sweep_now`で同じ経路を駆動する（PocketICで試験が待つoutcallと取り違えないため）。
 
@@ -460,7 +460,7 @@ type NotAllowedCode = variant {
 |---|---|---|
 | 同一`client_request_id`・同一本文で再試行可 | `UpstreamUnavailable`、`VenueRateLimited`、`SigningQueueFull` | 同じ冪等性キーで再送。新しいcloid・nonceを作らない |
 | 状態更新後に再試行可 | `StaleAccountState`、`PolicyUnavailable`、`ReservationConflict` | 状態を再取得し、`revision`と`observed_at`を更新してから再判断 |
-| 受付ごとの再試行 | `JournalWriterBusy` | 単一書込みフェンスの一時的な競合。`open_session`はchallenge消費後のため、新しいchallengeと署名で有界に再試行する。他の受付は各要求の冪等性規則を守る |
+| 受付ごとの再試行 | `JournalWriterBusy` | 単一書込みフェンスの一時的な競合。`open_session`はchallenge消費後のため、ユーザーが再操作したときだけ新しいchallengeと署名で再試行する。他の受付は各要求の冪等性規則を守る |
 | 再試行不可 | `Unauthenticated`、`SessionExpired`、`SessionRevoked`、`NotEligible`、`BadRequest`、`IdempotencyConflict`、`InsufficientFunds`、`RiskLimitExceeded`、`NotAllowed`、`Internal` | 理由を表示し、入力を修正する。自動再送しない（`Internal`は設定不備・DB不整合を含む恒久エラーのため） |
 | 成功扱い（重複受付） | `DuplicateIgnored` | 既存の受付状態を表示する。エラー表示にしない |
 | 自動再送禁止（照合のみ） | `UnknownPending` | 結果不明として表示し、照合結果が届くまで再発注しない |
@@ -479,3 +479,7 @@ type NotAllowedCode = variant {
 | Agent世代の承認待ち時間、27日切替の実挙動 | Phase 1（`Implementation.md` 1-4） |
 | eligibilityの粒度と`get_policy`の公開範囲 | Phase 3-5 |
 | builder feeの上限同意フロー | Phase 3-6（本番の事業判断） |
+
+### 手動再開（暗号化private API）
+
+Vault/Core共通: `get_manual_work(SessionHandle)` は `Result<vec (text, blob, nat64), ErrorCode>`（種別・操作ID・世代）を返す。`resume_manual_work(SessionHandle, text, blob, nat64)` は当該所有者の停止中の世代に一度だけ許可を付与する。通常の表示更新でこのAPIを呼ばない。送信状態・署名・nonce・予約は巻き戻さず、結果不明の送信は照合だけを行う。実行中・古い世代・別所有者の操作は拒否する。

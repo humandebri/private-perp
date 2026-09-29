@@ -21,6 +21,29 @@ pub struct AccountRow {
 
 pub type AccountIdentity = ([u8; 32], [u8; 20]);
 
+/// Only accounts with unresolved orders, positions, or an outstanding observation
+/// need background work. A final observation after the last order catches an
+/// immediate fill before the timer is allowed to stop.
+const NEEDS_MONITOR: &str = "NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='monitor' AND w.work_id=accounts.account_id AND w.allowed=0) AND (NOT EXISTS (SELECT 1 FROM account_metrics m WHERE m.account_id = accounts.account_id)
+    OR EXISTS (SELECT 1 FROM positions p WHERE p.account_id = accounts.account_id AND p.size != '0')
+    OR EXISTS (SELECT 1 FROM orders o WHERE o.account_id = accounts.account_id
+        AND NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='order' AND w.work_id=o.order_id AND w.allowed=0)
+        AND (o.state IN ('pending','open','partially_filled','unknown')
+          OR o.updated_at >= (SELECT m.observed_at FROM account_metrics m WHERE m.account_id = accounts.account_id)
+          OR o.updated_at >= COALESCE((SELECT a.last_fills_checked_at FROM account_observations a WHERE a.account_id = accounts.account_id), 0))))";
+
+pub fn has_monitor_work(connection: &Connection) -> Result<bool, Error> {
+    Ok(connection
+        .query_optional_scalar::<i64>(
+            &format!("SELECT 1 WHERE EXISTS(SELECT 1 FROM accounts WHERE state='active' AND {NEEDS_MONITOR})
+                OR EXISTS(SELECT 1 FROM orders o WHERE o.dispatch_state IN ('queued','signing') AND NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='order' AND w.work_id=o.order_id AND w.allowed=0))
+                OR EXISTS(SELECT 1 FROM orders o WHERE o.cancel_requested=1 AND o.state IN ('open','partially_filled') AND (o.cancel_dispatch_state IS NULL OR o.cancel_dispatch_state='signing') AND NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='cancel' AND w.work_id=o.order_id AND w.allowed=0))"),
+            params![],
+        )
+        .map_err(sql)?
+        .is_some())
+}
+
 pub fn identity(
     connection: &Connection,
     account_id: &[u8; 32],
@@ -114,9 +137,11 @@ pub fn reconcile_candidates(
 ) -> Result<Vec<AccountRow>, Error> {
     let rows = connection
         .query_all(
-            "SELECT account_id, user_id, hl_master_address FROM accounts
-              WHERE state = 'active' AND (?1 IS NULL OR account_id > ?1)
-              ORDER BY account_id LIMIT ?2",
+            &format!(
+                "SELECT account_id, user_id, hl_master_address FROM accounts
+              WHERE state = 'active' AND {NEEDS_MONITOR} AND (?1 IS NULL OR account_id > ?1)
+              ORDER BY account_id LIMIT ?2"
+            ),
             params![
                 match after {
                     Some(account_id) => ic_sqlite_vfs::db::Value::Blob(account_id),
@@ -265,6 +290,13 @@ pub fn fills_due(connection: &Connection, account_id: &[u8; 32], now: u64) -> Re
         )
         .map_err(sql)?
         .flatten();
+    let terminal_unobserved = connection.query_optional_scalar::<i64>(
+        "SELECT 1 FROM orders WHERE account_id = ?1 AND state IN ('filled','cancelled','rejected')
+         AND updated_at >= ?2 LIMIT 1", params![account_id.as_slice(), last.unwrap_or(0)],
+    ).map_err(sql)?.is_some();
+    if terminal_unobserved {
+        return Ok(true);
+    }
     let active = connection
         .query_optional_scalar::<i64>(
             "SELECT 1 FROM orders WHERE account_id = ?1

@@ -494,4 +494,21 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 25,
         sql: super::send_journal::REPLAY_VALIDATION_SQL,
     },
+    Migration {
+        version: 26,
+        sql:
+            "ALTER TABLE fund_actions ADD COLUMN recovery_next_check_at INTEGER NOT NULL DEFAULT 0;
+              ALTER TABLE fund_actions ADD COLUMN recovery_retry_count INTEGER NOT NULL DEFAULT 0;",
+    },
+    Migration {
+        version: 27,
+        sql: super::MANUAL_WORK,
+    },
+    Migration {
+        version: 28,
+        sql: "INSERT INTO worker_permissions(kind,work_id,user_id,allowed)
+          SELECT 'fund',action_id,user_id,0 FROM fund_actions
+          WHERE dispatch_state IN ('unknown','dispatching','signing','signed')
+             OR (dispatch_state='queued' AND attempt>0) ON CONFLICT(kind,work_id) DO NOTHING;",
+    },
 ];

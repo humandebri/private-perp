@@ -352,6 +352,7 @@ export const idlFactory = ({ IDL }) => {
     reconcile_deposits: IDL.Func([IDL.Vec(IDL.Nat8)], [Result_20], []),
     recovery_replay_pending: IDL.Func([], [Result_13], ['query']),
     recovery_stage_status: IDL.Func([], [Result_21], ['query']),
+    refresh_trading_balance: IDL.Func([SessionHandle], [Result_1], []),
     resolve_unknown_action: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Bool, IDL.Text], [Result_1], []),
     resume_journal: IDL.Func([], [Result_1], []),
     rotate_hpke_key: IDL.Func([], [Result_10], []),

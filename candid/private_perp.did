@@ -798,8 +798,6 @@ service : (principal) -> {
 
   append_recovery_event : (journal_RecoveryEvent) -> (journal_Result);
 
-  begin_recovery_migration : () -> (core_Result);
-
   builder_fee_mock_status : (vault_SessionHandle) -> (vault_Result) query;
 
   caller_principal : () -> (principal) query;
@@ -858,8 +856,6 @@ service : (principal) -> {
 
   finish_recovery : (core_RecoveryFenceToken) -> (core_Result);
 
-  finish_recovery_migration : () -> (core_Result);
-
   get_account_snapshot : (core_HpkeRequest) -> (core_Result_1);
 
   get_agent_approval : (blob, nat64) -> (vault_Result_3) query;
@@ -912,8 +908,6 @@ service : (principal) -> {
 
   mark_recovery_unknown : (core_RecoveryFenceToken) -> (core_Result);
 
-  migrate_recovery : (core_PrepareRecovery) -> (core_Result_10);
-
   open_session : (vault_OpenSessionRequest) -> (vault_Result_18);
 
   pause_for_recovery : () -> (policy_Result);
@@ -934,9 +928,9 @@ service : (principal) -> {
 
   recovery_head : () -> (journal_Result);
 
-  recovery_migration_locked : () -> (core_Result_11) query;
-
   refresh_market : () -> (core_Result);
+
+  refresh_trading_balance : (vault_SessionHandle) -> (vault_Result_1);
 
   resolve_unknown_action : (blob, bool, text) -> (vault_Result_1);
 

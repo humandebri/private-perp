@@ -16,6 +16,7 @@ use crate::{
 use api_types::error::{BadRequestCode, ErrorCode};
 use api_types::journal::{RecoveryEvent, RecoveryPayload};
 use api_types::operations::BudgetClass;
+use db::worker_permissions;
 use ic_cdk_management_canister::{SignWithEcdsaArgs, sign_with_ecdsa};
 
 /// 1回のsweepで送る注文・取消の上限（outcallの回数を抑える）。
@@ -73,14 +74,6 @@ pub async fn sweep_once(now: u64) -> Result<api_types::order::SweepOutcome, Erro
     // Preserve capacity for exits and evidence gathering before new risk.
     let cancels = dispatch_cancels(now).await?;
     let reconciled = reconcile_accounts(now).await?;
-    // Market polling consumes reconciliation budget after exit work. A failed
-    // observation closes new risk through the stored reason/age, not exits.
-    // Market admission is unnecessary while cycles already prohibit new risk.
-    // Preserve the remaining budget for cancellations and reconciliation.
-    // A controller can still request one explicit refresh for diagnostics.
-    if crate::cycles::require_new().is_ok() {
-        let _ = crate::market::poll_if_due(now).await;
-    }
     let dispatched = dispatch_queued(now).await?;
     let outcome = api_types::order::SweepOutcome {
         dispatched,
@@ -137,6 +130,15 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
             continue;
         }
 
+        let owner = db::tx::query(|c| db::repo::orders::order_owner(c, &order_id))
+            .map_err(map_db)?
+            .ok_or(ErrorCode::PolicyUnavailable)?
+            .0;
+        let Some(attempt) =
+            worker_permissions::begin("order", &order_id, &owner).map_err(map_db)?
+        else {
+            continue;
+        };
         let needs_preflight = if order.preflight_state == api_types::fund::ActionState::Queued {
             match db::tx::update(|connection| {
                 let decision = db::repo::leverage::prepare(
@@ -478,6 +480,14 @@ async fn dispatch_queued(now: u64) -> Result<u32, ErrorCode> {
                 .map_err(map_db)?;
             }
         }
+        let state =
+            db::tx::query(|c| db::repo::orders::order_state(c, &order_id)).map_err(map_db)?;
+        if !matches!(
+            state,
+            Some(api_types::order::OrderState::Unknown | api_types::order::OrderState::Pending)
+        ) {
+            attempt.completed().map_err(map_db)?;
+        }
         processed += 1;
     }
     Ok(processed)
@@ -589,7 +599,21 @@ async fn dispatch_cancels(now: u64) -> Result<u32, ErrorCode> {
     .map_err(map_db)?;
     let mut processed = 0;
     for order_id in ids {
+        let owner = db::tx::query(|c| db::repo::orders::order_owner(c, &order_id))
+            .map_err(map_db)?
+            .ok_or(ErrorCode::PolicyUnavailable)?
+            .0;
+        let Some(attempt) =
+            worker_permissions::begin("cancel", &order_id, &owner).map_err(map_db)?
+        else {
+            continue;
+        };
         if dispatch_cancel(&order_id, now).await? {
+            if !db::tx::query(|c| db::repo::orders::cancel_unresolved(c, &order_id))
+                .map_err(map_db)?
+            {
+                attempt.completed().map_err(map_db)?;
+            }
             processed += 1;
         }
     }
@@ -800,7 +824,7 @@ async fn reconcile_accounts(now: u64) -> Result<u32, ErrorCode> {
     );
     let mut processed = 0;
     for account in scheduled {
-        // 1口座の失敗で巡回全体を止めない（次のsweepで再試行する）。
+        // 失敗した口座は手動再開待ちにし、他口座の巡回を継続する。
         if reconcile_account(&account, now).await.is_ok() {
             processed += 1;
         }
@@ -827,10 +851,15 @@ async fn reconcile_accounts(now: u64) -> Result<u32, ErrorCode> {
 }
 
 /// 1口座分の照合（建玉の全量・約定・未終端注文の状態）。
-async fn reconcile_account(
+pub(crate) async fn reconcile_account(
     account: &db::repo::accounts::AccountRow,
     now: u64,
 ) -> Result<(), ErrorCode> {
+    let Some(attempt) = worker_permissions::begin("monitor", &account.account_id, &account.user_id)
+        .map_err(map_db)?
+    else {
+        return Ok(());
+    };
     let address = format!("0x{}", hex::encode(account.master_address));
 
     // 建玉は観測の全量で置き換える（消えた建玉を残さない）。
@@ -847,10 +876,27 @@ async fn reconcile_account(
     for cloid in cloids {
         db::tx::update(|c| db::repo::orders::note_cloid_check(c, &account.account_id, &cloid, now))
             .map_err(map_db)?;
+        // A manually permitted unknown order gets one observation only.
+        let target = db::tx::query(|c| {
+            db::repo::orders::cloid_status_target(c, &account.account_id, &cloid)
+        })
+        .map_err(map_db)?;
+        let Some((id, _)) = target else {
+            continue;
+        };
+        let Some(check) =
+            worker_permissions::begin("order", &id, &account.user_id).map_err(map_db)?
+        else {
+            continue;
+        };
         let key = format!("0x{}", hex::encode(&cloid));
         let status = venue::order_status(&address, &key).await?;
-        recovered_order |=
+        let resolved =
             apply_order_status_for_cloid(&account.account_id, &status, now, Some(&cloid)).await?;
+        if resolved {
+            check.completed().map_err(map_db)?;
+        }
+        recovered_order |= resolved;
     }
 
     // userFills has a large variable weight. Poll active accounts at most every
@@ -879,9 +925,47 @@ async fn reconcile_account(
     })
     .map_err(map_db)?;
     for oid in oids {
+        let target =
+            db::tx::query(|c| db::repo::orders::order_status_target(c, &account.account_id, oid))
+                .map_err(map_db)?;
+        let check = if let Some((id, state)) = target.as_ref() {
+            if state == "unknown" {
+                let Some(check) =
+                    worker_permissions::begin("order", id, &account.user_id).map_err(map_db)?
+                else {
+                    continue;
+                };
+                Some(check)
+            } else {
+                None
+            }
+        } else {
+            continue;
+        };
+        let id = target.as_ref().expect("known status target").0;
+        let cancel_check =
+            if db::tx::query(|c| db::repo::orders::cancel_unresolved(c, &id)).map_err(map_db)? {
+                let Some(check) =
+                    worker_permissions::begin("cancel", &id, &account.user_id).map_err(map_db)?
+                else {
+                    continue;
+                };
+                Some(check)
+            } else {
+                None
+            };
         let status = venue::order_status(&address, oid).await?;
-        apply_order_status_json(&account.account_id, &status, now).await?;
+        let resolved = apply_order_status_json(&account.account_id, &status, now).await?;
+        if resolved && let Some(check) = check {
+            check.completed().map_err(map_db)?;
+        }
+        if let Some(check) = cancel_check
+            && !db::tx::query(|c| db::repo::orders::cancel_unresolved(c, &id)).map_err(map_db)?
+        {
+            check.completed().map_err(map_db)?;
+        }
     }
+    attempt.completed().map_err(map_db)?;
     Ok(())
 }
 

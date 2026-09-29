@@ -844,6 +844,14 @@ export const idlFactory = ({ IDL }) => {
     Ok: vault_Paged,
     Err: vault_ErrorCode,
   })
+  const vault_OpenSessionRequest = IDL.Record({
+    eoa_signature: IDL.Vec(IDL.Nat8),
+    challenge_id: IDL.Vec(IDL.Nat8),
+  })
+  const vault_Result_18 = IDL.Variant({
+    Ok: vault_SessionHandle,
+    Err: vault_ErrorCode,
+  })
   const core_PrepareRecovery = IDL.Record({
     account_id: IDL.Vec(IDL.Nat8),
     request_id: IDL.Vec(IDL.Nat8),
@@ -853,14 +861,6 @@ export const idlFactory = ({ IDL }) => {
   const core_Result_10 = IDL.Variant({
     Ok: core_RecoveryFenceToken,
     Err: core_ErrorCode,
-  })
-  const vault_OpenSessionRequest = IDL.Record({
-    eoa_signature: IDL.Vec(IDL.Nat8),
-    challenge_id: IDL.Vec(IDL.Nat8),
-  })
-  const vault_Result_18 = IDL.Variant({
-    Ok: vault_SessionHandle,
-    Err: vault_ErrorCode,
   })
   const vault_Result_20 = IDL.Variant({
     Ok: IDL.Nat32,
@@ -997,7 +997,6 @@ export const idlFactory = ({ IDL }) => {
     append: IDL.Func([journal_SendIntent], [journal_Result], []),
     append_recovery_event: IDL.Func([journal_RecoveryEvent], [journal_Result], []),
     application_administrator: IDL.Func([], [IDL.Principal], ['query']),
-    begin_recovery_migration: IDL.Func([], [core_Result], []),
     builder_fee_mock_status: IDL.Func([vault_SessionHandle], [vault_Result], ['query']),
     caller_principal: IDL.Func([], [IDL.Principal], ['query']),
     cancel_order: IDL.Func([core_HpkeRequest], [core_Result_1], []),
@@ -1035,7 +1034,6 @@ export const idlFactory = ({ IDL }) => {
     core_version: IDL.Func([], [IDL.Text], ['query']),
     eligibility_status: IDL.Func([vault_SessionHandle], [vault_Result_2], ['query']),
     finish_recovery: IDL.Func([core_RecoveryFenceToken], [core_Result], []),
-    finish_recovery_migration: IDL.Func([], [core_Result], []),
     get_account_snapshot: IDL.Func([core_HpkeRequest], [core_Result_1], []),
     get_agent_approval: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Nat64], [vault_Result_3], ['query']),
     get_agent_status: IDL.Func([core_SessionHandle], [core_Result_2], []),
@@ -1066,7 +1064,6 @@ export const idlFactory = ({ IDL }) => {
     ),
     list_orders: IDL.Func([core_HpkeRequest], [core_Result_1], []),
     mark_recovery_unknown: IDL.Func([core_RecoveryFenceToken], [core_Result], []),
-    migrate_recovery: IDL.Func([core_PrepareRecovery], [core_Result_10], []),
     open_session: IDL.Func([vault_OpenSessionRequest], [vault_Result_18], []),
     pause_for_recovery: IDL.Func([], [policy_Result], []),
     policy_configure_rest_budget: IDL.Func([policy_RestBudgetConfig], [policy_Result], []),
@@ -1077,8 +1074,8 @@ export const idlFactory = ({ IDL }) => {
     recovery_event: IDL.Func([IDL.Vec(IDL.Nat8)], [journal_Result_3], []),
     recovery_events: IDL.Func([IDL.Nat64, IDL.Nat32], [journal_Result_4], []),
     recovery_head: IDL.Func([], [journal_Result], []),
-    recovery_migration_locked: IDL.Func([], [core_Result_11], ['query']),
     refresh_market: IDL.Func([], [core_Result], []),
+    refresh_trading_balance: IDL.Func([vault_SessionHandle], [vault_Result_1], []),
     resolve_unknown_action: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Bool, IDL.Text], [vault_Result_1], []),
     resolve_unknown_order_preflight: IDL.Func(
       [IDL.Vec(IDL.Nat8), core_PreflightResolution],

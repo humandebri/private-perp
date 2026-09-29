@@ -470,7 +470,7 @@ export interface _SERVICE {
    * 取引所の入金（ledger update）を記録する（controllerのみ）。
    *
    * 正規化したイベントID（`keccak256("deposit" ‖ tx_hash)`）で**二重計上を防ぐ**。
-   * 本番ではreplicatedな`/info`照合がこの経路を呼ぶ。ユーザーへの紐付け（宛先アドレス→
+   * 本番では非replicatedな`/info`照合がこの経路を呼ぶ。ユーザーへの紐付け（宛先アドレス→
    * 利用者）と`deposit_confirmed`の起票は次段階（アドレス写像の実装後）に行う。
    */
   ingest_venue_deposit: ActorMethod<[Uint8Array | number[], bigint, string], Result_13>
@@ -494,11 +494,15 @@ export interface _SERVICE {
   /**
    * 取引所の入金を取得して取り込む（controllerのみ）。
    *
-   * 取得はreplicated outcall（変換関数で決定論化）、取り込みは検証済みの`deposits::credit`。
+   * 取得はHTTP v2の非replicated outcall（変換関数で検証・正規化）、取り込みは検証済みの`deposits::credit`。
    */
   reconcile_deposits: ActorMethod<[Uint8Array | number[]], Result_20>
   recovery_replay_pending: ActorMethod<[], Result_13>
   recovery_stage_status: ActorMethod<[], Result_21>
+  /**
+   * Core-only on-demand venue balance observation.
+   */
+  refresh_trading_balance: ActorMethod<[SessionHandle], Result_1>
   /**
    * 不明なactionを「未実行」として解消する（controllerのみ）。
    *

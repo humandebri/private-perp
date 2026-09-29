@@ -51,33 +51,6 @@ pub fn any_active(connection: &Connection) -> Result<bool, Error> {
         != 0)
 }
 
-pub fn migration_locked(connection: &Connection) -> Result<bool, Error> {
-    Ok(connection
-        .query_scalar::<i64>(
-            "SELECT locked FROM recovery_migration_lock WHERE id = 1",
-            &[],
-        )
-        .map_err(sql)?
-        != 0)
-}
-
-pub fn set_migration_lock(
-    connection: &mut UpdateConnection<'_>,
-    locked: bool,
-) -> Result<(), Error> {
-    connection
-        .execute(
-            "UPDATE recovery_migration_lock SET locked = ?1 WHERE id = 1",
-            params![if locked { 1 } else { 0 }],
-        )
-        .map_err(sql)?;
-    crate::cas::ensure_changed(
-        crate::cas::changes(connection)?,
-        "migration lock",
-        "missing migration lock",
-    )
-}
-
 /// 同一要求なら世代を変えず、別要求ならreleasedからのみ次世代を作る。
 pub fn begin(
     connection: &mut UpdateConnection<'_>,

@@ -42,12 +42,12 @@ pub async fn refresh(user: &[u8; 32]) -> Result<(), ErrorCode> {
     if !permit.valid_now() {
         return Err(ErrorCode::PolicyUnavailable);
     }
-    // Keep the replicated response independent of HL's per-request timestamp.
+    // Keep the response independent of HL's per-request timestamp.
     // Direct arrivals after the first observation are accounted by balance
     // observations, not additive deposit postings (see repo::deposits).
     let at = crate::clock::now_ms();
     let url = crate::environment::resolved()?.info_url;
-    let response = HttpRequest::new(&url).with_method(HttpMethod::POST).with_header("Content-Type","application/json")
+    let response = HttpRequest::new(&url).non_replicated().with_method(HttpMethod::POST).with_header("Content-Type","application/json")
         .with_body(serde_json::json!({"type":"clearinghouseState","user":format!("0x{}",hex::encode(account.master_address))}).to_string().into_bytes())
         .with_max_response_bytes(256*1024).with_transform(transform_context_from_query("transform_balance".into(),vec![])).send().await
         .map_err(|_| ErrorCode::PolicyUnavailable)?;

@@ -103,7 +103,7 @@ Plan 16章と本書14章の境界で、資金台帳とmaster actionをtestnet向
 | 認可・リスク検証 | 同期・純粋 | 無視できる |
 | sign_with_ecdsa | クロスネット（confidential → pzp6e） | **未実測** |
 | HTTPS outcall POST | 非replicated、TLS | 数百ms |
-| 照合 `/info` | replicated POST＋transform | 数百ms |
+| 照合 `/info` | HTTP v2・非replicated POST＋transform | 数百ms |
 
 DFINITYのエンジニアは「`sign_with_ecdsa` を呼ぶcanisterを署名subnet上に置けばクロスネット遅延を完全に避けられる」と回答している。本番鍵 `key_1` は fiduciary signing subnet `pzp6e`（34ノード）にのみ配備され、テスト鍵は `fuqsr` にある。**D10の構成ではこの回避策を取れない**ため、クロスネット分の遅延を毎回支払う。
 
@@ -116,7 +116,7 @@ DFINITYのエンジニアは「`sign_with_ecdsa` を呼ぶcanisterを署名subne
 - 現時点でcanister単位の署名レート制限は無い（DFINITY、2026-05）。
 - 署名単価は約26.15B cycles（約$0.035）。値下げは議論中だが未実施。
 
-帰結。**1注文1署名の設計は、サブネット共有資源の上で動く。** バースト時はキュー溢れを前提に、失敗を注文の失敗にせず再試行に回す設計が必須（5.5）。バッチ化（1 actionに複数注文）は費用だけでなく署名スロットの節約でもある。
+帰結。**1注文1署名の設計は、サブネット共有資源の上で動く。** バースト時はキュー溢れを前提に、失敗した未送信注文を保持し、本人が再試行を選べる設計が必要（5.5）。バッチ化（1 actionに複数注文）は費用だけでなく署名スロットの節約でもある。
 
 ### 2.3 受付と外部実行を分離する
 
@@ -132,7 +132,7 @@ DFINITYのエンジニアは「`sign_with_ecdsa` を呼ぶcanisterを署名subne
 6. 応答は照合の手掛かりとして保存する。dispatching以降は照合専用とし、タイムアウトやcallback trapを未送信扱いに戻さない。
 7. HLでactionの結果と各注文のライフサイクルを照合する。cancelも独立した署名actionとして処理する。
 
-sweepの起動はグローバルtimerで行い（アップグレードで再arm）、件数・cycles・API予算を制限する。queued/signing/signedはepochを更新して回収できるが、dispatching/unknownは照合のみ。永続状態が正本であり、spawnやtimerの継続を正しさの前提にしない。
+sweepの起動はグローバルtimerで行い（アップグレードで再arm）、件数・cycles・API予算を制限する。未送信処理の失敗は独立した実行許可を停止し、本人の明示許可でのみ再試行する。dispatching/unknownは照合のみで、queuedへの巻き戻しや署名・nonceの消去は行わない。永続状態が正本であり、spawnやtimerの継続を正しさの前提にしない。
 
 ### 2.4 Phase 1のGo/No-Goゲート（数値）
 
@@ -317,7 +317,7 @@ actionの状態は `queued → signing → signed → dispatching → reconciled
 
 ### 5.3 失敗・期限・取消
 
-- 署名拒否は未送信の範囲で有界バックオフする。epoch・期限・policyを再検証する。
+- 署名拒否は未送信の範囲で停止し、手動再試行時にepoch・期限・policyを再検証する。
 - POSTのタイムアウト、応答解釈不能、callback trap、dispatchingでのupgradeはすべて結果不明として照合する。
 - `orderStatus` が見つからないだけでは未実行を証明しない。保持期間や可視化遅延を考慮し、未解決ならunknownを維持してユーザーへ提示する。
 - `expiresAfter` はactionの受付期限であり、板に残る注文の取消期限ではない。ローカルdeadline超過でcancelled/expiredにしない。
@@ -604,7 +604,7 @@ Canister自身がHyperliquidのRESTを叩く。制限は**IP単位で1,200 weigh
 
 したがってイベント通知と、稼働口座・open/unknown注文への有界な定期照合を併用する。
 
-- 注文は送信直後、unknown解決時、open/部分約定の追跡時に照合する。バックオフと共有予算で負荷を制限する。
+- 通常のopen/部分約定は有界に追跡する。結果不明・照合失敗は停止し、本人の世代付き手動許可で一度だけ確認する。共有予算の制限は維持する。
 - ポジション再同期はセッション開始、注文照合、稼働口座の有界タイマーで行う。ブラウザの`notify_fill`は初期実装しない。公開市況WSを見ても本人の約定は確定できない。
 - 全件走査は低頻度・分割とするが、稼働口座を1日古い状態のままリスク判断しない。ブラウザ通知は認可・レート制限されたヒントに限定し、通知がなくても照合を継続する。
 - 状態が古い場合はリスクを増やす注文を停止する。受付時の予約によりサービス内の並行注文を数え、他Agentや直接取引を含む口座全体の厳密な上限保証とは区別する。

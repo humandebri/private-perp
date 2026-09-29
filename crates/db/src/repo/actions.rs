@@ -11,6 +11,21 @@ use ic_sqlite_vfs::db::UpdateConnection;
 use ic_sqlite_vfs::db::connection::Connection;
 use ic_sqlite_vfs::params;
 
+/// Do not sleep until transfers, journal results and recovery-fence releases finish.
+pub fn has_unfinished_work(c: &ic_sqlite_vfs::db::connection::Connection) -> Result<bool, Error> {
+    Ok(c.query_optional_scalar::<i64>(
+        "SELECT 1 FROM fund_actions a WHERE
+         (NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='fund' AND w.work_id=a.action_id AND w.allowed=0)
+          AND (a.dispatch_state NOT IN ('reconciled','aborted') OR EXISTS(SELECT 1 FROM fund_requests r WHERE r.user_id=a.user_id AND r.client_request_id=a.client_request_id AND r.state NOT IN ('settled','rejected'))))
+         OR (EXISTS(SELECT 1 FROM pending_transfer_results p WHERE p.action_id=a.action_id)
+          AND NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='result' AND w.work_id=a.action_id AND w.allowed=0))
+         OR (a.kind='recovery' AND a.recovery_fence_epoch IS NOT NULL AND a.recovery_fence_released_at IS NULL
+          AND (a.dispatch_state='aborted' OR EXISTS(SELECT 1 FROM fund_requests r WHERE r.user_id=a.user_id AND r.client_request_id=a.client_request_id AND r.state IN ('settled','rejected')))
+          AND NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='release' AND w.work_id=a.action_id AND w.allowed=0)) LIMIT 1",
+        ic_sqlite_vfs::params![],
+    ).map_err(crate::repo::sql)?.is_some())
+}
+
 /// outboxの1行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FundActionRow {
@@ -198,7 +213,7 @@ pub fn claim_action(
         .query_optional(
             &format!(
                 "SELECT {ACTION_COLUMNS} FROM fund_actions
-                  WHERE dispatch_state IN ('queued', 'signing')
+                  WHERE NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='fund' AND w.work_id=fund_actions.action_id AND w.allowed=0) AND dispatch_state IN ('queued', 'signing')
                     AND (lease_until IS NULL OR lease_until < ?1)
                   ORDER BY updated_at, action_id LIMIT 1"
             ),
@@ -693,7 +708,7 @@ pub fn recovery_release_candidates(
                 a.recovery_fence_epoch, a.dispatch_state
            FROM fund_actions a JOIN fund_requests r
              ON r.user_id = a.user_id AND r.client_request_id = a.client_request_id
-          WHERE a.kind = 'recovery' AND a.recovery_fence_epoch IS NOT NULL
+          WHERE NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='release' AND w.work_id=a.action_id AND w.allowed=0) AND a.kind = 'recovery' AND a.recovery_fence_epoch IS NOT NULL
             AND a.recovery_fence_released_at IS NULL
             AND ((a.dispatch_state = 'reconciled' AND r.state IN ('settled', 'rejected'))
               OR a.dispatch_state = 'aborted')
@@ -768,7 +783,11 @@ pub struct RecoveryCheck {
     pub ambiguous: bool,
 }
 
-pub fn recovery_checks(connection: &Connection, limit: u32) -> Result<Vec<RecoveryCheck>, Error> {
+pub fn recovery_checks(
+    connection: &Connection,
+    limit: u32,
+    now: u64,
+) -> Result<Vec<RecoveryCheck>, Error> {
     let rows = connection
         .query_all(
             "SELECT a.action_id, COALESCE(r.account_id, zeroblob(32)), a.user_id, a.client_request_id, r.amount,
@@ -778,11 +797,11 @@ pub fn recovery_checks(connection: &Connection, limit: u32) -> Result<Vec<Recove
            FROM fund_actions a JOIN fund_requests r
              ON r.user_id = a.user_id AND r.client_request_id = a.client_request_id
           WHERE ((a.kind = 'recovery' AND a.recovery_fence_epoch IS NOT NULL) OR (a.kind IN ('allocation','withdrawal') AND a.dispatch_state = 'unknown'))
-            AND a.recovery_ambiguous = 0
+            AND NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='fund' AND w.work_id=a.action_id AND w.allowed=0) AND a.recovery_ambiguous = 0 AND ?2 >= 0
             AND r.state IN ('unknown', 'executing')
             AND a.dispatch_state IN ('unknown', 'reconciled')
           ORDER BY a.updated_at, a.action_id LIMIT ?1",
-            params![limit as i64],
+            params![limit as i64, now as i64],
             |row| {
                 Ok((
                     row.get::<Vec<u8>>(0)?,
@@ -873,7 +892,9 @@ pub fn defer_recovery_check(
 ) -> Result<(), Error> {
     connection
         .execute(
-            "UPDATE fund_actions SET updated_at = MAX(updated_at + 1, ?3)
+            "UPDATE fund_actions SET updated_at = MAX(updated_at + 1, ?3),
+                recovery_next_check_at = ?3 + MIN(300000, 5000 * (1 << MIN(recovery_retry_count, 6))),
+                recovery_retry_count = MIN(recovery_retry_count + 1, 6)
               WHERE action_id = ?1 AND worker_epoch = ?2
           AND dispatch_state IN ('unknown', 'reconciled')",
             params![action_id.as_slice(), epoch as i64, now as i64],
@@ -895,7 +916,7 @@ pub fn advance_recovery_check(
     now: u64,
 ) -> Result<(), Error> {
     connection.execute(
-        "UPDATE fund_actions SET recovery_checked_until = ?3, recovery_window_ms = ?4, updated_at = ?5
+        "UPDATE fund_actions SET recovery_checked_until = ?3, recovery_window_ms = ?4, updated_at = ?5, recovery_next_check_at = 0
           WHERE action_id = ?1 AND worker_epoch = ?2 AND kind IN ('recovery','allocation','withdrawal')
             AND dispatch_state IN ('unknown', 'reconciled')
             AND (recovery_checked_until IS NULL OR recovery_checked_until <= ?3)",
@@ -1010,97 +1031,6 @@ pub fn recovery_proof(
     .transpose()
 }
 
-#[derive(Debug, Clone)]
-pub struct LegacyRecovery {
-    pub action_id: [u8; 32],
-    pub account_id: [u8; 32],
-    pub user_id: [u8; 32],
-    pub request_id: Vec<u8>,
-    pub worker_epoch: u64,
-    pub dispatch_state: String,
-}
-
-pub fn legacy_recoveries(
-    connection: &Connection,
-    limit: u32,
-) -> Result<Vec<LegacyRecovery>, Error> {
-    let rows = connection.query_all(
-        "SELECT a.action_id, r.account_id, a.user_id, a.client_request_id, a.worker_epoch, a.dispatch_state
-           FROM fund_actions a JOIN fund_requests r
-             ON r.user_id = a.user_id AND r.client_request_id = a.client_request_id
-          WHERE a.kind = 'recovery' AND a.recovery_fence_epoch IS NULL
-            AND a.dispatch_state IN ('dispatching', 'unknown', 'reconciled')
-            AND r.state IN ('reserved', 'unknown', 'executing')
-          ORDER BY a.updated_at, a.action_id LIMIT ?1",
-        params![limit as i64],
-        |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<Vec<u8>>(1)?, row.get::<Vec<u8>>(2)?, row.get::<Vec<u8>>(3)?, row.get::<i64>(4)?, row.get::<String>(5)?)),
-    ).map_err(sql)?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(LegacyRecovery {
-                action_id: row
-                    .0
-                    .try_into()
-                    .map_err(|_| Error::Invariant("bad legacy action"))?,
-                account_id: row
-                    .1
-                    .try_into()
-                    .map_err(|_| Error::Invariant("bad legacy account"))?,
-                user_id: row
-                    .2
-                    .try_into()
-                    .map_err(|_| Error::Invariant("bad legacy user"))?,
-                request_id: row.3,
-                worker_epoch: u64::try_from(row.4)
-                    .map_err(|_| Error::Invariant("bad legacy epoch"))?,
-                dispatch_state: row.5,
-            })
-        })
-        .collect()
-}
-
-pub fn record_legacy_recovery_fence(
-    connection: &mut UpdateConnection<'_>,
-    action: &LegacyRecovery,
-    fence_epoch: u64,
-    now: u64,
-) -> Result<(), Error> {
-    if action.dispatch_state == "dispatching" {
-        mark_unknown(
-            connection,
-            &action.action_id,
-            action.worker_epoch,
-            "upgrade_result_unknown",
-            now,
-        )?;
-        crate::repo::funds::set_request_state(
-            connection,
-            &action.user_id,
-            &action.request_id,
-            api_types::fund::FundRequestState::Unknown,
-            now,
-        )?;
-    }
-    connection
-        .execute(
-            "UPDATE fund_actions SET recovery_fence_epoch = ?3, updated_at = ?4
-          WHERE action_id = ?1 AND worker_epoch = ?2 AND kind = 'recovery'
-            AND recovery_fence_epoch IS NULL AND dispatch_state IN ('unknown', 'reconciled')",
-            params![
-                action.action_id.as_slice(),
-                action.worker_epoch as i64,
-                fence_epoch as i64,
-                now as i64
-            ],
-        )
-        .map_err(sql)?;
-    crate::cas::ensure_changed(
-        crate::cas::changes(connection)?,
-        "legacy recovery",
-        "stale legacy recovery",
-    )
-}
-
 pub fn save_transfer_result(
     c: &mut UpdateConnection<'_>,
     action_id: &[u8; 32],
@@ -1111,7 +1041,7 @@ pub fn save_transfer_result(
 }
 pub fn pending_transfer_results(c: &Connection) -> Result<Vec<Vec<u8>>, Error> {
     c.query_all(
-        "SELECT event FROM pending_transfer_results ORDER BY rowid LIMIT 4",
+        "SELECT p.event FROM pending_transfer_results p WHERE NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='result' AND w.work_id=p.action_id AND w.allowed=0) ORDER BY p.rowid LIMIT 4",
         params![],
         |r| r.get(0),
     )
@@ -1132,4 +1062,31 @@ pub fn transfer_has_competitor(
     window: u64,
 ) -> Result<bool, Error> {
     Ok(c.query_optional_scalar::<i64>("SELECT 1 FROM fund_actions a JOIN fund_requests r ON r.user_id=a.user_id AND r.client_request_id=a.client_request_id WHERE a.action_id != ?1 AND a.signer_id = (SELECT signer_id FROM fund_actions WHERE action_id=?1) AND (a.kind != 'recovery' OR r.account_id=?6) AND r.state != 'rejected' AND r.destination=?2 AND r.amount=?3 AND a.nonce BETWEEN ?4 AND ?5 AND a.dispatch_state IN ('dispatching','unknown','reconciled') LIMIT 1",params![row.action_id.as_slice(),row.destination.as_str(),row.amount as i64,row.nonce.saturating_sub(window) as i64,row.nonce.saturating_add(window) as i64,row.account_id.as_slice()]).map_err(sql)?.is_some())
+}
+
+pub type AllocationArrival = ([u8; 32], u64, [u8; 20]);
+
+/// Accepted allocations remain in transit until the destination ledger confirms arrival.
+pub fn allocation_arrivals(c: &Connection, now: u64) -> Result<Vec<AllocationArrival>, Error> {
+    let rows = c.query_all("SELECT a.action_id, a.worker_epoch, c.master_address
+        FROM fund_actions a JOIN fund_requests r ON r.user_id=a.user_id AND r.client_request_id=a.client_request_id
+        JOIN custody_accounts c ON c.account_id=r.account_id
+        WHERE a.kind='allocation' AND a.dispatch_state='reconciled' AND r.state='executing'
+          AND NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='fund' AND w.work_id=a.action_id AND w.allowed=0) AND ?1 >= 0 ORDER BY a.updated_at, a.action_id LIMIT 2",
+        params![now as i64], |r| Ok((r.get::<Vec<u8>>(0)?,r.get::<i64>(1)?,r.get::<Vec<u8>>(2)?))).map_err(sql)?;
+    rows.into_iter()
+        .map(|(id, epoch, address)| {
+            Ok((
+                id.try_into().map_err(|_| Error::Invariant("action id"))?,
+                u64::try_from(epoch).map_err(|_| Error::Overflow)?,
+                address
+                    .try_into()
+                    .map_err(|_| Error::Invariant("custody address"))?,
+            ))
+        })
+        .collect()
+}
+
+pub fn finished(c: &Connection, id: &[u8; 32]) -> Result<bool, Error> {
+    Ok(c.query_optional_scalar::<i64>("SELECT 1 FROM fund_actions a JOIN fund_requests r ON r.user_id=a.user_id AND r.client_request_id=a.client_request_id WHERE a.action_id=?1 AND r.state IN ('settled','rejected')",params![id.as_slice()]).map_err(sql)?.is_some())
 }

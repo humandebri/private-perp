@@ -3,6 +3,9 @@ use candid::{Principal, decode_one, encode_args};
 use pocket_ic::PocketIc;
 use pocket_ic_tests::{call_with_routed_outcalls, principal, query, update, update_args};
 
+#[path = "support/predeploy.rs"]
+mod predeploy;
+
 fn private<R: candid::CandidType + serde::de::DeserializeOwned>(
     pic: &PocketIc,
     canister: Principal,
@@ -41,6 +44,11 @@ fn private_with_outcalls<R: candid::CandidType + serde::de::DeserializeOwned>(
     route: impl Fn(&pocket_ic_tests::CapturedHttpCall) -> Result<(u16, Vec<u8>), (u64, String)>,
 ) -> (Result<R, ErrorCode>, Vec<pocket_ic_tests::CapturedHttpCall>) {
     let client = pocket_ic_tests::envelope::client(91);
+    let payload = if role == "core" {
+        candid::encode_one(api_types::Blob::from(payload)).unwrap()
+    } else {
+        payload
+    };
     let (request, aad) = client
         .prepare_encoded_for_role(pic, canister, caller, method, &payload, Some(role))
         .unwrap();
@@ -70,7 +78,8 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
         .expect("set PRIVATE_PERP_UNIFIED_WASM to the built unified Wasm");
     pic.install_canister(
         canister,
-        std::fs::read(&path).expect("read Wasm"),
+        std::fs::read(std::env::var("PRIVATE_PERP_BASELINE_WASM").unwrap_or_else(|_| path.clone()))
+            .expect("read initial Wasm"),
         encode_args((admin,)).unwrap(),
         None,
     );
@@ -198,6 +207,10 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
     .unwrap();
     configured.unwrap();
 
+    if std::env::var("PRIVATE_PERP_PROFILE").as_deref() == Ok("empty") {
+        predeploy::profile(&pic, canister, admin);
+        return;
+    }
     // A real signed login writes the vault's recovery journal through self-calls.
     let caller = principal(53);
     let secret = [7u8; 32];
@@ -304,6 +317,512 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
         matches!(no_funds, Err(ErrorCode::InsufficientFunds { .. })),
         "{no_funds:?}"
     );
+    if std::env::var_os("PRIVATE_PERP_PROFILE").is_some() {
+        let _: api_types::Blob = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "provision_reserve_account",
+            candid::encode_one(session.clone()).unwrap(),
+        )
+        .unwrap();
+        predeploy::profile(&pic, canister, admin);
+        return;
+    }
+    if std::env::var_os("PRIVATE_PERP_BASELINE_WASM").is_some() {
+        let reserve: api_types::Blob = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "provision_reserve_account",
+            candid::encode_one(session.clone()).unwrap(),
+        )
+        .unwrap();
+        let now = pocket_ic_tests::envelope::now_ms(&pic);
+        let (credited, _): (Result<u32, ErrorCode>, _) =
+            call_with_routed_outcalls(
+                &pic,
+                canister,
+                Principal::anonymous(),
+                "reconcile_deposits",
+                (reserve.clone(),),
+                |_| {
+                    Ok((200, serde_json::json!([{
+                "hash":format!("0x{}", "ab".repeat(32)), "time":now,
+                "delta":{"type":"internalTransfer","user":format!("0x{}",hex::encode(eoa)),
+                    "destination":format!("0x{}",hex::encode(reserve.as_ref())), "usdc":"1"}
+            }]).to_string().into_bytes()))
+                },
+            )
+            .unwrap();
+        assert_eq!(credited.unwrap(), 1);
+        let pending: api_types::fund::FundRequestAccepted = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "request_allocation",
+            candid::encode_one(&allocation).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pending.state, api_types::fund::FundRequestState::Reserved);
+    }
+    if std::env::var_os("PRIVATE_PERP_UNIFIED_MOCK").is_none()
+        && std::env::var_os("PRIVATE_PERP_BASELINE_WASM").is_none()
+    {
+        let reserve: api_types::Blob = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "provision_reserve_account",
+            candid::encode_one(session.clone()).unwrap(),
+        )
+        .unwrap();
+        let denied: Result<(), ErrorCode> = private(
+            &pic,
+            canister,
+            principal(54),
+            "vault",
+            "confirm_deposit",
+            candid::encode_one(session.clone()).unwrap(),
+        );
+        assert!(matches!(denied, Err(ErrorCode::Unauthenticated { .. })));
+        let denied: Result<(), ErrorCode> = update(
+            &pic,
+            canister,
+            caller,
+            "refresh_trading_balance",
+            session.clone(),
+        )
+        .unwrap();
+        assert!(matches!(denied, Err(ErrorCode::Unauthenticated { .. })));
+        let stamp = pocket_ic_tests::envelope::now_ms(&pic);
+        for _ in 0..2 {
+            let (confirmed, calls): (Result<(), ErrorCode>, _) = private_with_outcalls(
+                &pic,
+                canister,
+                caller,
+                "vault",
+                "confirm_deposit",
+                candid::encode_one(session.clone()).unwrap(),
+                |call| {
+                    assert_eq!(
+                        call.replication,
+                        pocket_ic::common::rest::CanisterHttpReplication::NonReplicated
+                    );
+                    let request: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                    assert_eq!(request["type"], "userNonFundingLedgerUpdates");
+                    assert_eq!(
+                        request["user"],
+                        format!("0x{}", hex::encode(reserve.as_ref()))
+                    );
+                    Ok((
+                        200,
+                        serde_json::json!([{"hash":format!("0x{}", "aa".repeat(32)), "time":stamp,
+                        "delta":{"type":"internalTransfer", "user":format!("0x{}",hex::encode(eoa)),
+                        "destination":format!("0x{}",hex::encode(reserve.as_ref())), "usdc":"1"}}])
+                        .to_string()
+                        .into_bytes(),
+                    ))
+                },
+            );
+            confirmed.unwrap();
+            assert_eq!(calls.len(), 1);
+        }
+        let funds: Result<api_types::fund::FundStatus, ErrorCode> =
+            query(&pic, canister, caller, "get_fund_status", session.clone()).unwrap();
+        assert_eq!(
+            funds.unwrap().reserve_unallocated,
+            1_000_000,
+            "repeated confirmation must not credit twice"
+        );
+        // Let both workers quiesce, then prove a stored reserve creates no HTTP work.
+        for _ in 0..3 {
+            pic.advance_time(std::time::Duration::from_secs(5));
+            for _ in 0..30 {
+                pic.tick();
+            }
+        }
+        let idle_balance = pic.cycle_balance(canister);
+        pic.advance_time(std::time::Duration::from_secs(600));
+        for _ in 0..50 {
+            pic.tick();
+        }
+        assert!(
+            pic.get_canister_http().is_empty(),
+            "holding reserve must not poll HL"
+        );
+        assert!(
+            idle_balance - pic.cycle_balance(canister) < 20_000_000,
+            "no repeating idle timer"
+        );
+        // UI cycle status reads write samples but must not restart idle timers.
+        for method in ["vault_get_cycles_status", "core_get_cycles_status"] {
+            let status: Result<api_types::operations_status::CyclesStatus, ErrorCode> =
+                update(&pic, canister, caller, method, ()).unwrap();
+            status.unwrap();
+        }
+        for _ in 0..30 {
+            pic.tick();
+        }
+        let status_idle_balance = pic.cycle_balance(canister);
+        pic.advance_time(std::time::Duration::from_secs(5));
+        for _ in 0..50 {
+            pic.tick();
+        }
+        assert!(pic.get_canister_http().is_empty());
+        assert!(
+            status_idle_balance - pic.cycle_balance(canister) < 20_000_000,
+            "status sampling must not restart idle workers"
+        );
+
+        let cleared: Result<(), ErrorCode> =
+            update(&pic, canister, admin, "clear_emergency_stop", ()).unwrap();
+        cleared.unwrap();
+        let requested: api_types::fund::FundRequestAccepted = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "request_allocation",
+            candid::encode_one(allocation.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(requested.state, api_types::fund::FundRequestState::Reserved);
+        pic.advance_time(std::time::Duration::from_secs(5));
+        let mut sends = 0;
+        for _ in 0..100 {
+            pic.tick();
+            for request in pic.get_canister_http() {
+                assert!(request.url.ends_with("/exchange"));
+                sends += 1;
+                pic.mock_canister_http_response(
+                    pocket_ic::common::rest::MockCanisterHttpResponse {
+                        subnet_id: request.subnet_id,
+                        request_id: request.request_id,
+                        response: pocket_ic::common::rest::CanisterHttpResponse::CanisterHttpReply(
+                            pocket_ic::common::rest::CanisterHttpReply {
+                                status: 200,
+                                headers: vec![],
+                                body: br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+                            },
+                        ),
+                        additional_responses: vec![],
+                    },
+                );
+            }
+        }
+        assert_eq!(
+            sends, 1,
+            "a committed allocation must wake a stopped worker"
+        );
+        let funds: Result<api_types::fund::FundStatus, ErrorCode> =
+            query(&pic, canister, caller, "get_fund_status", session.clone()).unwrap();
+        assert_eq!(funds.unwrap().reserve_unallocated, 600_000);
+        pic.advance_time(std::time::Duration::from_secs(5));
+        let mut arrival_checks = 0;
+        for _ in 0..100 {
+            pic.tick();
+            for request in pic.get_canister_http() {
+                assert_eq!(
+                    request.replication,
+                    pocket_ic::common::rest::CanisterHttpReplication::NonReplicated
+                );
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body["type"], "userNonFundingLedgerUpdates");
+                arrival_checks += 1;
+                pic.mock_canister_http_response(pocket_ic::common::rest::MockCanisterHttpResponse {
+                    subnet_id:request.subnet_id,request_id:request.request_id,
+                    response:pocket_ic::common::rest::CanisterHttpResponse::CanisterHttpReply(
+                        pocket_ic::common::rest::CanisterHttpReply {status:200,headers:vec![],body:serde_json::json!([
+                            {"hash":format!("0x{}","bb".repeat(32)),"time":pocket_ic_tests::envelope::now_ms(&pic),
+                            "delta":{"type":"internalTransfer","user":format!("0x{}",hex::encode(reserve.as_ref())),
+                                "destination":body["user"],"usdc":"0.4"}}]).to_string().into_bytes()}),additional_responses:vec![],
+                });
+            }
+        }
+        assert_eq!(
+            arrival_checks, 1,
+            "only the pending allocation destination is observed"
+        );
+
+        pic.advance_time(std::time::Duration::from_secs(60));
+        for _ in 0..50 {
+            pic.tick();
+        }
+        assert!(
+            pic.get_canister_http().is_empty(),
+            "settled allocation must stop the worker"
+        );
+        let configured: Result<(), ErrorCode> = update(
+            &pic,
+            canister,
+            admin,
+            "core_configure_market_threshold",
+            api_types::operations_status::MarketThreshold {
+                market: "ETH".into(),
+                expected_index: 1,
+                min_day_notional_usdc: 1,
+                max_spread_bps: 100,
+                min_each_side_depth_usdc: 1,
+            },
+        )
+        .unwrap();
+        configured.unwrap();
+        let rotated: Result<Vec<u8>, ErrorCode> = update(
+            &pic,
+            canister,
+            Principal::anonymous(),
+            "core_rotate_hpke_key",
+            (),
+        )
+        .unwrap();
+        rotated.unwrap();
+        let (refreshed, calls): (Result<(), ErrorCode>, _) = private_with_outcalls(
+            &pic,
+            canister,
+            caller,
+            "core",
+            "refresh_trading",
+            candid::encode_one(session.clone()).unwrap(),
+            |call| {
+                assert_eq!(
+                    call.replication,
+                    pocket_ic::common::rest::CanisterHttpReplication::NonReplicated
+                );
+                let request: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                let body = match request["type"].as_str().unwrap() {
+                    "metaAndAssetCtxs" => {
+                        serde_json::json!([{"universe":[{"name":"BTC"},{"name":"ETH"}]},[{"dayNtlVlm":"100"},{"dayNtlVlm":"100"}]])
+                    }
+                    "l2Book" => {
+                        serde_json::json!({"coin":request["coin"], "time":pocket_ic_tests::envelope::now_ms(&pic),
+                        "levels":[[{"px":"99.9","sz":"1"}],[{"px":"100.1","sz":"1"}]]})
+                    }
+                    "clearinghouseState" => {
+                        serde_json::json!({"marginSummary":{"accountValue":"0.4","totalMarginUsed":"0.1"},
+                        "assetPositions":[{"position":{"coin":"ETH","szi":"0.001","entryPx":"100","liquidationPx":"50",
+                            "unrealizedPnl":"0","leverage":{"value":3},"marginMode":"cross"}}], "withdrawable":"0.3"})
+                    }
+                    "userFills" => serde_json::json!([]),
+                    other => panic!("unexpected explicit refresh {other}"),
+                };
+                Ok((200, body.to_string().into_bytes()))
+            },
+        );
+        refreshed.unwrap();
+        assert!(
+            calls.len() >= 6,
+            "explicit refresh must fetch market and account state"
+        );
+        pic.advance_time(std::time::Duration::from_secs(5));
+        let mut observed = 0;
+        for _ in 0..100 {
+            pic.tick();
+            for request in pic.get_canister_http() {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body["type"], "clearinghouseState");
+                observed += 1;
+                pic.mock_canister_http_response(pocket_ic::common::rest::MockCanisterHttpResponse {
+                    subnet_id:request.subnet_id, request_id:request.request_id,
+                    response:pocket_ic::common::rest::CanisterHttpResponse::CanisterHttpReply(
+                        pocket_ic::common::rest::CanisterHttpReply {status:200,headers:vec![],
+                            body:br#"{"assetPositions":[],"marginSummary":{"accountValue":"0.4","totalMarginUsed":"0"},"withdrawable":"0.4"}"#.to_vec()}),
+                    additional_responses:vec![],
+                });
+            }
+        }
+        assert_eq!(observed, 1, "an open position must keep monitoring alive");
+        pic.advance_time(std::time::Duration::from_secs(10));
+        for _ in 0..30 {
+            pic.tick();
+        }
+        let quiet = pic.cycle_balance(canister);
+        pic.advance_time(std::time::Duration::from_secs(600));
+        for _ in 0..50 {
+            pic.tick();
+        }
+        assert!(
+            pic.get_canister_http().is_empty(),
+            "a closed position must stop monitoring"
+        );
+        assert!(quiet - pic.cycle_balance(canister) < 20_000_000);
+        let mut unknown = allocation.clone();
+        unknown.client_request_id = vec![92; 32].into();
+        unknown.amount = 100_000;
+        let _: api_types::fund::FundRequestAccepted = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "request_allocation",
+            candid::encode_one(unknown).unwrap(),
+        )
+        .unwrap();
+        let mut posts = 0;
+        let mut checks = 0;
+        for _ in 0..24 {
+            pic.advance_time(std::time::Duration::from_secs(5));
+            for _ in 0..50 {
+                pic.tick();
+                for request in pic.get_canister_http() {
+                    assert_eq!(
+                        request.replication,
+                        pocket_ic::common::rest::CanisterHttpReplication::NonReplicated
+                    );
+                    if request.url.ends_with("/exchange") {
+                        posts += 1;
+                    } else {
+                        checks += 1;
+                    }
+                    pic.mock_canister_http_response(
+                        pocket_ic::common::rest::MockCanisterHttpResponse {
+                            subnet_id: request.subnet_id,
+                            request_id: request.request_id,
+                            response:
+                                pocket_ic::common::rest::CanisterHttpResponse::CanisterHttpReply(
+                                    pocket_ic::common::rest::CanisterHttpReply {
+                                        status: 503,
+                                        headers: vec![],
+                                        body: b"unavailable".to_vec(),
+                                    },
+                                ),
+                            additional_responses: vec![],
+                        },
+                    );
+                }
+            }
+        }
+        assert_eq!(posts, 1, "unknown POST must never be retried");
+        assert_eq!(checks, 0, "unknown sends require manual result checks");
+        let work: Vec<(String, Vec<u8>, u64)> = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "get_manual_work",
+            candid::encode_one(session.clone()).unwrap(),
+        )
+        .unwrap();
+        let item = work
+            .iter()
+            .find(|(kind, _, _)| kind == "fund")
+            .expect("stopped fund task")
+            .clone();
+        let payload = candid::encode_args((
+            session.clone(),
+            item.0.clone(),
+            api_types::Blob::from(item.1.clone()),
+            item.2,
+        ))
+        .unwrap();
+        let denied: Result<(), ErrorCode> = private(
+            &pic,
+            canister,
+            principal(199),
+            "vault",
+            "resume_manual_work",
+            payload.clone(),
+        );
+        assert!(denied.is_err(), "another principal cannot resume the task");
+        let resumed: Result<(), ErrorCode> = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "resume_manual_work",
+            payload.clone(),
+        );
+        resumed.unwrap();
+        let duplicate: Result<(), ErrorCode> = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "resume_manual_work",
+            payload,
+        );
+        assert!(duplicate.is_err(), "one permission cannot be granted twice");
+        let mut manual_checks = 0;
+        for _ in 0..24 {
+            pic.advance_time(std::time::Duration::from_secs(5));
+            for _ in 0..50 {
+                pic.tick();
+                for request in pic.get_canister_http() {
+                    assert!(
+                        !request.url.ends_with("/exchange"),
+                        "manual result check must not resend"
+                    );
+                    manual_checks += 1;
+                    let running: Result<(), ErrorCode> = private(
+                        &pic,
+                        canister,
+                        caller,
+                        "vault",
+                        "resume_manual_work",
+                        candid::encode_args((
+                            session.clone(),
+                            item.0.clone(),
+                            api_types::Blob::from(item.1.clone()),
+                            item.2 + 1,
+                        ))
+                        .unwrap(),
+                    );
+                    assert!(running.is_err(), "in-flight attempts cannot be resumed");
+                    pic.mock_canister_http_response(
+                        pocket_ic::common::rest::MockCanisterHttpResponse {
+                            subnet_id: request.subnet_id,
+                            request_id: request.request_id,
+                            response:
+                                pocket_ic::common::rest::CanisterHttpResponse::CanisterHttpReply(
+                                    pocket_ic::common::rest::CanisterHttpReply {
+                                        status: 503,
+                                        headers: vec![],
+                                        body: b"unavailable".to_vec(),
+                                    },
+                                ),
+                            additional_responses: vec![],
+                        },
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            manual_checks, 1,
+            "manual permission allows exactly one failed observation"
+        );
+        let stale: Result<(), ErrorCode> = private(
+            &pic,
+            canister,
+            caller,
+            "vault",
+            "resume_manual_work",
+            candid::encode_args((
+                session.clone(),
+                item.0.clone(),
+                api_types::Blob::from(item.1.clone()),
+                item.2,
+            ))
+            .unwrap(),
+        );
+        assert!(
+            stale.is_err(),
+            "an old generation cannot restart a newer failed attempt"
+        );
+        let quiet = pic.cycle_balance(canister);
+        pic.advance_time(std::time::Duration::from_secs(60));
+        for _ in 0..50 {
+            pic.tick();
+        }
+        assert!(pic.get_canister_http().is_empty());
+        assert!(
+            quiet - pic.cycle_balance(canister) < 20_000_000,
+            "unresolved task must not keep a timer alive"
+        );
+    }
     if std::env::var_os("PRIVATE_PERP_UNIFIED_MOCK").is_some() {
         let credit: Result<(), ErrorCode> = update_args(
             &pic,
@@ -613,6 +1132,29 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
     for _ in 0..200 {
         pic.tick();
     }
+    let before: Result<api_types::fund::FundStatus, ErrorCode> =
+        query(&pic, canister, caller, "get_fund_status", session.clone()).unwrap();
+    let before = before.unwrap();
+    let recovery_snapshot = std::env::var_os("PRIVATE_PERP_BASELINE_WASM").map(|_| {
+        pic.take_canister_snapshot(canister, None, None)
+            .expect("pre-upgrade snapshot")
+    });
+    let stopped_before: Option<Vec<(String, Vec<u8>, u64)>> =
+        if std::env::var_os("PRIVATE_PERP_BASELINE_WASM").is_none() {
+            Some(
+                private(
+                    &pic,
+                    canister,
+                    caller,
+                    "vault",
+                    "get_manual_work",
+                    candid::encode_one(session.clone()).unwrap(),
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        };
     pic.upgrade_canister(
         canister,
         std::fs::read(&path).unwrap(),
@@ -620,6 +1162,37 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
         None,
     )
     .expect("upgrade");
+    let stopped_after: Vec<(String, Vec<u8>, u64)> = private(
+        &pic,
+        canister,
+        caller,
+        "vault",
+        "get_manual_work",
+        candid::encode_one(session.clone()).unwrap(),
+    )
+    .unwrap();
+    if let Some(stopped_before) = stopped_before {
+        assert_eq!(
+            stopped_before, stopped_after,
+            "upgrade must preserve stopped permissions"
+        );
+    }
+    let saved_admin: Principal =
+        query(&pic, canister, admin, "application_administrator", ()).unwrap();
+    assert_eq!(saved_admin, admin);
+    let after: Result<api_types::fund::FundStatus, ErrorCode> =
+        query(&pic, canister, caller, "get_fund_status", session.clone()).unwrap();
+    assert_eq!(
+        before,
+        after.unwrap(),
+        "balances and reservations must survive the upgrade"
+    );
+    let owner: Result<api_types::Blob, ErrorCode> =
+        update(&pic, canister, caller, "whoami", session.clone()).unwrap();
+    assert!(!owner.unwrap().is_empty(), "session must survive");
+    let denied: Result<api_types::Blob, ErrorCode> =
+        update(&pic, canister, principal(54), "whoami", session.clone()).unwrap();
+    assert!(matches!(denied, Err(ErrorCode::Unauthenticated { .. })));
     for role in ["vault", "core"] {
         let status: Result<(bool, bool), ErrorCode> = query(
             &pic,
@@ -659,4 +1232,53 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
     )
     .unwrap();
     configured.unwrap();
+    if let Some(snapshot) = recovery_snapshot {
+        if std::env::var_os("PRIVATE_PERP_ROLLBACK").is_some() {
+            // No exchange side effect has occurred in this isolated fixture.
+            pic.load_canister_snapshot(canister, None, snapshot.id)
+                .expect("restore old snapshot");
+            let restored: Result<api_types::fund::FundStatus, ErrorCode> =
+                query(&pic, canister, caller, "get_fund_status", session.clone()).unwrap();
+            assert_eq!(before, restored.unwrap());
+            let restored_admin: Principal =
+                query(&pic, canister, admin, "application_administrator", ()).unwrap();
+            assert_eq!(restored_admin, admin);
+            return;
+        }
+        let cleared: Result<(), ErrorCode> =
+            update(&pic, canister, admin, "clear_emergency_stop", ()).unwrap();
+        cleared.unwrap();
+        // Idle throttling must not delay a reserved allocation by one minute.
+        pic.advance_time(std::time::Duration::from_secs(5));
+        let mut sends = 0;
+        for _ in 0..100 {
+            pic.tick();
+            for request in pic.get_canister_http() {
+                let body = if request.url.ends_with("/exchange") {
+                    sends += 1;
+                    br#"{"status":"ok","response":{"type":"default"}}"#.to_vec()
+                } else {
+                    b"[]".to_vec()
+                };
+                pic.mock_canister_http_response(
+                    pocket_ic::common::rest::MockCanisterHttpResponse {
+                        subnet_id: request.subnet_id,
+                        request_id: request.request_id,
+                        response: pocket_ic::common::rest::CanisterHttpResponse::CanisterHttpReply(
+                            pocket_ic::common::rest::CanisterHttpReply {
+                                status: 200,
+                                headers: vec![],
+                                body,
+                            },
+                        ),
+                        additional_responses: vec![],
+                    },
+                );
+            }
+        }
+        assert_eq!(
+            sends, 1,
+            "pending allocation must dispatch on the first 5-second timer"
+        );
+    }
 }

@@ -4,7 +4,7 @@
 
 現在の配置・権限・検証手順は [単一 Canister 化](docs/phase-3/single-canister.md) を参照してください。旧設計書の五 Canister・SNS/guard 構成は公開試験版の配置には適用しません。
 
-2026-09-29現在、公開Canisterは cycles 補充待ちで停止中です。市場観測の合意方式の修正はローカル検証済みですが、アップグレードは残高不足で未反映です。[最新の受入記録](docs/phase-3/testnet-acceptance.md)を参照してください。
+2026-09-29現在、公開Canisterは cycles 補充待ちで停止中です。ローカル実装はHTTP outcall v2の非複製に統一し、未完了処理がないときはワーカーを停止する方式へ変更しています。公開環境には未反映です。[最新の受入記録](docs/phase-3/testnet-acceptance.md)を参照してください。
 
 - 実装：`frontend/`（ローカル実接続）、`crates/`（ICP Canister）、`tools/mock-hl/`（ローカルvenue）
 - 起動・試験・制限：`frontend/README.md`

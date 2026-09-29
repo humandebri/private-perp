@@ -822,7 +822,6 @@ export interface _SERVICE {
   append: ActorMethod<[journal_SendIntent], journal_Result>
   append_recovery_event: ActorMethod<[journal_RecoveryEvent], journal_Result>
   application_administrator: ActorMethod<[], Principal>
-  begin_recovery_migration: ActorMethod<[], core_Result>
   builder_fee_mock_status: ActorMethod<[vault_SessionHandle], vault_Result>
   caller_principal: ActorMethod<[], Principal>
   cancel_order: ActorMethod<[core_HpkeRequest], core_Result_1>
@@ -861,7 +860,6 @@ export interface _SERVICE {
   core_version: ActorMethod<[], string>
   eligibility_status: ActorMethod<[vault_SessionHandle], vault_Result_2>
   finish_recovery: ActorMethod<[core_RecoveryFenceToken], core_Result>
-  finish_recovery_migration: ActorMethod<[], core_Result>
   get_account_snapshot: ActorMethod<[core_HpkeRequest], core_Result_1>
   get_agent_approval: ActorMethod<[Uint8Array | number[], bigint], vault_Result_3>
   get_agent_status: ActorMethod<[core_SessionHandle], core_Result_2>
@@ -891,7 +889,6 @@ export interface _SERVICE {
   >
   list_orders: ActorMethod<[core_HpkeRequest], core_Result_1>
   mark_recovery_unknown: ActorMethod<[core_RecoveryFenceToken], core_Result>
-  migrate_recovery: ActorMethod<[core_PrepareRecovery], core_Result_10>
   open_session: ActorMethod<[vault_OpenSessionRequest], vault_Result_18>
   pause_for_recovery: ActorMethod<[], policy_Result>
   policy_configure_rest_budget: ActorMethod<[policy_RestBudgetConfig], policy_Result>
@@ -902,8 +899,8 @@ export interface _SERVICE {
   recovery_event: ActorMethod<[Uint8Array | number[]], journal_Result_3>
   recovery_events: ActorMethod<[bigint, number], journal_Result_4>
   recovery_head: ActorMethod<[], journal_Result>
-  recovery_migration_locked: ActorMethod<[], core_Result_11>
   refresh_market: ActorMethod<[], core_Result>
+  refresh_trading_balance: ActorMethod<[vault_SessionHandle], vault_Result_1>
   resolve_unknown_action: ActorMethod<[Uint8Array | number[], boolean, string], vault_Result_1>
   resolve_unknown_order_preflight: ActorMethod<
     [Uint8Array | number[], core_PreflightResolution],

@@ -350,7 +350,12 @@ const BuilderFeeConsent = IDL.Record({ claims: BuilderFeeClaims, eoa_signature: 
 const result = <T>(type: IDL.Type<T>, bytes: Uint8Array): T =>
   unwrap(decode<{ Ok: T } | { Err: unknown }>(IDL.Variant({ Ok: type, Err: ErrorCode }), bytes))
 
+export type ManualWork = [string, Uint8Array | number[], bigint]
 export const vaultPrivateCodec = {
+  manualWork: (bytes: Uint8Array): ManualWork[] =>
+    result(IDL.Vec(IDL.Tuple(IDL.Text, Blob, IDL.Nat64)), bytes) as ManualWork[],
+  resumeWork: (session: SessionHandle, item: ManualWork) =>
+    new Uint8Array(IDL.encode([Session, IDL.Text, Blob, IDL.Nat64], [session, ...item])),
   session: (session: SessionHandle) => encode(Session, session),
   account: (bytes: Uint8Array): Uint8Array => Uint8Array.from(result(Blob, bytes)),
   eligibilitySigningQuery: (session: SessionHandle, expiresAt: bigint) =>

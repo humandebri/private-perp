@@ -1087,3 +1087,119 @@ pub fn upgrade(pic: &PocketIc, canister: Principal, file: &str, init_arg: Vec<u8
     pic.upgrade_canister(canister, wasm(file), init_arg, None)
         .unwrap_or_else(|error| panic!("upgrade {file}: {error:?}"));
 }
+
+/// Explicit user action in tests; never called by a sweep helper.
+pub fn resume_manual_work(
+    pic: &PocketIc,
+    canister: Principal,
+    caller: Principal,
+    session: &api_types::auth::SessionHandle,
+    core: bool,
+    kind: &str,
+) -> usize {
+    let client = envelope::client(0xEA);
+    let wrap = |payload: Vec<u8>| {
+        if core {
+            candid::encode_one(api_types::Blob::from(payload)).unwrap()
+        } else {
+            payload
+        }
+    };
+    let work: Result<Vec<(String, Vec<u8>, u64)>, api_types::error::ErrorCode> = client
+        .call_encoded(
+            pic,
+            canister,
+            caller,
+            "get_manual_work",
+            &wrap(candid::encode_one(session).unwrap()),
+        )
+        .unwrap();
+    let mut count = 0;
+    for item in work.unwrap().into_iter().filter(|item| item.0 == kind) {
+        let result: Result<(), api_types::error::ErrorCode> = client
+            .call_encoded(
+                pic,
+                canister,
+                caller,
+                "resume_manual_work",
+                &wrap(
+                    candid::encode_args((
+                        session.clone(),
+                        item.0,
+                        api_types::Blob::from(item.1),
+                        item.2,
+                    ))
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        result.unwrap();
+        count += 1;
+    }
+    count
+}
+
+/// A rejected manual grant must retain the exact stopped row and its generation.
+pub fn assert_manual_work_blocked(
+    pic: &PocketIc,
+    canister: Principal,
+    caller: Principal,
+    session: &api_types::auth::SessionHandle,
+    core: bool,
+    kind: &str,
+    id: Option<&[u8]>,
+    reason: &str,
+) {
+    let client = envelope::client(0xEB);
+    let wrap = |payload: Vec<u8>| {
+        if core {
+            candid::encode_one(api_types::Blob::from(payload)).unwrap()
+        } else {
+            payload
+        }
+    };
+    let list = || {
+        let result: Result<Vec<(String, Vec<u8>, u64)>, api_types::error::ErrorCode> = client
+            .call_encoded(
+                pic,
+                canister,
+                caller,
+                "get_manual_work",
+                &wrap(candid::encode_one(session).unwrap()),
+            )
+            .unwrap();
+        result.unwrap()
+    };
+    let before = list();
+    let item = before
+        .iter()
+        .find(|item| item.0 == kind && id.is_none_or(|id| item.1 == id))
+        .expect("stopped work");
+    for _ in 0..2 {
+        let result: Result<(), api_types::error::ErrorCode> = client
+            .call_encoded(
+                pic,
+                canister,
+                caller,
+                "resume_manual_work",
+                &wrap(
+                    candid::encode_args((
+                        session.clone(),
+                        item.0.clone(),
+                        api_types::Blob::from(item.1.clone()),
+                        item.2,
+                    ))
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        assert!(
+            matches!(result, Err(api_types::error::ErrorCode::BadRequest { detail, .. }) if detail.contains(reason))
+        );
+        assert_eq!(
+            list(),
+            before,
+            "denial must preserve stopped status and generation"
+        );
+    }
+}

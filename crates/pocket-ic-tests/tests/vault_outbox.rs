@@ -55,6 +55,17 @@ fn budget_denial_before_post_retries_without_losing_the_action() {
     clear.expect("clear_recovery_pause");
     pic.advance_time(Duration::from_secs(31));
     pic.tick();
+    let still_stopped: Result<u32, ErrorCode> =
+        update(&pic, vault, caller, "test_sweep_now", ()).unwrap();
+    assert_eq!(
+        still_stopped.unwrap(),
+        0,
+        "budget recovery does not auto-retry a failed send"
+    );
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &session, false, "fund"),
+        1
+    );
     let sent: Result<u32, ErrorCode> = call_with_mocked_outcall(
         &pic,
         vault,
@@ -508,7 +519,20 @@ fn journal_outage_after_allocation_post_keeps_reservation_for_reconciliation() {
         events.expect("events").items[0].state,
         FundRequestState::Reserved
     );
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &session, false, "fund"),
+        1
+    );
+    assert_eq!(
+        status(&pic, vault, caller, &session).unknowns.len(),
+        1,
+        "lost callback moves forward to unknown, never queued"
+    );
     pic.start_canister(journal, Some(controller)).unwrap();
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &session, false, "result"),
+        1
+    );
     let retried: Result<u32, ErrorCode> =
         update(&pic, vault, caller, "test_sweep_now", ()).unwrap();
     assert_eq!(
@@ -1162,6 +1186,10 @@ fn payout_rejection_and_unknown_are_handled() {
     let wire: serde_json::Value = serde_json::from_slice(&captured.unwrap().body).unwrap();
     let nonce = wire["nonce"].as_u64().unwrap();
     pic.advance_time(Duration::from_secs(61));
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &session, false, "fund"),
+        1
+    );
     let history=serde_json::json!([{"time":nonce,"hash":format!("0x{}",hex::encode([68;32])),"delta":{"type":"internalTransfer","user":format!("0x{}",hex::encode(reserve)),"destination":format!("0x{}",hex::encode(eoa)),"usdc":"0.25"}}]).to_string().into_bytes();
     let (swept_again, captured): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
         &pic,

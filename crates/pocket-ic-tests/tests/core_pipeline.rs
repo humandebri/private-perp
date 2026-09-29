@@ -311,6 +311,16 @@ fn uncertain_leverage_blocks_a_different_setting() {
     .expect("first sweep call");
     assert_eq!(outcome.expect("first sweep").dispatched, 1);
     assert_eq!(exchange_types(&first_calls), ["updateLeverage"]);
+    pocket_ic_tests::assert_manual_work_blocked(
+        &pic,
+        core,
+        user.caller,
+        &user.session,
+        true,
+        "order",
+        Some(first.order_id.as_ref()),
+        "レバレッジ設定",
+    );
 
     let (outcome, second_calls) =
         call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
@@ -334,6 +344,11 @@ fn uncertain_leverage_blocks_a_different_setting() {
     )
     .expect("resolution call");
     resolved.expect("resolve first leverage change");
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, core, user.caller, &user.session, true, "order"),
+        1,
+        "the second pre-send failure needs explicit permission"
+    );
     pic.advance_time(std::time::Duration::from_secs(6));
     pic.tick();
     let (outcome, third_calls) =
@@ -465,7 +480,7 @@ fn the_pipeline_dispatches_and_reconciles_orders() {
     for call in &info {
         assert_eq!(
             call.replication,
-            pocket_ic::common::rest::CanisterHttpReplication::FullyReplicated,
+            pocket_ic::common::rest::CanisterHttpReplication::NonReplicated,
         );
         let query: serde_json::Value = serde_json::from_slice(&call.body).expect("json");
         assert_eq!(query["user"], expected_user, "取引所アドレスで照会する");
@@ -943,6 +958,27 @@ fn lost_order_reply_recovers_by_cloid_and_ingests_decimal_rebate() {
         OrderState::Unknown
     );
     pic.advance_time(std::time::Duration::from_secs(130));
+    let (automatic, calls): (Result<api_types::order::SweepOutcome, ErrorCode>, _) =
+        call_with_routed_outcalls(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED),
+        )
+        .unwrap();
+    automatic.unwrap();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| String::from_utf8_lossy(&c.body).contains("orderStatus")),
+        "unknown order must not be checked automatically"
+    );
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, core, user.caller, &user.session, true, "order"),
+        1
+    );
     let (outcome,calls): (Result<api_types::order::SweepOutcome,ErrorCode>,_) = call_with_routed_outcalls(
         &pic,core,controller,"test_sweep_now",(),|call| {
             let q: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
@@ -971,4 +1007,159 @@ fn lost_order_reply_recovers_by_cloid_and_ingests_decimal_rebate() {
         .unwrap();
     assert_eq!(fills.items.len(), 1);
     assert_eq!(fills.items[0].fee, -120);
+}
+
+#[test]
+fn failed_monitor_stops_until_owner_resumes_without_stopping_other_accounts() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let a = provision_user(&pic, vault, core, controller, 217, b"monitor-a");
+    let b = provision_user(&pic, vault, core, controller, 218, b"monitor-b");
+    for user in [&a, &b] {
+        let _ = account_snapshot(&pic, core, user.caller, &user.session);
+        let seeded: Result<u32, ErrorCode> = update_args(
+            &pic,
+            core,
+            user.caller,
+            "test_ingest_positions",
+            (
+                user.session.clone(),
+                String::from_utf8(POSITIONS.to_vec()).unwrap(),
+            ),
+        )
+        .unwrap();
+        seeded.unwrap();
+    }
+    let address = format!("0x{}", hex::encode(a.trading_address));
+    let (first, calls): (Result<api_types::order::SweepOutcome, ErrorCode>, _) =
+        call_with_routed_outcalls(&pic, core, controller, "test_sweep_now", (), |call| {
+            let body: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+            if body["user"] == address {
+                return Ok((503, b"unavailable".to_vec()));
+            }
+            route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED)(call)
+        })
+        .unwrap();
+    first.unwrap();
+    assert!(!calls.is_empty());
+    pic.advance_time(std::time::Duration::from_secs(10));
+    let (second, calls): (Result<api_types::order::SweepOutcome, ErrorCode>, _) =
+        call_with_routed_outcalls(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED),
+        )
+        .unwrap();
+    second.unwrap();
+    assert!(!calls.is_empty(), "other account must keep monitoring");
+    assert!(calls.iter().all(
+        |call| serde_json::from_slice::<serde_json::Value>(&call.body).unwrap()["user"] != address
+    ));
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, core, a.caller, &a.session, true, "monitor"),
+        1
+    );
+    let (third, calls): (Result<api_types::order::SweepOutcome, ErrorCode>, _) =
+        call_with_routed_outcalls(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED),
+        )
+        .unwrap();
+    third.unwrap();
+    assert!(calls.iter().any(
+        |call| serde_json::from_slice::<serde_json::Value>(&call.body).unwrap()["user"] == address
+    ));
+}
+
+#[test]
+fn unknown_cancel_requires_one_manual_observation_and_never_resends() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 197, b"cancel-manual-alloc");
+    let submitted = submit(&pic, core, &user, b"cancel-manual-order", "0.05").expect("accepted");
+    let open = br#"{"status":"open","order":{"oid":4242}}"#;
+    let (result, _) =
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, POSITIONS, b"[]", open),
+        )
+        .expect("dispatch");
+    result.expect("sweep");
+    let cancel: Result<(), ErrorCode> =
+        envelope::cancel_order(&pic, core, user.caller, &user.session, submitted.order_id)
+            .expect("cancel call");
+    cancel.expect("cancel accepted");
+    let normal = route(ACCEPTED, POSITIONS, b"[]", open);
+    let (result, calls) = call_with_routed_outcalls::<
+        (),
+        Result<api_types::order::SweepOutcome, ErrorCode>,
+        _,
+    >(&pic, core, controller, "test_sweep_now", (), |call| {
+        if call.url.contains("/exchange") {
+            Err((1, "lost cancel reply".to_string()))
+        } else {
+            normal(call)
+        }
+    })
+    .expect("cancel sweep");
+    assert_eq!(result.expect("sweep").cancels, 1);
+    assert_eq!(
+        calls.iter().filter(|c| c.url.contains("/exchange")).count(),
+        1
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| String::from_utf8_lossy(&c.body).contains("orderStatus"))
+    );
+    for manual in [false, true, false] {
+        if manual {
+            assert_eq!(
+                pocket_ic_tests::resume_manual_work(
+                    &pic,
+                    core,
+                    user.caller,
+                    &user.session,
+                    true,
+                    "cancel"
+                ),
+                1
+            );
+        }
+        let (result, calls) =
+            call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+                &pic,
+                core,
+                controller,
+                "test_sweep_now",
+                (),
+                route(ACCEPTED, POSITIONS, b"[]", open),
+            )
+            .expect("observe");
+        result.expect("sweep");
+        assert!(
+            !calls.iter().any(|c| c.url.contains("/exchange")),
+            "never resend a cancel"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| String::from_utf8_lossy(&c.body).contains("orderStatus"))
+                .count(),
+            usize::from(manual)
+        );
+    }
 }

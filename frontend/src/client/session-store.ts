@@ -78,7 +78,7 @@ export function orderBlockReason(
     !data.btcMarket.eligible_for_new_risk ||
     !data.ethMarket.eligible_for_new_risk
   )
-    return '市場観測または流動性の条件を満たしていません。取消・決済は利用できます。'
+    return '「取引情報を確認」で市場情報を取得してください。流動性の条件を満たさない場合も新規注文は停止します。'
   if (data.agent.current[0].expires_at[0] && data.agent.current[0].expires_at[0] <= BigInt(wallNow))
     return 'Agentの承認期限が切れています。新しい世代を承認してください。'
   if (data.funds.recovery_fence.length)
@@ -92,7 +92,8 @@ export function orderBlockReason(
     ].some((order) => variantName(order.state) === 'Unknown')
   )
     return '結果不明の注文を照合中です。再送・再読込はしないでください。'
-  if (effectiveAge(state, now) > 10_000) return '口座状態が古いため新規注文を停止中です'
+  if (effectiveAge(state, now) > 10_000)
+    return '口座状態が古いため、「取引情報を確認」で更新してください'
 }
 
 /** 非同期処理は世代を跨いで状態を書き戻さない。取得は世代内で直列化する。 */

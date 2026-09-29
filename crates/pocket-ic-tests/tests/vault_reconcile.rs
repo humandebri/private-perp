@@ -1,4 +1,4 @@
-//! 入金の取得（replicated `/info`＋変換）と取り込みの試験。
+//! 入金の取得（non-replicated v2 `/info`＋変換）と取り込みの試験。
 
 use api_types::auth::{
     ChallengePurpose, ChallengeRequest, ChallengeResponse, OpenSessionRequest, SessionHandle,
@@ -135,7 +135,7 @@ fn fetched_deposits_are_credited_once() {
         .take_canister_snapshot(vault, Some(controller), None)
         .expect("snapshot before deposits");
 
-    // 取得（replicated outcall＋変換）→ 本人へ計上。
+    // 取得（non-replicated v2 outcall＋変換）→ 本人へ計上。
     let (first, calls): (Result<u32, ErrorCode>, _) = pocket_ic_tests::call_with_routed_outcalls(
         &pic,
         vault,
@@ -152,7 +152,7 @@ fn fetched_deposits_are_credited_once() {
     for call in calls {
         assert_eq!(
             call.replication,
-            pocket_ic::common::rest::CanisterHttpReplication::FullyReplicated,
+            pocket_ic::common::rest::CanisterHttpReplication::NonReplicated,
         );
     }
     assert_eq!(first.expect("reconciled"), 1);

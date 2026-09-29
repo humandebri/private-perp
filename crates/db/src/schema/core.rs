@@ -357,11 +357,6 @@ CREATE TABLE recovery_fences (
     checked_at INTEGER,
     updated_at INTEGER NOT NULL
 );
-CREATE TABLE recovery_migration_lock (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    locked INTEGER NOT NULL CHECK (locked IN (0, 1))
-);
-INSERT INTO recovery_migration_lock (id, locked) VALUES (1, 0);
 ";
 
 /// 照合の巡回カーソル（有効な口座を順に巡回する）。
@@ -515,5 +510,20 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 27,
         sql: LEVERAGE_CACHE,
+    },
+    Migration {
+        version: 28,
+        sql: super::MANUAL_WORK,
+    },
+    Migration {
+        version: 29,
+        sql: "INSERT INTO worker_permissions(kind,work_id,user_id,allowed)
+          SELECT 'order',order_id,user_id,0 FROM orders
+          WHERE state='unknown' OR dispatch_state IN ('signing','dispatching')
+             OR (dispatch_state='queued' AND last_error IS NOT NULL) ON CONFLICT(kind,work_id) DO NOTHING;
+          INSERT INTO worker_permissions(kind,work_id,user_id,allowed)
+          SELECT 'cancel',order_id,user_id,0 FROM orders
+          WHERE cancel_dispatch_state IN ('signing','dispatching','unknown')
+             OR (cancel_requested=1 AND cancel_dispatch_state IS NULL AND last_error IS NOT NULL) ON CONFLICT(kind,work_id) DO NOTHING;",
     },
 ];

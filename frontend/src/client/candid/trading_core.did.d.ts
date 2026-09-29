@@ -299,7 +299,6 @@ export interface TransformArgs {
 }
 export interface _SERVICE {
   abort_recovery: ActorMethod<[RecoveryFenceToken], Result>
-  begin_recovery_migration: ActorMethod<[], Result>
   /**
    * 注文の取消を要求する（**封筒必須**。署名・送信はパイプラインが行う）。
    *
@@ -310,7 +309,6 @@ export interface _SERVICE {
   configure_cycles: ActorMethod<[bigint, bigint], Result>
   configure_market_threshold: ActorMethod<[MarketThreshold], Result>
   finish_recovery: ActorMethod<[RecoveryFenceToken], Result>
-  finish_recovery_migration: ActorMethod<[], Result>
   /**
    * 口座snapshot（残高はvault、注文はcore。**封筒必須**）。
    */
@@ -361,13 +359,11 @@ export interface _SERVICE {
    */
   list_orders: ActorMethod<[HpkeRequest], Result_1>
   mark_recovery_unknown: ActorMethod<[RecoveryFenceToken], Result>
-  migrate_recovery: ActorMethod<[PrepareRecovery], Result_10>
   prepare_recovery: ActorMethod<[PrepareRecovery], Result_10>
   /**
    * 本人向け書込みの封筒入口。業務エラーも暗号化した結果として返す。
    */
   private_call: ActorMethod<[HpkeRequest], Result_1>
-  recovery_migration_locked: ActorMethod<[], Result_11>
   recovery_replay_pending: ActorMethod<[], Result_11>
   recovery_stage_status: ActorMethod<[], Result_12>
   refresh_market: ActorMethod<[], Result>

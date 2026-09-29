@@ -3,7 +3,7 @@
 //! `docs/phase-0/api-contract.md` 6節・`Implementation.md` 5.4に従い、状態変更POSTは
 //! **非replicated** outcallで送る（応答の揺れを合意の対象にしない。解釈できない応答は
 //! 「未実行」と扱わず、呼び出し側が`unknown`へ進める）。読み取り（`/info`）は
-//! replicated outcallと変換関数を使い、単一ノードの改変を資金・リスク判断へ取り込まない。
+//! HTTP v2の非replicated outcallを使う。変換は入力検証・正規化であり、ノード間合意ではない。
 //!
 //! 送信先URLは現状testnet固定である。Phase 2の環境設定一般化でnetwork設定から
 //! 解決する（`docs/phase-2/README.md`、`docs/phase-0/environments.md`のE-1/E-2）。
@@ -142,7 +142,7 @@ fn classify_ok_response(action_type: &str, value: &serde_json::Value) -> Option<
         })
 }
 
-/// 本人の約定を取得する（replicated＋変換）。
+/// 本人の約定を取得する（非replicated v2＋変換）。
 pub async fn user_fills(user: &str) -> Result<String, ErrorCode> {
     fetch_info(
         serde_json::json!({ "type": "userFills", "user": user }),
@@ -151,7 +151,7 @@ pub async fn user_fills(user: &str) -> Result<String, ErrorCode> {
     .await
 }
 
-/// 本人の建玉（clearinghouseState）を取得する（replicated＋変換）。
+/// 本人の建玉（clearinghouseState）を取得する（非replicated v2＋変換）。
 pub async fn clearinghouse_state(user: &str) -> Result<String, ErrorCode> {
     fetch_info(
         serde_json::json!({ "type": "clearinghouseState", "user": user }),
@@ -169,7 +169,7 @@ pub async fn open_orders(user: &str) -> Result<String, ErrorCode> {
     .await
 }
 
-/// 注文の状態（orderStatus）を取得する（replicated＋変換）。
+/// 注文の状態（orderStatus）を取得する（非replicated v2＋変換）。
 pub async fn order_status(user: &str, oid: impl serde::Serialize) -> Result<String, ErrorCode> {
     fetch_info(
         serde_json::json!({ "type": "orderStatus", "user": user, "oid": oid }),
@@ -231,6 +231,7 @@ async fn fetch_info_with_context(
     }
     let info_url = crate::environment::resolved()?.info_url;
     let response = HttpRequest::new(&info_url)
+        .non_replicated()
         .with_method(HttpMethod::POST)
         .with_headers(vec![HttpHeader {
             name: "Content-Type".to_string(),
@@ -259,7 +260,7 @@ async fn fetch_info_with_context(
 fn transform_market_info(
     args: ic_cdk_management_canister::TransformArgs,
 ) -> ic_cdk_management_canister::HttpRequestResult {
-    // Every replica evaluates the same thresholds; consensus remains replicated.
+    // Validate the single response against the requested thresholds.
     let body = crate::market::canonical_check(&args.response.body, &args.context);
     HttpRequestResult {
         status: args.response.status,

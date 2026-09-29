@@ -225,7 +225,6 @@ type TransformArgs = record {
 };
 service : () -> {
   abort_recovery : (RecoveryFenceToken) -> (Result);
-  begin_recovery_migration : () -> (Result);
   // 注文の取消を要求する（**封筒必須**。署名・送信はパイプラインが行う）。
   // 
   // 認証は封筒の`aad`と本文のセッションで行う（`api-contract.md` 6節）。
@@ -234,7 +233,6 @@ service : () -> {
   configure_cycles : (nat, nat) -> (Result);
   configure_market_threshold : (MarketThreshold) -> (Result);
   finish_recovery : (RecoveryFenceToken) -> (Result);
-  finish_recovery_migration : () -> (Result);
   // 口座snapshot（残高はvault、注文はcore。**封筒必須**）。
   get_account_snapshot : (HpkeRequest) -> (Result_1);
   // Agent世代の状態（承認済みは`current`、要求中は`next`）。
@@ -267,11 +265,9 @@ service : () -> {
   // （`docs/phase-1/README.md` の残課題）。
   list_orders : (HpkeRequest) -> (Result_1);
   mark_recovery_unknown : (RecoveryFenceToken) -> (Result);
-  migrate_recovery : (PrepareRecovery) -> (Result_10);
   prepare_recovery : (PrepareRecovery) -> (Result_10);
   // 本人向け書込みの封筒入口。業務エラーも暗号化した結果として返す。
   private_call : (HpkeRequest) -> (Result_1);
-  recovery_migration_locked : () -> (Result_11) query;
   recovery_replay_pending : () -> (Result_11) query;
   recovery_stage_status : () -> (Result_12) query;
   refresh_market : () -> (Result);
