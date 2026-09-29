@@ -78,6 +78,7 @@ fn session(
 fn route(
     call: &pocket_ic_tests::CapturedHttpCall,
     oid: u64,
+    now: u64,
 ) -> Result<(u16, Vec<u8>), (u64, String)> {
     let body: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
     if call.url.ends_with("/exchange") {
@@ -92,8 +93,9 @@ fn route(
     match body["type"].as_str() {
         Some("metaAndAssetCtxs") => Ok((200, br#"[{"universe":[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]},[{"dayNtlVlm":"10000000"},{"dayNtlVlm":"100000000"},{"dayNtlVlm":"500000000"}]]"#.to_vec())),
         Some("l2Book") => {
+            let coin = body["coin"].as_str().unwrap();
             let mid = if body["coin"] == "BTC" { 60000 } else { 3000 };
-            Ok((200, format!(r#"{{"levels":[[{{"px":"{}","sz":"1.25"}}],[{{"px":"{}","sz":"1.10"}}]]}}"#, mid - 1, mid + 1).into_bytes()))
+            Ok((200, format!(r#"{{"coin":"{coin}","time":{now},"levels":[[{{"px":"{}","sz":"1.25"}}],[{{"px":"{}","sz":"1.10"}}]]}}"#, mid - 1, mid + 1).into_bytes()))
         },
         Some("clearinghouseState") => Ok((200, EMPTY_STATE.to_vec())),
         Some("openOrders") | Some("userFills") => Ok((200, b"[]".to_vec())),
@@ -192,12 +194,24 @@ fn run(users: usize) {
             query(&pic, policy, controller, "get_rest_budget_status", ()).unwrap();
         let budget = budget.unwrap();
         peak_rest_weight = peak_rest_weight.max(budget.used);
-        if budget.used > 900 {
+        // Leave room for the complete workflow, including the conservative
+        // 120-unit userFills charge; 900 is the admission ceiling, not headroom.
+        if budget.used > 300 {
             total_rest_weight += u64::from(budget.used);
             pic.advance_time(std::time::Duration::from_secs(61));
             pic.tick();
             budget_wait_ms += 61_000;
         }
+        let (refreshed, _): (Result<(), ErrorCode>, _) =
+            call_with_routed_outcalls(&pic, core, controller, "refresh_market", (), |call| {
+                route(
+                    call,
+                    index as u64 + 10_000,
+                    pic.get_time().as_nanos_since_unix_epoch() / 1_000_000,
+                )
+            })
+            .unwrap();
+        refreshed.expect("explicit market refresh before starting the next user workflow");
         let before_user: Result<RestBudgetStatus, ErrorCode> =
             query(&pic, policy, controller, "get_rest_budget_status", ()).unwrap();
         let before_user = before_user.unwrap().used;
@@ -219,7 +233,11 @@ fn run(users: usize) {
         phase_before = add_phase_cycles(&pic, &watched, &phase_before, &mut phase_cycles[0]);
         let (allocation, calls): (Result<u32, ErrorCode>, _) =
             call_with_routed_outcalls(&pic, vault, controller, "test_sweep_now", (), |call| {
-                route(call, index as u64 + 10_000)
+                route(
+                    call,
+                    index as u64 + 10_000,
+                    pic.get_time().as_nanos_since_unix_epoch() / 1_000_000,
+                )
             })
             .unwrap();
         allocation.unwrap_or_else(|error| panic!("allocation user {index}: {error:?}"));
@@ -298,7 +316,11 @@ fn run(users: usize) {
         let oid = index as u64 + 10_000;
         let (swept, calls): (Result<SweepOutcome, ErrorCode>, _) =
             call_with_routed_outcalls(&pic, core, controller, "test_sweep_now", (), |call| {
-                route(call, oid)
+                route(
+                    call,
+                    oid,
+                    pic.get_time().as_nanos_since_unix_epoch() / 1_000_000,
+                )
             })
             .unwrap();
         if swept.unwrap().dispatched != 1 {
@@ -318,7 +340,11 @@ fn run(users: usize) {
         canceled.unwrap();
         let (swept, calls): (Result<SweepOutcome, ErrorCode>, _) =
             call_with_routed_outcalls(&pic, core, controller, "test_sweep_now", (), |call| {
-                route(call, oid)
+                route(
+                    call,
+                    oid,
+                    pic.get_time().as_nanos_since_unix_epoch() / 1_000_000,
+                )
             })
             .unwrap();
         if swept.unwrap().cancels != 1 {
@@ -350,10 +376,14 @@ fn run(users: usize) {
         recovery.unwrap();
         let (swept, calls): (Result<u32, ErrorCode>, _) =
             call_with_routed_outcalls(&pic, vault, controller, "test_sweep_now", (), |call| {
-                route(call, oid)
+                route(
+                    call,
+                    oid,
+                    pic.get_time().as_nanos_since_unix_epoch() / 1_000_000,
+                )
             })
             .unwrap();
-        if swept.unwrap() != 1 {
+        if swept.unwrap_or_else(|error| panic!("recovery user {index}: {error:?}")) != 1 {
             failure_count += 1;
         }
         posts[3] += calls

@@ -1146,10 +1146,10 @@ pub fn assert_manual_work_blocked(
     caller: Principal,
     session: &api_types::auth::SessionHandle,
     core: bool,
-    kind: &str,
-    id: Option<&[u8]>,
+    work: (&str, Option<&[u8]>),
     reason: &str,
 ) {
+    let (kind, id) = work;
     let client = envelope::client(0xEB);
     let wrap = |payload: Vec<u8>| {
         if core {

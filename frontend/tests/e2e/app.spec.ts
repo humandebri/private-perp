@@ -6,7 +6,7 @@ import { expect, test } from '@playwright/test'
 import { createClients } from '../../src/client/ic'
 import { resolveConfig } from '../../src/client/config'
 import { hexToBytes } from '../../src/client/wallet'
-import { unwrap } from '../../src/client/result'
+import { CanisterError, unwrap } from '../../src/client/result'
 import { Principal } from '@icp-sdk/core/principal'
 import { vaultPrivateCodec } from '../../src/client/candid-codec'
 import { EnvelopeClient, envelopeAad, newRequestId } from '../../src/client/envelope'
@@ -68,7 +68,7 @@ test.describe('real local canister flow', () => {
   test('login, funds, agent, orders, recovery, withdrawal, history and logout', async ({
     page,
   }) => {
-    test.setTimeout(240_000)
+    test.setTimeout(600_000)
     const signer = resolve(process.cwd(), '../target/debug/e2e-signer')
     const address = execFileSync(signer, ['address'], { encoding: 'utf8' }).trim()
     const secondaryAddress = execFileSync(signer, ['address', '--secondary'], {
@@ -156,6 +156,11 @@ test.describe('real local canister flow', () => {
     await page.getByRole('button', { name: 'Agentを生成・承認' }).click()
     await expect(page.getByText('Active', { exact: true })).toBeVisible({ timeout: 30_000 })
 
+    const refreshTrading = page.getByRole('button', { name: '取引情報を確認' })
+    await refreshTrading.click()
+    await expect(refreshTrading).toBeEnabled({ timeout: 30_000 })
+    await expect(page.getByRole('alert')).toHaveCount(0)
+
     const submitButton = page.getByRole('button', { name: '注文を受付' })
     await page.getByLabel('数量').fill('0')
     await expect(submitButton).toBeDisabled()
@@ -203,6 +208,9 @@ test.describe('real local canister flow', () => {
     await expect(page.getByRole('button', { name: '100%決済' })).toBeVisible()
     await page.getByRole('button', { name: 'SL/TP設定' }).click()
     await expect(page.getByRole('button', { name: 'SL/TP設定' })).toBeEnabled({ timeout: 30_000 })
+    await expect(page.getByRole('cell', { name: /\bOpen$/ })).toHaveCount(2, {
+      timeout: 30_000,
+    })
     await page.getByLabel('種別').selectOption('limit')
     await submitButton.click()
     await expect(submitButton).toBeEnabled({ timeout: 15_000 })
@@ -281,6 +289,9 @@ test.describe('real local canister flow', () => {
     await page.getByRole('link', { name: '履歴' }).click()
     await expect(page.getByRole('cell', { name: 'Withdrawal' })).toBeVisible()
     await expect(
+      page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Withdrawal' }) }),
+    ).toContainText('Settled', { timeout: 60_000 })
+    await expect(
       page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Allocation' }) }),
     ).toContainText('Settled')
     await expect(page.getByRole('cell', { name: 'BTC' }).first()).toBeVisible()
@@ -288,6 +299,9 @@ test.describe('real local canister flow', () => {
     await expect(page.getByLabel('注文価格')).toHaveValue('')
     await expect(referencePrice).toBeEnabled({ timeout: 30_000 })
     await referencePrice.click()
+    await refreshTrading.click()
+    await expect(refreshTrading).toBeEnabled({ timeout: 30_000 })
+    await expect(page.getByRole('alert')).toHaveCount(0)
     // 通信失敗は口座表示を保持しても、新規注文をfail-closedにする。
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
     await page.route('http://127.0.0.1:18100/**', (route) => route.abort('connectionreset'))
@@ -295,6 +309,8 @@ test.describe('real local canister flow', () => {
     await expect(submitButton).toBeDisabled()
     await expect(page.locator('#order-guidance')).toContainText('更新できません')
     await page.unroute('http://127.0.0.1:18100/**')
+    await refreshTrading.click()
+    await expect(refreshTrading).toBeEnabled({ timeout: 30_000 })
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
 
     // ICには受付させ、ブラウザへは応答を返さない。注文は一度だけ送信される。
@@ -374,6 +390,7 @@ test.describe('real local canister flow', () => {
     const privateCall = async (
       method:
         | 'request_allocation'
+        | 'confirm_deposit'
         | 'revoke_session'
         | 'prepare_trading_account'
         | 'eligibility_signing_claims'
@@ -433,7 +450,9 @@ test.describe('real local canister flow', () => {
           ),
         ),
       )
-      // Leave a separate confirmed reserve for the history-only allocation fixture.
+      // The history API lists fund requests, so create actual allocations.
+      // These fixture-only retries preserve the request ID and handle the
+      // journal's explicit contention response; product actions do not retry.
       const funding = unwrap(await clients.vault.get_funding_instructions(fixtureSession))
       const seeded = await fetch(`${clients.config.mockHl}/admin/deposits`, {
         method: 'POST',
@@ -446,14 +465,12 @@ test.describe('real local canister flow', () => {
         }),
       })
       expect(seeded.ok).toBeTruthy()
-      await expect
-        .poll(
-          async () => unwrap(await clients.vault.get_fund_status(fixtureSession)).withdrawable,
-          { timeout: 30_000 },
-        )
-        .toBeGreaterThanOrEqual(1_000_000n)
-      // This fixture creates enough entries for history pagination. The
-      // journal intentionally serializes writes for one vault worker.
+      vaultPrivateCodec.empty(
+        await privateCall('confirm_deposit', vaultPrivateCodec.session(fixtureSession)),
+      )
+      expect(
+        unwrap(await clients.vault.get_fund_status(fixtureSession)).withdrawable,
+      ).toBeGreaterThanOrEqual(1_000_000n)
       for (let entry = 0; entry < 110; entry++) {
         const allocationId = newRequestId()
         for (let attempt = 0; attempt < 20; attempt++) {
@@ -466,7 +483,10 @@ test.describe('real local canister flow', () => {
             )
             break
           } catch (error) {
-            if (!(error instanceof Error) || !error.message.startsWith('PolicyUnavailable:'))
+            if (
+              !(error instanceof CanisterError) ||
+              !['JournalWriterBusy', 'PolicyUnavailable'].includes(error.code)
+            )
               throw error
             if (attempt === 19)
               throw new Error(`history fixture allocation ${entry} remained unavailable`, {

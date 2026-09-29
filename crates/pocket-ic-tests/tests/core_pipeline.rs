@@ -317,8 +317,7 @@ fn uncertain_leverage_blocks_a_different_setting() {
         user.caller,
         &user.session,
         true,
-        "order",
-        Some(first.order_id.as_ref()),
+        ("order", Some(first.order_id.as_ref())),
         "レバレッジ設定",
     );
 
@@ -1162,4 +1161,139 @@ fn unknown_cancel_requires_one_manual_observation_and_never_resends() {
             usize::from(manual)
         );
     }
+}
+
+#[test]
+fn lost_preflight_callback_after_upgrade_stays_stopped_and_can_be_resolved() {
+    // Snapshot restoration plus immediate upgrade exceeds the install-code rate
+    // limit. This case tests state recovery, not instruction-budget admission.
+    let pic = pocket_ic::PocketIcBuilder::new()
+        .with_application_subnet()
+        .with_test_threshold_keys_subnet()
+        .with_icp_config(pocket_ic::common::rest::IcpConfig {
+            canister_execution_rate_limiting: Some(
+                pocket_ic::common::rest::IcpConfigFlag::Disabled,
+            ),
+            ..Default::default()
+        })
+        .build();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(
+        &pic,
+        vault,
+        core,
+        controller,
+        219,
+        b"upgrade-preflight-alloc",
+    );
+    let submitted =
+        submit(&pic, core, &user, b"upgrade-preflight-order", "0.01").expect("accepted");
+    let saved = std::cell::RefCell::new(None);
+    let normal = route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED);
+    let (_, calls) = call_with_routed_outcalls::<
+        (),
+        Result<api_types::order::SweepOutcome, ErrorCode>,
+        _,
+    >(&pic, core, controller, "test_sweep_now", (), |call| {
+        if call.url.contains("/exchange") {
+            let body: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+            assert_eq!(body["action"]["type"], "updateLeverage");
+            *saved.borrow_mut() = Some(
+                pic.take_canister_snapshot(core, Some(controller), None)
+                    .expect("snapshot while awaiting POST")
+                    .id,
+            );
+            Err((1, "lost callback".into()))
+        } else {
+            normal(call)
+        }
+    })
+    .expect("initial sweep");
+    assert_eq!(exchange_types(&calls), ["updateLeverage"]);
+    pic.load_canister_snapshot(
+        core,
+        Some(controller),
+        saved.into_inner().expect("pending snapshot"),
+    )
+    .expect("restore dispatching state");
+    pic.upgrade_canister(
+        core,
+        pocket_ic_tests::wasm(TRADING_CORE_WASM),
+        candid::encode_one(()).unwrap(),
+        Some(controller),
+    )
+    .expect("upgrade resets live attempt guards");
+    let before = list_orders(&pic, core, user.caller, &user.session);
+    assert_eq!(
+        before
+            .iter()
+            .find(|o| o.order_id == submitted.order_id)
+            .unwrap()
+            .state,
+        OrderState::Pending
+    );
+    let risk_before =
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved;
+    assert!(risk_before > 0);
+    // With no sweep after upgrade, the abandoned dispatch must be normalized
+    // without granting permission. Repeated requests preserve the generation.
+    pocket_ic_tests::assert_manual_work_blocked(
+        &pic,
+        core,
+        user.caller,
+        &user.session,
+        true,
+        ("order", Some(submitted.order_id.as_ref())),
+        "レバレッジ設定",
+    );
+    let after = list_orders(&pic, core, user.caller, &user.session);
+    assert_eq!(
+        after
+            .iter()
+            .find(|o| o.order_id == submitted.order_id)
+            .unwrap()
+            .state,
+        OrderState::Unknown
+    );
+    assert_eq!(
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved,
+        risk_before
+    );
+    pic.advance_time(std::time::Duration::from_secs(60));
+    let (_, calls) =
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED),
+        )
+        .expect("later sweep");
+    assert!(
+        exchange_types(&calls).is_empty(),
+        "never resend the preflight or order"
+    );
+    let resolved: Result<(), ErrorCode> = update_args(
+        &pic,
+        core,
+        controller,
+        "resolve_unknown_order_preflight",
+        (submitted.order_id.clone(), PreflightResolution::Rejected),
+    )
+    .expect("controller resolution");
+    resolved.expect("abandoned dispatch remains resolvable");
+    assert_eq!(
+        list_orders(&pic, core, user.caller, &user.session)
+            .iter()
+            .find(|o| o.order_id == submitted.order_id)
+            .unwrap()
+            .state,
+        OrderState::Rejected
+    );
+    assert_eq!(
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved,
+        0
+    );
 }

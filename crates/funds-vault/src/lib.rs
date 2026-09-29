@@ -1119,19 +1119,22 @@ async fn private_call(
                     return Err(bad_payload());
                 }
                 // Only execution permission changes; unknown/dispatching is never queued again.
-                db::worker_permissions::resume(&kind, &id, &verified.user_id, generation).map_err(
-                    |error| match error {
-                        db::worker_permissions::ResumeError::Database(error) => {
-                            auth::map_db(error, None)
-                        }
-                        db::worker_permissions::ResumeError::Blocked(reason) => {
-                            ErrorCode::BadRequest {
-                                code: BadRequestCode::MalformedPayload,
-                                detail: reason.into(),
-                            }
-                        }
+                db::worker_permissions::resume(
+                    &kind,
+                    &id,
+                    &verified.user_id,
+                    generation,
+                    clock::now_ms(),
+                )
+                .map_err(|error| match error {
+                    db::worker_permissions::ResumeError::Database(error) => {
+                        auth::map_db(error, None)
+                    }
+                    db::worker_permissions::ResumeError::Blocked(reason) => ErrorCode::BadRequest {
+                        code: BadRequestCode::MalformedPayload,
+                        detail: reason.into(),
                     },
-                )?;
+                })?;
                 if kind == "fund" {
                     // A lost callback may leave the existing send in dispatching.
                     // Forward it to unknown for observation only, never queued.

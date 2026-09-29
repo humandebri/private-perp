@@ -94,6 +94,7 @@ pub fn resume(
     id: &[u8; 32],
     user: &[u8; 32],
     generation: u64,
+    now: u64,
 ) -> Result<(), ResumeError> {
     let key = (crate::tx::active_scope(), kind.to_string(), *id);
     if ACTIVE.with(|a| a.borrow().contains(&key)) {
@@ -107,6 +108,25 @@ pub fn resume(
         ).map_err(sql)?.is_some();
         if !owned {
             return Err(Error::Conflict);
+        }
+        // No live attempt exists (checked above). A lost preflight callback may
+        // still be recorded as dispatching. Advance to unknown without granting
+        // permission, so the existing controller resolution can handle it.
+        if kind == "order" {
+            let epoch = c.query_optional_scalar::<i64>(
+                "SELECT worker_epoch FROM orders WHERE order_id=?1 AND dispatch_state='signing' AND preflight_state='dispatching'",
+                params![id.as_slice()],
+            ).map_err(sql)?;
+            if let Some(epoch) = epoch {
+                crate::repo::orders::stop_after_preflight(
+                    c,
+                    id,
+                    u64::try_from(epoch).map_err(|_| Error::Overflow)?,
+                    false,
+                    "preflight callback was not observed",
+                    now,
+                )?;
+            }
         }
         let blocker = match kind {
             "order" => c.query_optional_scalar::<i64>(

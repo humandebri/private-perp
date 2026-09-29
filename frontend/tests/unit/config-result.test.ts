@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { IDL } from '@icp-sdk/core/candid'
+import { vaultPrivateCodec } from '../../src/client/candid-codec'
 import { resolveConfig } from '../../src/client/config'
 import { optionalValue, type LiveDataIssue } from '../../src/client/gateway'
 import { CanisterError, unwrap } from '../../src/client/result'
@@ -45,6 +47,16 @@ describe('local configuration and results', () => {
     expect(unwrap({ Ok: 7 })).toBe(7)
     expect(() => unwrap({ Err: { SessionExpired: null } })).toThrow(CanisterError)
     expect(() => unwrap({ Err: { SessionExpired: null } })).toThrow('SessionExpired')
+  })
+  it('decodes a journal contention error from an encrypted response', () => {
+    const bytes = new Uint8Array(
+      IDL.encode(
+        [IDL.Variant({ Err: IDL.Variant({ JournalWriterBusy: IDL.Null }) })],
+        [{ Err: { JournalWriterBusy: null } }],
+      ),
+    )
+    expect(() => vaultPrivateCodec.fund(bytes)).toThrow(CanisterError)
+    expect(() => vaultPrivateCodec.fund(bytes)).toThrow('JournalWriterBusy')
   })
   it('keeps optional live-data failures visible with their source', () => {
     const issues: LiveDataIssue[] = []

@@ -1642,12 +1642,17 @@ async fn private_call(
                     if !matches!(kind.as_str(), "order" | "cancel" | "monitor") {
                         return Err(malformed());
                     }
-                    db::worker_permissions::resume(&kind, &id, &user, generation).map_err(|error| {
-                        match error {
-                            db::worker_permissions::ResumeError::Database(error) => map_db(error),
-                            db::worker_permissions::ResumeError::Blocked(reason) => {
-                                bad(BadRequestCode::MalformedPayload, reason)
-                            }
+                    db::worker_permissions::resume(
+                        &kind,
+                        &id,
+                        &user,
+                        generation,
+                        ic_cdk::api::time() / 1_000_000,
+                    )
+                    .map_err(|error| match error {
+                        db::worker_permissions::ResumeError::Database(error) => map_db(error),
+                        db::worker_permissions::ResumeError::Blocked(reason) => {
+                            bad(BadRequestCode::MalformedPayload, reason)
                         }
                     })
                 }

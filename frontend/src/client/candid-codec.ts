@@ -2,6 +2,7 @@ import { IDL } from '@icp-sdk/core/candid'
 import type { SessionHandle } from './candid/funds_vault.did.js'
 import type {
   AgentGeneration as AgentGenerationView,
+  ErrorCode as ApiErrorCode,
   FundRequestState,
 } from './candid/funds_vault.did.js'
 import { unwrap } from './result'
@@ -261,7 +262,9 @@ const BadRequestCode = IDL.Variant({
   PriceOutOfRange: IDL.Null,
   UnsupportedAsset: IDL.Null,
 })
+type VariantKeys<T> = T extends unknown ? keyof T : never
 const ErrorCode = IDL.Variant({
+  JournalWriterBusy: IDL.Null,
   Internal: IDL.Record({ code: IDL.Text }),
   DuplicateIgnored: IDL.Record({ request_id: Blob }),
   SigningQueueFull: IDL.Null,
@@ -281,7 +284,7 @@ const ErrorCode = IDL.Variant({
   SessionExpired: IDL.Null,
   InsufficientFunds: IDL.Record({ requested: IDL.Nat64, available: IDL.Nat64 }),
   Unauthenticated: IDL.Record({ reason: IDL.Text }),
-})
+} satisfies Record<VariantKeys<ApiErrorCode>, IDL.Type<unknown>>)
 const AgentGeneration = IDL.Record({
   account_id: Blob,
   generation: IDL.Nat64,

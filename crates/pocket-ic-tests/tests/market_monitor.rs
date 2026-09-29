@@ -27,7 +27,7 @@ fn configure(
 }
 
 #[test]
-fn market_monitor_accounts_24_weight_and_closes_on_index_change() {
+fn market_monitor_accounts_44_weight_and_closes_on_index_change() {
     let pic = pic();
     let sns = principal(201);
     let guard = deploy(
@@ -94,6 +94,7 @@ fn market_monitor_accounts_24_weight_and_closes_on_index_change() {
     configured.unwrap();
     // Real HL rolling volumes can have more than six fractional digits.
     let meta = br#"[{"universe":[{"name":"SOL"},{"name":"ETH"},{"name":"BTC"}]},[{"dayNtlVlm":"10000000"},{"dayNtlVlm":"1125741.0633699989"},{"dayNtlVlm":"2945429.7254399993"}]]"#;
+    let now = pic.get_time().as_nanos_since_unix_epoch() / 1_000_000;
     let (result, calls): (Result<(), ErrorCode>, _) = call_with_routed_outcalls(&pic, core, sns, "refresh_market", (), |call| {
         let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
         match query.get("type").and_then(|v| v.as_str()) {
@@ -101,19 +102,19 @@ fn market_monitor_accounts_24_weight_and_closes_on_index_change() {
             Some("l2Book") => {
                 let coin = query.get("coin").and_then(|v| v.as_str()).unwrap();
                 let mid = if coin == "BTC" { 60000 } else { 3000 };
-                Ok((200, format!(r#"{{"levels":[[{{"px":"{}","sz":"1.25"}}],[{{"px":"{}","sz":"1.10"}}]]}}"#, mid-1, mid+1).into_bytes()))
+                Ok((200, format!(r#"{{"coin":"{coin}","time":{now},"levels":[[{{"px":"{}","sz":"1.25"}}],[{{"px":"{}","sz":"1.10"}}]]}}"#, mid-1, mid+1).into_bytes()))
             }
             other => Err((1, format!("unexpected {other:?}"))),
         }
     }).unwrap();
     result.unwrap();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 4);
     let btc: Result<MarketStatus, ErrorCode> =
         query(&pic, core, sns, "get_market_status", "BTC".to_string()).unwrap();
     assert!(btc.unwrap().eligible_for_new_risk);
     let status: Result<RestBudgetStatus, ErrorCode> =
         query(&pic, policy, sns, "get_rest_budget_status", ()).unwrap();
-    assert_eq!(status.unwrap().used, 24);
+    assert_eq!(status.unwrap().used, 44);
     let changed: Result<(), ErrorCode> = update_args(
         &pic,
         guard,

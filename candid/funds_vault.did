@@ -375,10 +375,10 @@ service : () -> {
   // 
   // 取得はHTTP v2の非replicated outcall（変換関数で検証・正規化）、取り込みは検証済みの`deposits::credit`。
   reconcile_deposits : (blob) -> (Result_20);
-  // Core-only on-demand venue balance observation.
-  refresh_trading_balance : (SessionHandle) -> (Result_1);
   recovery_replay_pending : () -> (Result_13) query;
   recovery_stage_status : () -> (Result_21) query;
+  // Only the authenticated core flow may request a venue equity observation.
+  refresh_trading_balance : (SessionHandle) -> (Result_1);
   // 不明なactionを「未実行」として解消する（controllerのみ）。
   // 
   // 未確認の外部送信を自由文の申告だけで「未実行」と確定してはならない。

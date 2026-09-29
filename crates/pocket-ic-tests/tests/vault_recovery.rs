@@ -1242,8 +1242,7 @@ fn lost_recovery_response_keeps_reservation_and_fence_without_resending(
             caller,
             &renewed,
             false,
-            "fund",
-            None,
+            ("fund", None),
             "証跡が曖昧",
         );
         let (stopped, calls): (Result<u32, ErrorCode>, _) =

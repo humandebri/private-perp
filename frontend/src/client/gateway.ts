@@ -515,6 +515,7 @@ export class LocalGateway {
     if (before.unknowns.length || before.recovery_fence.length)
       throw new Error('先の資金移動を照合中です。履歴を確認してください。')
     await this.seedDeposit(amount)
+    await this.confirmDeposit()
     await waitForFunds(read, (status) => status.withdrawable >= before.withdrawable + value)
   }
 
