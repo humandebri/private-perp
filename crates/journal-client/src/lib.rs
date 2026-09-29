@@ -530,53 +530,6 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                         return Err(db::error::Error::Conflict);
                     }
                 }
-                RecoveryPayload::DepositClaim {
-                    event_id,
-                    user_id,
-                    amount_micros,
-                    claimed_at_ms,
-                } => {
-                    let event_id: [u8; 32] = event_id
-                        .as_ref()
-                        .try_into()
-                        .map_err(|_| db::error::Error::Invariant("bad staged event"))?;
-                    let user_id: [u8; 32] = user_id
-                        .as_ref()
-                        .try_into()
-                        .map_err(|_| db::error::Error::Invariant("bad staged user"))?;
-                    if amount_micros == 0
-                        || amount_micros > i64::MAX as u64
-                        || claimed_at_ms == 0
-                        || claimed_at_ms > i64::MAX as u64
-                        || db::repo::auth::identity_by_user(c, &user_id)?.is_none()
-                    {
-                        return Err(db::error::Error::Invariant("bad staged deposit claim"));
-                    }
-                    let mut id_material = b"deposit_claim".to_vec();
-                    id_material.extend_from_slice(&event_id);
-                    if hl_sign::keccak256(&id_material) != event.logical_id {
-                        return Err(db::error::Error::Invariant("staged claim id mismatch"));
-                    }
-                    let configured = db::repo::vault_config::environment(c)?;
-                    let network = configured.network.as_deref().unwrap_or("local");
-                    let external = db::repo::events::find_external_event(c, network, &event_id)?
-                        .ok_or(db::error::Error::NotFound)?;
-                    let kind = db::repo::ledger::journal_kind_by_external_event(c, &event_id)?
-                        .ok_or(db::error::Error::NotFound)?;
-                    if external.amount != amount_micros
-                        || kind != "deposit_unmatched"
-                        || db::repo::ledger::unmatched_deposit_claimed(c, &event_id)?
-                    {
-                        return Err(db::error::Error::Conflict);
-                    }
-                    db::repo::ledger::claim_unmatched_deposit(
-                        c,
-                        &user_id,
-                        amount_micros,
-                        claimed_at_ms,
-                        &event_id,
-                    )?;
-                }
                 RecoveryPayload::AllocationAccepted {
                     action_id,
                     request_id,

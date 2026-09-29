@@ -321,11 +321,6 @@ service : () -> {
   check_eligibility_account_for_core : (blob, blob) -> (Result_1);
   // Core-only admission check. Core must separately bind the session principal to its caller.
   check_eligibility_for_core : (SessionHandle, blob) -> (Result_1);
-  // 宛先が未解決だった入金を、後から判明した利用者へ振り替える（controllerのみ）。
-  // 
-  // `credit` がsuspenseへ計上したイベントだけを対象にする（既に本人へ計上済みの
-  // イベントを再計上しない）。同一イベントの二重請求は仕訳の要求IDで拒否する。
-  claim_unmatched_deposit : (blob, blob) -> (Result_1);
   configure_cycles : (nat, nat) -> (Result_1);
   configure_eligibility : (nat64, blob, bool) -> (Result_1);
   eligibility_status : (SessionHandle) -> (Result_2) query;

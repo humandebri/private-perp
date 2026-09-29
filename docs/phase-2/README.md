@@ -88,13 +88,13 @@ bash scripts/bootstrap-local.sh
 - `ICP_HOME`をプロジェクト内へ向けることで、**他のプロジェクトのidentityと既定を変更しない**。`.icp-home/`と`.icp/`は`.gitignore`対象（鍵とCanister IDをコミットしない）。
 - Canister IDは`icp canister status <name> --json`で引く（デプロイごとに変わり得るため、スクリプト・画面へハードコードしない）。canisterへは`PUBLIC_CANISTER_ID:<name>`が注入される。
 - `candid/*.did`は`scripts/extract-candid.sh`の生成物。Rustの契約（`api-types`）とCandidのずれはこのスクリプトの再実行で検出する。
-- 画面（`frontend/`）はローカルcanisterへ接続済み。M5/M6として公開市況WS、建玉、SL/TP、取消、部分・全決済、異常状態、最小クライアントまでローカルmockで検証する。ローカルのendpointは`get_environment`で確認できる。
+- 画面（`frontend/`）はローカルcanisterへ接続済み。M5/M6として公開市況WS、建玉、SL/TP、取消、部分・全決済、異常状態までローカルmockで検証する。ローカルのendpointは`get_environment`で確認できる。
 
 ### ローカルM5/M6（2026-09-22）
 
 - 公開市況はmock HLのWebSocketへ直結し、`BroadcastChannel`とWeb Locksで複数タブの接続を1本へ集約する。購読にはEOA・取引口座を含めない。
 - clearinghouse照合の`totalMarginUsed`・未実現PnLと、coreの未約定注文リスク予約を分離した。鮮度は最終約定ではなく口座観測時刻から算出する。
-- `/trade`でSL/TP、Cancel All、25/50/100%決済、全決済、pending・unknown・staleを扱う。`/fallback`は認証・取消・出金だけを提供する。
+- `/trade`でSL/TP、Cancel All、25/50/100%決済、全決済、pending・unknown・staleを扱う。
 - これらはローカル合成資金の検証であり、GATE 0やtestnet資金往復の完了を意味しない。
 
 ## 実行上の注意（並行作業対策）

@@ -222,12 +222,6 @@ type RecoveryPayload = variant {
     user_id : blob;
     equity : nat64;
   };
-  DepositClaim : record {
-    claimed_at_ms : nat64;
-    user_id : blob;
-    amount_micros : nat64;
-    event_id : blob;
-  };
   Baseline : record { state_digest : blob };
   LedgerPosting : record {
     account_id : blob;

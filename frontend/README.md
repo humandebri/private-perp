@@ -45,7 +45,6 @@ node --test ../tools/mock-hl/server.test.mjs
 ## 安全境界
 
 - Workersは local 設定では loopback のみに制限し、testnet 設定では公開 GET/HEAD を許可します。CSP の接続先は設定された IC・市況ホストに制限します。
-- `/fallback`は通常の取引画面や市況接続に依存せず、認証・注文取消・本人EOA宛出金だけを提供します。Canister停止を回避するものではありません。
 - SSR/server functionsへ本人データを渡さず、localStorage・sessionStorage・Cookieへ鍵やセッションを保存しません。
 - unknownは画面へそのまま表示し、自動再送しません。古いsnapshot、未承認Agent、未観測口座では新規注文を停止します。
 - snapshotの鮮度は受信後の経過時間を加算して判定し、10秒超過または必須データ取得失敗で新規注文を停止します。取消・reduce-only操作はこの停止条件から分離しています。
@@ -53,3 +52,5 @@ node --test ../tools/mock-hl/server.test.mjs
 - ログアウト・失効時は即座にセッション世代を無効化し、口座・履歴の追加ページ・未解決要求を破棄します。古い通信の成功・失敗は新セッションへ反映しません。未解決要求は再読込後に復元できないため、再読込を解決手段にしないでください。
 - mock seedは画面と応答の両方で`LOCAL MOCK`と表示します。一般ユーザー機能や本番APIではありません。
 - Cloudflare公開 UI は HL testnet の模擬USDC用です。SNS操作、controller変更、本番資金受付は行いません。
+
+入金は、認証済みのHL口座から共通保管口座への送金を利用してください。未登録ウォレットからの送金や共通保管口座への直接ブリッジ入金は対応対象外です。照合時に本人を特定できない入金は未帰属として記録し、管理者による手動割当・救済は提供しません。

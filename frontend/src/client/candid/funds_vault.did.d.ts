@@ -413,13 +413,6 @@ export interface _SERVICE {
    * Core-only admission check. Core must separately bind the session principal to its caller.
    */
   check_eligibility_for_core: ActorMethod<[SessionHandle, Uint8Array | number[]], Result_1>
-  /**
-   * 宛先が未解決だった入金を、後から判明した利用者へ振り替える（controllerのみ）。
-   *
-   * `credit` がsuspenseへ計上したイベントだけを対象にする（既に本人へ計上済みの
-   * イベントを再計上しない）。同一イベントの二重請求は仕訳の要求IDで拒否する。
-   */
-  claim_unmatched_deposit: ActorMethod<[Uint8Array | number[], Uint8Array | number[]], Result_1>
   configure_cycles: ActorMethod<[bigint, bigint], Result_1>
   configure_eligibility: ActorMethod<[bigint, Uint8Array | number[], boolean], Result_1>
   eligibility_status: ActorMethod<[SessionHandle], Result_2>
@@ -500,7 +493,7 @@ export interface _SERVICE {
   recovery_replay_pending: ActorMethod<[], Result_13>
   recovery_stage_status: ActorMethod<[], Result_21>
   /**
-   * Core-only on-demand venue balance observation.
+   * Only the authenticated core flow may request a venue equity observation.
    */
   refresh_trading_balance: ActorMethod<[SessionHandle], Result_1>
   /**

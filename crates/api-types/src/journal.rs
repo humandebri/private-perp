@@ -101,12 +101,6 @@ pub enum RecoveryPayload {
         amount_micros: u64,
         observed_at_ms: u64,
     },
-    DepositClaim {
-        event_id: Blob,
-        user_id: Blob,
-        amount_micros: u64,
-        claimed_at_ms: u64,
-    },
     TradingBalanceObserved {
         user_id: Blob,
         account_id: Blob,

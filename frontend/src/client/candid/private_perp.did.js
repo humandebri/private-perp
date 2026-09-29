@@ -300,12 +300,6 @@ export const idlFactory = ({ IDL }) => {
       user_id: IDL.Vec(IDL.Nat8),
       equity: IDL.Nat64,
     }),
-    DepositClaim: IDL.Record({
-      claimed_at_ms: IDL.Nat64,
-      user_id: IDL.Vec(IDL.Nat8),
-      amount_micros: IDL.Nat64,
-      event_id: IDL.Vec(IDL.Nat8),
-    }),
     Baseline: IDL.Record({ state_digest: IDL.Vec(IDL.Nat8) }),
     LedgerPosting: IDL.Record({
       account_id: IDL.Vec(IDL.Nat8),
@@ -1010,7 +1004,6 @@ export const idlFactory = ({ IDL }) => {
       [vault_Result_1],
       [],
     ),
-    claim_unmatched_deposit: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)], [vault_Result_1], []),
     clear_emergency_stop: IDL.Func([], [policy_Result], []),
     clear_recovery_pause: IDL.Func([], [policy_Result], []),
     commit_recovery: IDL.Func([core_RecoveryFenceToken], [core_Result], []),

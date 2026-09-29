@@ -438,7 +438,7 @@ pub fn deposit_confirmed(
 
 /// 宛先が未解決の入金の計上（共通保管へ着金し、相手方はsuspenseのまま）。
 ///
-/// 所有者が判明した後で `claim_unmatched_deposit` により本人へ振り替える。
+/// ユーザーへの手動振替は行わず、未帰属のまま保持する。
 pub fn unmatched_deposit(
     connection: &mut UpdateConnection<'_>,
     amount: u64,
@@ -465,65 +465,6 @@ pub fn unmatched_deposit(
             },
         ],
     )
-}
-
-/// 未解決入金を本人へ振り替える（controllerの判断）。
-///
-/// `event_id` を要求IDとして使い、同一イベントの二重請求を `journal_requests` の
-/// 主キーで拒否する。
-pub fn claim_unmatched_deposit(
-    connection: &mut UpdateConnection<'_>,
-    user_id: &[u8; 32],
-    amount: u64,
-    at: u64,
-    event_id: &[u8; 32],
-) -> Result<i64, Error> {
-    let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
-    post_journal(
-        connection,
-        "deposit_claimed",
-        at,
-        None,
-        Some(event_id),
-        &[
-            Posting {
-                account: EXTERNAL.to_string(),
-                kind: AccountKind::Suspense,
-                amount,
-            },
-            Posting {
-                account: user_reserve(user_id),
-                kind: AccountKind::Liability,
-                amount: -amount,
-            },
-        ],
-    )
-}
-
-pub fn unmatched_deposit_claimed(
-    connection: &Connection,
-    event_id: &[u8; 32],
-) -> Result<bool, Error> {
-    Ok(connection
-        .query_optional_scalar::<i64>(
-            "SELECT 1 FROM journal_requests WHERE request_id = ?1 AND kind = 'deposit_claimed'",
-            params![event_id.as_slice()],
-        )
-        .map_err(sql)?
-        .is_some())
-}
-
-/// 外部イベントIDに対応する仕訳の種別（未計上は `None`）。
-pub fn journal_kind_by_external_event(
-    connection: &Connection,
-    external_event_id: &[u8; 32],
-) -> Result<Option<String>, Error> {
-    connection
-        .query_optional_scalar::<String>(
-            "SELECT kind FROM journals WHERE external_event_id = ?1",
-            params![external_event_id.as_slice()],
-        )
-        .map_err(sql)
 }
 
 /// 出金予約の仕訳（未配分→出金予約）。

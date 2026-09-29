@@ -418,14 +418,6 @@ export type journal_RecoveryPayload =
         equity: bigint
       }
     }
-  | {
-      DepositClaim: {
-        claimed_at_ms: bigint
-        user_id: Uint8Array | number[]
-        amount_micros: bigint
-        event_id: Uint8Array | number[]
-      }
-    }
   | { Baseline: { state_digest: Uint8Array | number[] } }
   | {
       LedgerPosting: {
@@ -831,10 +823,6 @@ export interface _SERVICE {
   >
   check_eligibility_for_core: ActorMethod<
     [vault_SessionHandle, Uint8Array | number[]],
-    vault_Result_1
-  >
-  claim_unmatched_deposit: ActorMethod<
-    [Uint8Array | number[], Uint8Array | number[]],
     vault_Result_1
   >
   clear_emergency_stop: ActorMethod<[], policy_Result>

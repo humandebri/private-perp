@@ -38,7 +38,6 @@ function Document({ children }: { children: ReactNode }) {
             <Link to="/trade">取引</Link>
             <Link to="/funds">資金</Link>
             <Link to="/history">履歴</Link>
-            <Link to="/fallback">最小クライアント</Link>
           </nav>
           <span className="badge">{isTestnet ? 'HL TESTNET' : 'LOCAL MOCK'}</span>
         </header>

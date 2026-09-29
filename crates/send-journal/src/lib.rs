@@ -208,22 +208,6 @@ fn valid_event(event: &RecoveryEvent) -> bool {
                 && *amount_micros <= i64::MAX as u64
                 && *observed_at_ms > 0
         }
-        RecoveryPayload::DepositClaim {
-            event_id,
-            user_id,
-            amount_micros,
-            claimed_at_ms,
-        } => {
-            let mut logical = b"deposit_claim".to_vec();
-            logical.extend_from_slice(event_id.as_ref());
-            let expected: [u8; 32] = Keccak256::digest(&logical).into();
-            event.logical_id.as_ref() == expected
-                && id(event_id)
-                && id(user_id)
-                && *amount_micros > 0
-                && *amount_micros <= i64::MAX as u64
-                && *claimed_at_ms > 0
-        }
         RecoveryPayload::TradingBalanceObserved {
             user_id,
             account_id,

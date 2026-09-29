@@ -173,7 +173,7 @@ pub fn transfer_sender(entry: &serde_json::Value) -> Option<[u8; 20]> {
 ///
 /// 宛先が未知の入金も資金は既に動いているため、suspense勘定へ計上して記録に残す
 /// （イベント行を先に入れるため、後から `credit` を呼び直して計上することはできない。
-/// 写像が判明した時点で controller が `claim_unmatched_deposit` で本人へ振り替える）。
+/// ユーザーへの手動振替は行わない）。
 #[allow(clippy::too_many_arguments)]
 pub fn credit(
     connection: &mut UpdateConnection<'_>,

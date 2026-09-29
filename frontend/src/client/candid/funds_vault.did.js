@@ -319,7 +319,6 @@ export const idlFactory = ({ IDL }) => {
       [],
     ),
     check_eligibility_for_core: IDL.Func([SessionHandle, IDL.Vec(IDL.Nat8)], [Result_1], []),
-    claim_unmatched_deposit: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)], [Result_1], []),
     configure_cycles: IDL.Func([IDL.Nat, IDL.Nat], [Result_1], []),
     configure_eligibility: IDL.Func([IDL.Nat64, IDL.Vec(IDL.Nat8), IDL.Bool], [Result_1], []),
     eligibility_status: IDL.Func([SessionHandle], [Result_2], ['query']),

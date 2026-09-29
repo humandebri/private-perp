@@ -12,7 +12,7 @@ import { vaultPrivateCodec } from '../../src/client/candid-codec'
 import { EnvelopeClient, envelopeAad, newRequestId } from '../../src/client/envelope'
 
 test('SSR exposes a local-only shell and refuses writes', async ({ request }) => {
-  for (const path of ['/', '/trade', '/funds', '/history', '/fallback']) {
+  for (const path of ['/', '/trade', '/funds', '/history']) {
     const response = await request.get(path)
     expect(response.ok()).toBeTruthy()
     expect(response.headers()['x-frame-options']).toBe('DENY')

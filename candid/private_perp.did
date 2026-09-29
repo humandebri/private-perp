@@ -722,12 +722,6 @@ type journal_RecoveryPayload = variant {
     user_id : blob;
     equity : nat64;
   };
-  DepositClaim : record {
-    claimed_at_ms : nat64;
-    user_id : blob;
-    amount_micros : nat64;
-    event_id : blob;
-  };
   Baseline : record { state_digest : blob };
   LedgerPosting : record {
     account_id : blob;
@@ -807,8 +801,6 @@ service : (principal) -> {
   check_eligibility_account_for_core : (blob, blob) -> (vault_Result_1);
 
   check_eligibility_for_core : (vault_SessionHandle, blob) -> (vault_Result_1);
-
-  claim_unmatched_deposit : (blob, blob) -> (vault_Result_1);
 
   clear_emergency_stop : () -> (policy_Result);
 
