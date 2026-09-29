@@ -1,8 +1,8 @@
 # private-perp UI
 
-2026-09-29現在、バックエンドCanisterは cycles 補充待ちで停止中です。UIは公開中ですがCanister操作は利用できません。[受入記録](../docs/phase-3/testnet-acceptance.md)を参照してください。
+TanStack Start＋Reactで、ローカルICP replicaとローカルHyperliquid mock、または公開 ICP と HL testnet に接続するUIです。署名ログイン、保管残高、建玉、SL/TP、決済、取消、履歴を扱います。[単一 Canister 化](../docs/phase-3/single-canister.md)を参照してください。
 
-TanStack Start＋Reactで、ローカルICP replicaとローカルHyperliquid mock、または公開 ICP と HL testnet に接続するUIです。公開市況WebSocket、建玉、SL/TP、決済、取消と最小クライアントを含みます。[公開 HL testnet UI](https://private-perp-ui-testnet.hude.workers.dev) は署名ログイン、利用資格登録、入金先表示まで検証済みです。実送金・注文は未検証です。詳細は [単一 Canister 化](../docs/phase-3/single-canister.md)。
+**公開環境の状態（2026-09-29）:** [UI](https://private-perp-ui-testnet.hude.workers.dev)は公開中ですが、バックエンド Canister は cycles 補充待ちで停止中です。現在は Canister を使う操作ができません。実送金・注文は未検証です。[受入記録](../docs/phase-3/testnet-acceptance.md)に公開環境の結果を記載しています。ローカルで検証した最新コードは公開環境に未反映です。
 
 ## 一括起動・E2E
 
@@ -16,12 +16,14 @@ mock HL起動、ローカルIC network、単一 Canisterのdeploy/bootstrap、�
 
 手動起動では`.env.example`を`.env.local`へ写し、deploy後の `VITE_PRIVATE_PERP_CANISTER_ID`を設定してください。`VITE_APP_STAGE=local`、IC host、mock HTTP/WS URLの全てが必須で、loopback以外は拒否します。mockの管理APIを別のfrontendポートから使う場合は、起動時の`MOCK_HL_ADMIN_ORIGINS`へ完全なOriginをカンマ区切りで指定します（既定は`127.0.0.1:4173`と`:5173`）。
 
+testnet のビルド設定例は `.env.testnet.example` にあります。`VITE_PRIVATE_PERP_CANISTER_ID`、`VITE_IC_HOST`、`VITE_MARKET_WS_URL` を確認し、`pnpm --dir frontend build --mode testnet` をリポジトリルートで実行します。このビルドは公開デプロイではありません。現在の公開 Canister は停止中なので、ビルドが成功しても公開画面の資金・取引操作は検証できません。
+
 ## 接続範囲
 
 - MetaMask `eth_requestAccounts` / `eth_signTypedData_v4`によるEOA認証。
 - ページメモリだけに保持する短命Ed25519 identity、SessionHandle、HPKE秘密鍵。
 - 共通保管口座への模擬入金・残高保持と、後から指定額を本人の取引口座へ配分、Agent生成・承認、market/limit注文、取消、不足額の自動回収と署名付き出金、資金・注文・約定履歴。入金と配分は別操作。「残高の調整」から取引口座の資金を保管残高に戻せる。
-- 入金は認証済みEOAのHL口座を送金元にする。金額・時刻による相関耐性は未達。[共通口座の実装範囲](../docs/phase-3/shared-reserve.md)。旧schemaとの後方互換はない。
+- 入金は認証済みEOAのHL口座を送金元にする。金額・時刻による相関耐性は未達。[共通口座の実装範囲](../docs/phase-3/shared-reserve.md)。
 - 個人参照と取消はCandidを一元codecで封入し、request ID再利用や復号失敗を自動再送しません。
 - marketは即時約定、limitはrestingとなる決定的なLOCAL MOCK。admin APIはloopback bindだけです。
 
@@ -38,7 +40,7 @@ bash ../scripts/local-e2e.sh # 実Canister一巡
 node --test ../tools/mock-hl/server.test.mjs
 ```
 
-通常のPlaywrightはbuild後のWorkers preview（127.0.0.1:4173）を使います。実接続E2Eだけがローカルreplicaとmockを必要とします。
+通常のPlaywrightはbuild後のWorkers preview（127.0.0.1:4173）を使います。実接続E2Eだけがローカルreplicaとmockを必要とします。2026-09-29のデプロイ前検証では frontend unit 47件、ローカル実 Canister＋mock HL のブラウザ E2E 4件が成功しました。[検証範囲と留意点](../docs/phase-3/predeploy-validation-2026-09-29.md)を参照してください。
 
 ## 安全境界
 

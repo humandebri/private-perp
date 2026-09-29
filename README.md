@@ -1,21 +1,37 @@
 # private-perp
 
-機密資金管理＋Hyperliquid取引を一つの ICP Canister にまとめ、TanStack Start UI から接続するアプリです。
+ICP の単一 `private_perp` Canister に資金保管・取引・policy・journal をまとめ、TanStack Start UI から Hyperliquid testnet を利用する試験用アプリです。[構成と権限](docs/phase-3/single-canister.md)を参照してください。
 
-現在の配置・権限・検証手順は [単一 Canister 化](docs/phase-3/single-canister.md) を参照してください。旧設計書の五 Canister・SNS/guard 構成は公開試験版の配置には適用しません。
+## 現在の状態（2026-09-29）
 
-2026-09-29現在、公開Canisterは cycles 補充待ちで停止中です。ローカル実装はHTTP outcall v2の非複製に統一し、未完了処理がないときはワーカーを停止する方式へ変更しています。公開環境には未反映です。[最新の受入記録](docs/phase-3/testnet-acceptance.md)を参照してください。
+| 対象 | 状態 |
+| --- | --- |
+| ローカルコード | HTTP outcall v2 の非複製通信と、未完了処理がないときにワーカーを止める方式を実装済み。PocketIC・ブラウザ E2E 等で検証済み |
+| 公開 IC Canister | `xis3j-paaaa-aaaai-axumq-cai` は cycles 補充待ちで停止中。ローカルの最新 Wasm は未反映 |
+| [公開 HL testnet UI](https://private-perp-ui-testnet.hude.workers.dev) | UI は公開中だが、停止中の Canister を使う操作は現在できない |
+| 実 HL testnet | 実送金、注文 POST、資金往復は未検証 |
 
-- 実装：`frontend/`（ローカル実接続）、`crates/`（ICP Canister）、`tools/mock-hl/`（ローカルvenue）
-- 起動・試験・制限：`frontend/README.md`
-- 要件：`Plan.md`
-- 技術設計：`Implementation.md`
-- Phase計画：`Implementation-Roadmap.md`
-- 判断記録：`docs/adr/`（6本）
-- Phase 0の契約・画面仕様：`docs/phase-0/README.md`
-- 完了範囲と残件：`docs/implementation-status.md`
-- 共通入金口座の実装と制限：`docs/phase-3/shared-reserve.md`
+cycles 補充、Canister のアップグレードと起動、公開 UI との再接続確認が必要です。[公開環境の受入記録](docs/phase-3/testnet-acceptance.md)と[ローカルのデプロイ前検証](docs/phase-3/predeploy-validation-2026-09-29.md)に結果と未検証範囲を分けて記録しています。
 
-ICPバックエンド（`crates/`）は、`private_perp` 一つの Canister に資金・取引・policy・journal のモジュールを統合しています。資金側は認証・複式台帳・予約・送金と照合、取引側は注文・Agent署名・照合を担います。旧 `control_guard` は現行の統合 Wasm に含めません。
+## 構成とローカル検証
 
-統合 Wasm は公開 ICP の `xis3j-paaaa-aaaai-axumq-cai` に配置し、[HL testnet UI](https://private-perp-ui-testnet.hude.workers.dev) を公開しています。署名ログイン、利用資格登録、入金先表示まで公開環境で確認しました。実 HL への送金・注文 POST、資金往復は未検証で、市場データ取得は IC ノード間の応答不一致により新規注文を停止しています。詳細は[受入記録](docs/phase-3/testnet-acceptance.md)。共通保管口座は直接送金の紐付けを減らしますが、[合成相関評価](docs/phase-3/privacy-local-eval.md)では現行B0のtop-1対応付け成功率が100%で、匿名性の基準には未達です。
+- `crates/`：単一 Canister にリンクする資金、取引、policy、journal の実装
+- `frontend/`：認証、保管残高、注文・建玉・履歴を扱う UI。起動・設定・単体試験は[UI README](frontend/README.md)
+- `tools/mock-hl/`：ローカル試験用の Hyperliquid 模擬 API
+
+ローカル IC と mock HL を起動し、実 Canister を通るブラウザ E2E を実行するには、リポジトリのルートで次を実行します。事前に `icp`、Rust、Node.js、pnpm、Playwright を用意してください。
+
+```sh
+bash scripts/local-e2e.sh
+```
+
+PocketIC を含む Rust 検証は `bash scripts/pocket-ic-test.sh --no-fail-fast`、単一 Canister のビルド・Candid 照合は `bash scripts/test-single-canister.sh` です。必要なツールと詳細は[単一 Canister 化](docs/phase-3/single-canister.md)を参照してください。ローカルの mock 試験合格は、公開 IC や実 HL での送金・注文成功を保証しません。
+
+## 現行の仕様と制約
+
+- [単一 Canister の構成と権限](docs/phase-3/single-canister.md)
+- [共通保管口座の実装と制限](docs/phase-3/shared-reserve.md)
+- [市況の取得・判定](docs/phase-3/market-consensus.md)
+- [相関評価](docs/phase-3/privacy-local-eval.md)
+
+共通保管口座は直接送金の紐付けを減らしますが、現行 B0 の合成相関評価では top-1 対応付け成功率が 100% で、匿名性の基準には達していません。資金往復の実装と匿名性の達成は別に評価します。

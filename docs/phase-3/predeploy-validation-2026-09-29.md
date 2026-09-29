@@ -48,3 +48,7 @@ PocketICは16を使用。production、単体mock、統合mockのWasmを別target
 - テスト作成前には存在しなかったfrontend/.env.localと一時seedを削除した。スクリプトのcleanupでローカルnetwork・mockを停止。build成果物とignoredなローカルidentityは再利用可能な状態で残す。
 
 実行ログは `/private/tmp/private-perp-{host-tests,full-pocketic,production-pocketic,load-retest,upgrade-retest,local-e2e,testnet-smoke,testnet-build,cf-dryrun}.log` に保存。全件PocketICログは初回の4失敗も残しており、修正後の成功ログと併せて読む。今回の成功確認は変更済み作業ツリーに対するもので、検証時点ではコミット・push・公開デプロイはしていない。
+
+## GitHub Actions の状態（2026-09-29）
+
+[PR #2](https://github.com/humandebri/private-perp/pull/2) の Rust、PocketIC、Frontend のジョブは失敗表示だが、GitHub の注記は「アカウントの支払い失敗または利用上限によりジョブを開始できない」という内容で、試験ステップは実行されていない。コードに対する CI の合否は未確認。支払い・利用上限の問題を解消後、同じコミットで再実行し、結果を確認する必要がある。この節より上のローカル検証結果とは区別する。

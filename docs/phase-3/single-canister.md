@@ -1,6 +1,6 @@
 # 単一 Canister 化
 
-HL testnet 用バックエンドの配置単位は `private_perp` 一つ。UI は Cloudflare Workers から単一 ID に接続する。旧五 Canister からの移行・後方互換は対象外。
+HL testnet 用バックエンドの配置単位は `private_perp` 一つ。UI は Cloudflare Workers から単一 ID に接続する。
 
 ## 実装と権限
 
@@ -23,7 +23,7 @@ icp build private_perp
 bash scripts/test-single-canister.sh
 ```
 
-Candid は元モジュールから生成し、本番 Wasm の query/update エクスポートと照合する。統合 API は 115 メソッド。`candid/private_perp.did` の init 引数と UI バインディングも同期済み。
+Candid は元モジュールから生成し、本番 Wasm の query/update エクスポートと照合する。統合 API は 112 メソッド。`candid/private_perp.did` の init 引数と UI バインディングも同期済み。
 
 PocketIC は管理者・非管理者の認可、署名ログイン、HPKE、口座作成、利用資格登録、残高不足、配分の冪等性と過剰配分拒否、journal の自己呼び出し、アップグレード後の永続化と照合再開を検証する。試験専用 Wasm ではさらに配分3件の署名送信、模擬着金、Agent承認、注文送信を統合経路で確認する。HL応答はmockであり、実testnet受理の証拠ではない。試験専用 Wasm は別 target に作り、本番には mock 入金入口を含めない。
 
@@ -33,4 +33,4 @@ PocketIC は管理者・非管理者の認可、署名ログイン、HPKE、口�
 
 UI は `VITE_PRIVATE_PERP_CANISTER_ID` 一つを使う。公開試験用の例は `frontend/.env.testnet.example`。設定を `.env.testnet.local` に保存し、`pnpm --dir frontend build --mode testnet` で `wrangler.testnet.jsonc` を選ぶ。testnet 画面は HL testnet 上での送金先・送金元を案内し、mock 入金を実行しない。
 
-2026-09-28、ユーザー指定の既存 `xis3j-paaaa-aaaai-axumq-cai` を再インストールし、統合 Wasm を公開 ICP に配置した。管理者は `r75h6-lqd7b-5jack-at55d-vvti2-lg5qy-ly73a-5ezve-odnkc-kagu3-nae`。以前の Wiki データは再インストールで消去された。スナップショットは cycles 不足で作成できなかった。UI は [Cloudflare Workers](https://private-perp-ui-testnet.hude.workers.dev) に公開した。設定と未完了の受入条件は[受入記録](testnet-acceptance.md)を参照。
+公開 IC Canister は `xis3j-paaaa-aaaai-axumq-cai`、管理者は `r75h6-lqd7b-5jack-at55d-vvti2-lg5qy-ly73a-5ezve-odnkc-kagu3-nae`。2026-09-29現在、Canister は cycles 補充待ちで停止しており、ローカルの最新 Wasm は未反映。UI は [Cloudflare Workers](https://private-perp-ui-testnet.hude.workers.dev) に公開中。未完了の受入条件は[受入記録](testnet-acceptance.md)を参照。
