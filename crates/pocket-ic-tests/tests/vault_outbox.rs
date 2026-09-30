@@ -1429,3 +1429,365 @@ fn an_allocation_is_sent_from_the_reserve_to_the_trading_account() {
         "署名者は取引口座であってはならない（資金は準備口座から出る）"
     );
 }
+
+// Exercise the real async outbox, not a duplicate transaction implementation.
+// Each stage starts with a fresh canister and proves the injected fault was reached.
+fn atomicity_snapshot(
+    pic: &PocketIc,
+    vault: Principal,
+    caller: Principal,
+    method: &str,
+    request: Vec<u8>,
+) -> Result<(String, bool, bool, i64, i64, i64), String> {
+    query::<_, Result<(String, bool, bool, i64, i64, i64), String>>(
+        pic, vault, caller, method, request,
+    )?
+}
+
+fn outbox_atomicity_faults(trap: bool, withdrawal: bool) {
+    type Snapshot = (String, bool, bool, i64, i64, i64);
+    for stage in 1u8..=3 {
+        let pic = pic();
+        let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+        let controller = pic.get_controllers(vault)[0];
+        let caller = principal(47);
+        let session = open_session(&pic, vault, caller, &secret(147));
+        credit(&pic, vault, caller, &session, 1_000_000, 47);
+        let request = b"atomicity-allocation".to_vec();
+        if withdrawal {
+            let provisioned: Result<Vec<u8>, ErrorCode> = update(
+                &pic,
+                vault,
+                caller,
+                "provision_reserve_account",
+                session.clone(),
+            )
+            .unwrap();
+            provisioned.unwrap();
+            let eoa = address_from_secret(&secret(147)).unwrap();
+            let expires_at = pocket_ic_tests::envelope::now_ms(&pic) + 600_000;
+            let intent = private_perp::Withdrawal {
+                eoa,
+                amount: 400_000,
+                asset: "usdc".into(),
+                destination: format!("0x{}", hex::encode(eoa)),
+                network: "local".into(),
+                nonce: 1,
+                expires_at,
+                canister: vault.as_slice().to_vec(),
+            };
+            let accepted: Result<FundRequestAccepted, ErrorCode> = update(
+                &pic,
+                vault,
+                caller,
+                "request_withdrawal",
+                WithdrawalRequest {
+                    session: session.clone(),
+                    client_request_id: blob(&request),
+                    amount: 400_000,
+                    asset: AssetId::Usdc,
+                    destination: Destination::AuthenticatedEoaHlAccount,
+                    network: Network::Local,
+                    nonce: 1,
+                    expires_at,
+                    intent_signature: intent
+                        .sign_for_tests(&secret(147))
+                        .unwrap()
+                        .to_bytes65()
+                        .to_vec()
+                        .into(),
+                },
+            )
+            .unwrap();
+            accepted.unwrap();
+        } else {
+            allocate(&pic, vault, caller, &session, &request, 400_000).expect("accepted");
+        }
+        let before: Snapshot = atomicity_snapshot(
+            &pic,
+            vault,
+            controller,
+            "test_outbox_atomicity_snapshot",
+            request.clone(),
+        )
+        .expect("snapshot before sweep");
+        assert_eq!(before, ("queued".into(), false, false, 0, 0, 0));
+        let _: () = update_args(
+            &pic,
+            vault,
+            controller,
+            "test_set_outbox_fault",
+            (stage, trap),
+        )
+        .expect("enable fault");
+
+        let message = pic
+            .submit_call(
+                vault,
+                caller,
+                "test_sweep_now",
+                candid::encode_one(()).unwrap(),
+            )
+            .expect("submit faulted sweep");
+        let mut completed = None;
+        for _ in 0..200 {
+            pic.tick();
+            // Never mock/consume a POST: even a subsequently trapped call must
+            // fail this assertion if it issued an HTTP request before commit.
+            assert!(
+                pic.get_canister_http().is_empty(),
+                "stage {stage}: unexpected HTTP"
+            );
+            if let Some(result) = pic.ingress_status(message.clone()) {
+                completed = Some(result);
+                break;
+            }
+        }
+        let result = completed.expect("faulted sweep completed");
+        if trap {
+            let error = result.expect_err("trap must reject the call");
+            assert!(
+                format!("{error:?}").contains("outbox atomicity fault"),
+                "stage {stage}: {error:?}"
+            );
+        } else {
+            let bytes = result.expect("application error reply");
+            let result: Result<u32, ErrorCode> = candid::decode_one(&bytes).expect("decode error");
+            let error = result.expect_err("injected application error");
+            assert!(format!("{error:?}").contains("outbox atomicity fault"));
+        }
+        assert!(
+            pic.get_canister_http().is_empty(),
+            "no pending HTTP request"
+        );
+        let failed: Snapshot = atomicity_snapshot(
+            &pic,
+            vault,
+            controller,
+            "test_outbox_atomicity_snapshot",
+            request.clone(),
+        )
+        .expect("snapshot after failed transaction");
+        // Claim ran in an earlier message/transaction and remains committed.
+        assert_eq!(
+            failed,
+            ("signing".into(), false, false, 1, 0, 0),
+            "stage {stage}"
+        );
+        let funds = status(&pic, vault, caller, &session);
+        assert_eq!(
+            funds.reserve_unallocated,
+            if withdrawal { 600_000 } else { 1_000_000 }
+        );
+        assert_eq!(funds.withdrawable, 600_000);
+        assert_eq!(funds.in_transit, 0);
+
+        let _: () = update_args(
+            &pic,
+            vault,
+            controller,
+            "test_set_outbox_fault",
+            (0u8, false),
+        )
+        .expect("disable fault in a separate message");
+        pic.advance_time(Duration::from_secs(31));
+        let (retry, sent): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
+            &pic,
+            vault,
+            caller,
+            "test_sweep_now",
+            (),
+            Ok((200, ACCEPTED.to_vec())),
+        )
+        .expect("retry call");
+        // The durable journal writer was claimed BEFORE the await. Its release
+        // belongs to the rolled-back transaction, so ordinary retry stays blocked.
+        assert!(
+            matches!(retry, Err(ErrorCode::JournalWriterBusy)),
+            "{retry:?}"
+        );
+        assert!(sent.is_none());
+        let retried: Snapshot = atomicity_snapshot(
+            &pic,
+            vault,
+            controller,
+            "test_outbox_atomicity_snapshot",
+            request.clone(),
+        )
+        .expect("snapshot after blocked retry");
+        assert_eq!(retried, ("signing".into(), false, false, 2, 0, 0));
+
+        // Exercise the existing authorized manual recovery, not a raw DB unlock.
+        let guard: Result<Option<Principal>, ErrorCode> =
+            query(&pic, vault, controller, "get_journal_guard", ()).expect("guard query");
+        let guard = guard.expect("guard result").expect("configured guard");
+        // Unauthorized callers cannot initiate cancellation or clear the writer.
+        let denied: Result<(), ErrorCode> =
+            update(&pic, vault, caller, "resume_journal", ()).unwrap();
+        assert!(matches!(denied, Err(ErrorCode::Unauthenticated { .. })));
+        for _ in 0..2 {
+            let resumed: Result<(), ErrorCode> =
+                update(&pic, guard, principal(239), "resume_journal", vault)
+                    .expect("authorized SNS resume call");
+            resumed.expect("manual recovery; repeated calls are harmless");
+        }
+        let journal_status: Result<(bool, bool), ErrorCode> =
+            query(&pic, vault, controller, "get_journal_send_status", ()).expect("journal status");
+        assert_eq!(journal_status.unwrap(), (false, false));
+        let restored = status(&pic, vault, caller, &session);
+        assert_eq!(restored.reserve_unallocated, 1_000_000);
+        assert_eq!(
+            restored.withdrawable, 1_000_000,
+            "cancelled send releases its hold once"
+        );
+        assert_eq!(restored.in_transit, 0);
+        let after_resume: Snapshot = atomicity_snapshot(
+            &pic,
+            vault,
+            controller,
+            "test_outbox_atomicity_snapshot",
+            request.clone(),
+        )
+        .unwrap();
+        assert_eq!(after_resume, ("aborted".into(), false, false, 2, 1, 0));
+        // Other/new requests proceed, but the cancelled action is never re-sent.
+        allocate(
+            &pic,
+            vault,
+            caller,
+            &session,
+            b"after-manual-recovery",
+            100_000,
+        )
+        .unwrap();
+        let (sent, http): (Result<u32, ErrorCode>, _) = call_with_mocked_outcall_captured(
+            &pic,
+            vault,
+            caller,
+            "test_sweep_now",
+            (),
+            Ok((200, ACCEPTED.to_vec())),
+        )
+        .expect("new request after recovery");
+        assert_eq!(sent.unwrap(), 1);
+        assert!(http.is_some());
+        assert_eq!(status(&pic, vault, caller, &session).in_transit, 100_000);
+
+        // Reinitialize DB connections from stable memory, then inspect before any
+        // journal replay or sweep. An upgrade also locks sending by design.
+        pocket_ic_tests::upgrade(
+            &pic,
+            vault,
+            FUNDS_VAULT_WASM,
+            candid::encode_one(()).unwrap(),
+        );
+        let reopened: Snapshot = atomicity_snapshot(
+            &pic,
+            vault,
+            controller,
+            "test_outbox_atomicity_snapshot",
+            request,
+        )
+        .expect("snapshot after upgrade");
+        assert_eq!(
+            reopened, after_resume,
+            "stage {stage}: persisted rollback state"
+        );
+    }
+}
+
+#[test]
+fn outbox_atomicity_application_errors_rollback_all_send_writes() {
+    outbox_atomicity_faults(false, false);
+}
+
+#[test]
+fn outbox_atomicity_traps_rollback_all_send_writes() {
+    outbox_atomicity_faults(true, false);
+}
+
+#[test]
+fn withdrawal_atomicity_errors_are_manually_recoverable() {
+    outbox_atomicity_faults(false, true);
+}
+
+#[test]
+fn withdrawal_atomicity_traps_are_manually_recoverable() {
+    outbox_atomicity_faults(true, true);
+}
+
+#[test]
+fn manual_recovery_refuses_a_send_with_remote_authorization() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let controller = pic.get_controllers(vault)[0];
+    let caller = principal(47);
+    let session = open_session(&pic, vault, caller, &secret(147));
+    credit(&pic, vault, caller, &session, 1_000_000, 47);
+    allocate(
+        &pic,
+        vault,
+        caller,
+        &session,
+        b"authorized-ambiguity",
+        400_000,
+    )
+    .unwrap();
+    let _: () = update_args(
+        &pic,
+        vault,
+        controller,
+        "test_set_outbox_fault",
+        (1u8, false),
+    )
+    .unwrap();
+    let failed: Result<u32, ErrorCode> = update(&pic, vault, caller, "test_sweep_now", ()).unwrap();
+    assert!(format!("{failed:?}").contains("outbox atomicity fault"));
+    let _: () = update_args(
+        &pic,
+        vault,
+        controller,
+        "test_set_outbox_fault",
+        (0u8, false),
+    )
+    .unwrap();
+    let journal: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_send_journal", ()).unwrap();
+    let journal = journal.unwrap().unwrap();
+    let records: Result<Vec<JournalRecord>, ErrorCode> =
+        update_args(&pic, journal, vault, "records", (0u64, 100u32)).unwrap();
+    let record = records.unwrap().pop().unwrap();
+    // Model the ambiguity of a local rollback: remote authorization is durable,
+    // while the local row appears unsigned. No assertion that a POST happened.
+    let authorized: Result<bool, ErrorCode> = update_args(
+        &pic,
+        journal,
+        vault,
+        "authorize_send",
+        (record.intent.kind, record.intent.request_id),
+    )
+    .unwrap();
+    assert!(authorized.unwrap());
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).unwrap();
+    let resumed: Result<(), ErrorCode> = update(
+        &pic,
+        guard.unwrap().unwrap(),
+        principal(239),
+        "resume_journal",
+        vault,
+    )
+    .unwrap();
+    assert!(matches!(resumed, Err(ErrorCode::PolicyUnavailable)));
+    assert_eq!(status(&pic, vault, caller, &session).withdrawable, 600_000);
+    let local = atomicity_snapshot(
+        &pic,
+        vault,
+        controller,
+        "test_outbox_atomicity_snapshot",
+        b"authorized-ambiguity".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(local, ("signing".into(), false, false, 1, 0, 0));
+    assert!(pic.get_canister_http().is_empty());
+}

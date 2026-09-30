@@ -66,7 +66,8 @@ jobs:
             test -f "$wasm"
             for method in test_credit_deposit test_corrupt_action_digest test_hpke_seal \
                           test_hpke_open test_ecdsa_roundtrip test_sweep_now test_ingest_fills \
-                          test_apply_order_status test_sign_order_action; do
+                          test_apply_order_status test_sign_order_action \
+                          test_set_outbox_fault test_outbox_atomicity_snapshot; do
               if grep -q "$method" "$wasm"; then
                 echo "$wasm にテスト専用メソッド $method が含まれています" >&2
                 exit 1

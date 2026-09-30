@@ -53,6 +53,16 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         sql: RECOVERY_EVENTS,
     },
+    Migration {
+        version: 3,
+        sql: "CREATE TABLE send_permits (
+          worker BLOB NOT NULL,
+          kind TEXT NOT NULL,
+          request_id BLOB NOT NULL CHECK(length(request_id) = 32),
+          state TEXT NOT NULL CHECK(state IN ('prepared','authorized','cancelled')),
+          PRIMARY KEY(worker, kind, request_id)
+        );",
+    },
 ];
 
 /// vault/coreの双方へ適用する受領証跡。連番欠落は起動時の送信停止条件。

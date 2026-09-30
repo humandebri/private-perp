@@ -284,6 +284,25 @@ pub(crate) async fn ensure_trading_account(
 }
 
 /// 1つのactionを実行する。
+// The external permission call is an await boundary. A concurrent resume,
+// state change, or stale worker must still prevent this callback from posting.
+fn require_current_dispatch(action: &FundActionRow) -> Result<(), ErrorCode> {
+    db::tx::query(|c| {
+        if db::repo::send_journal_client::locked(c)? {
+            return Err(db::error::Error::Conflict);
+        }
+        let current = db::repo::actions::action_row(c, &action.action_id)?
+            .ok_or(db::error::Error::NotFound)?;
+        if current.worker_epoch != action.worker_epoch
+            || current.dispatch_state != api_types::fund::ActionState::Dispatching
+        {
+            return Err(db::error::Error::Conflict);
+        }
+        Ok(())
+    })
+    .map_err(|error| map_db(error, None))
+}
+
 async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
     if action.kind != "allocation" && action.kind != "withdrawal" && action.kind != "recovery" {
         // 未対応の種別は安全側で中止する。
@@ -420,7 +439,7 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
         action.nonce,
         &action.digest,
     );
-    let ack = journal_client::append("vault", intent.clone()).await?;
+    let ack = journal_client::prepare_send("vault", intent.clone()).await?;
     // 受領証跡と dispatching を同一transactionで永続化する。
     db::tx::update(|connection| {
         let current = db::repo::funds::fund_request(connection, &action.user_id, &request_id)?
@@ -436,11 +455,27 @@ async fn dispatch(action: &FundActionRow, now: u64) -> Result<(), ErrorCode> {
             &wire_payload,
             now,
         )?;
+        #[cfg(feature = "test-venue")]
+        crate::test_atomicity::checkpoint(1)?;
         journal_client::record(connection, &intent, &ack)?;
-        db::repo::actions::mark_dispatching(connection, &action.action_id, action.worker_epoch, now)
+        #[cfg(feature = "test-venue")]
+        crate::test_atomicity::checkpoint(2)?;
+        db::repo::actions::mark_dispatching(
+            connection,
+            &action.action_id,
+            action.worker_epoch,
+            now,
+        )?;
+        #[cfg(feature = "test-venue")]
+        crate::test_atomicity::checkpoint(3)?;
+        Ok(())
     })
     .map_err(|error| map_db(error, None))?;
 
+    // A durable, single-use external permission is required even after local commit.
+    // Cancellation during manual recovery permanently prevents a delayed send.
+    journal_client::authorize_send(&intent).await?;
+    require_current_dispatch(action)?;
     match venue::post_usd_send(&payload, &signature, &permit).await {
         Ok((ExchangeOutcome::Accepted, response)) => {
             let result = fund_transfer_result_event(
@@ -556,7 +591,7 @@ async fn dispatch_withdrawal(
         action.nonce,
         &action.digest,
     );
-    let ack = journal_client::append("vault", intent.clone()).await?;
+    let ack = journal_client::prepare_send("vault", intent.clone()).await?;
     db::tx::update(|connection| {
         db::repo::actions::mark_signed(
             connection,
@@ -566,11 +601,27 @@ async fn dispatch_withdrawal(
             &wire_payload,
             now,
         )?;
+        #[cfg(feature = "test-venue")]
+        crate::test_atomicity::checkpoint(1)?;
         journal_client::record(connection, &intent, &ack)?;
-        db::repo::actions::mark_dispatching(connection, &action.action_id, action.worker_epoch, now)
+        #[cfg(feature = "test-venue")]
+        crate::test_atomicity::checkpoint(2)?;
+        db::repo::actions::mark_dispatching(
+            connection,
+            &action.action_id,
+            action.worker_epoch,
+            now,
+        )?;
+        #[cfg(feature = "test-venue")]
+        crate::test_atomicity::checkpoint(3)?;
+        Ok(())
     })
     .map_err(|error| map_db(error, None))?;
 
+    // A durable, single-use external permission is required even after local commit.
+    // Cancellation during manual recovery permanently prevents a delayed send.
+    journal_client::authorize_send(&intent).await?;
+    require_current_dispatch(action)?;
     match venue::post_usd_send(&payload, &signature, &permit).await {
         Ok((ExchangeOutcome::Accepted, response)) => {
             let result = fund_transfer_result_event(
@@ -730,7 +781,7 @@ async fn dispatch_recovery(
         action.nonce,
         &action.digest,
     );
-    let ack = journal_client::append("vault", intent.clone()).await?;
+    let ack = journal_client::prepare_send("vault", intent.clone()).await?;
     let send_now = crate::clock::now_ms();
     db::tx::update(|connection| {
         let current = db::repo::funds::fund_request(connection, &action.user_id, request_id)?
@@ -753,16 +804,27 @@ async fn dispatch_recovery(
             &wire_payload,
             send_now,
         )?;
+        #[cfg(feature = "test-venue")]
+        crate::test_atomicity::checkpoint(1)?;
         journal_client::record(connection, &intent, &ack)?;
+        #[cfg(feature = "test-venue")]
+        crate::test_atomicity::checkpoint(2)?;
         db::repo::actions::mark_dispatching(
             connection,
             &action.action_id,
             action.worker_epoch,
             send_now,
-        )
+        )?;
+        #[cfg(feature = "test-venue")]
+        crate::test_atomicity::checkpoint(3)?;
+        Ok(())
     })
     .map_err(|error| map_db(error, None))?;
 
+    // A durable, single-use external permission is required even after local commit.
+    // Cancellation during manual recovery permanently prevents a delayed send.
+    journal_client::authorize_send(&intent).await?;
+    require_current_dispatch(action)?;
     match venue::post_usd_send(&payload, &signature, &permit).await {
         Ok((ExchangeOutcome::Accepted, response)) => {
             let settlement = recovery_settlement_event(

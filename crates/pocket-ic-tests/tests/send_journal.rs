@@ -945,3 +945,81 @@ fn v1_matching_backup_cannot_resume_when_business_stream_has_unreplayed_event() 
         pocket_ic_tests::query(&pic, vault, sns, "recovery_stage_status", ()).unwrap();
     assert_eq!(staged.unwrap(), (1, true));
 }
+
+#[test]
+fn prepared_send_authorization_and_cancellation_are_mutually_exclusive() {
+    let pic = pic();
+    let controller = principal(211);
+    let worker = principal(212);
+    let stranger = principal(213);
+    let journal = deploy(
+        &pic,
+        SEND_JOURNAL_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let registered: Result<(), ErrorCode> = update_args(
+        &pic,
+        journal,
+        controller,
+        "register_worker",
+        ("vault".to_string(), worker),
+    )
+    .unwrap();
+    registered.unwrap();
+    for (seed, authorize_first) in [(21u8, false), (22, true)] {
+        let mut prepared = intent(1);
+        prepared.kind = "allocation".into();
+        prepared.request_id = vec![seed; 32].into();
+        let head: Result<JournalHead, ErrorCode> =
+            update(&pic, journal, worker, "append_prepared", prepared.clone()).unwrap();
+        head.unwrap();
+        let key = (prepared.kind.clone(), prepared.request_id.clone());
+        let denied: Result<bool, ErrorCode> =
+            update_args(&pic, journal, stranger, "cancel_prepared_send", key.clone()).unwrap();
+        assert!(matches!(denied, Err(ErrorCode::Unauthenticated { .. })));
+        if authorize_first {
+            let granted: Result<bool, ErrorCode> =
+                update_args(&pic, journal, worker, "authorize_send", key.clone()).unwrap();
+            assert!(granted.unwrap());
+        }
+        for _ in 0..2 {
+            let cancelled: Result<bool, ErrorCode> =
+                update_args(&pic, journal, worker, "cancel_prepared_send", key.clone()).unwrap();
+            assert_eq!(cancelled.unwrap(), !authorize_first);
+            let granted: Result<bool, ErrorCode> =
+                update_args(&pic, journal, worker, "authorize_send", key.clone()).unwrap();
+            assert!(
+                !granted.unwrap(),
+                "late/repeated authorization must never grant a send"
+            );
+        }
+        let reopened: Result<JournalHead, ErrorCode> =
+            update(&pic, journal, worker, "append_prepared", prepared).unwrap();
+        assert!(
+            reopened.is_err(),
+            "terminal permission cannot be prepared again"
+        );
+    }
+    // An old-format intent is not evidence that a POST was prevented.
+    let mut legacy = intent(2);
+    legacy.kind = "allocation".into();
+    let head: Result<JournalHead, ErrorCode> =
+        update(&pic, journal, worker, "append", legacy.clone()).unwrap();
+    head.unwrap();
+    let cancelled: Result<bool, ErrorCode> = update_args(
+        &pic,
+        journal,
+        worker,
+        "cancel_prepared_send",
+        (legacy.kind.clone(), legacy.request_id.clone()),
+    )
+    .unwrap();
+    assert!(!cancelled.unwrap());
+    let upgraded: Result<JournalHead, ErrorCode> =
+        update(&pic, journal, worker, "append_prepared", legacy).unwrap();
+    assert!(
+        upgraded.is_err(),
+        "legacy intent cannot acquire a new unsent certificate"
+    );
+}

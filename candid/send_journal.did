@@ -285,6 +285,7 @@ type Result_2 = variant { Ok : vec JournalRecord; Err : ErrorCode };
 type Result_3 = variant { Ok : opt RecoveryRecord; Err : ErrorCode };
 type Result_4 = variant { Ok : vec RecoveryRecord; Err : ErrorCode };
 type Result_5 = variant { Ok; Err : ErrorCode };
+type SendPermitResult = variant { Ok : bool; Err : ErrorCode };
 type SendIntent = record {
   account_id : blob;
   request_id : blob;
@@ -294,6 +295,9 @@ type SendIntent = record {
 };
 service : () -> {
   append : (SendIntent) -> (Result);
+  append_prepared : (SendIntent) -> (Result);
+  authorize_send : (text, blob) -> (SendPermitResult);
+  cancel_prepared_send : (text, blob) -> (SendPermitResult);
   append_recovery_event : (RecoveryEvent) -> (Result);
   head : () -> (Result);
   // Idempotency lookup for a response lost after the append committed.

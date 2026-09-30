@@ -602,6 +602,36 @@ fn intent_record(
 
 #[ic_cdk::update]
 fn append(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
+    append_impl(intent, false)
+}
+
+#[ic_cdk::update]
+fn append_prepared(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
+    if !matches!(
+        intent.kind.as_str(),
+        "allocation" | "withdrawal" | "recovery"
+    ) {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    append_impl(intent, true)
+}
+
+#[ic_cdk::update]
+fn authorize_send(kind: String, request_id: Vec<u8>) -> Result<bool, ErrorCode> {
+    let worker = require_worker()?;
+    let id = fixed32(&request_id)?;
+    db::tx::update(|c| db::repo::send_journal::authorize_send(c, &worker, &kind, &id))
+        .map_err(map_db)
+}
+
+#[ic_cdk::update]
+fn cancel_prepared_send(kind: String, request_id: Vec<u8>) -> Result<bool, ErrorCode> {
+    let worker = require_worker()?;
+    let id = fixed32(&request_id)?;
+    db::tx::update(|c| db::repo::send_journal::cancel_send(c, &worker, &kind, &id)).map_err(map_db)
+}
+
+fn append_impl(intent: SendIntent, prepared: bool) -> Result<JournalHead, ErrorCode> {
     let worker = require_worker()?;
     if !matches!(
         intent.kind.as_str(),
@@ -631,6 +661,13 @@ fn append(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
             {
                 return Err(DbError::Conflict);
             }
+            if prepared
+                && db::repo::send_journal::send_state(c, &worker, &intent.kind, &request_id)?
+                    .as_deref()
+                    != Some("prepared")
+            {
+                return Err(DbError::Conflict);
+            }
             return Ok(JournalHead {
                 sequence: existing.sequence,
                 hash: existing.hash.to_vec().into(),
@@ -649,6 +686,9 @@ fn append(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
         hasher.update(intent.nonce.to_be_bytes());
         hasher.update(digest);
         let hash: [u8; 32] = hasher.finalize().into();
+        if prepared {
+            db::repo::send_journal::prepare_send(c, &worker, &intent.kind, &request_id)?;
+        }
         db::repo::send_journal::append(
             c,
             &worker,

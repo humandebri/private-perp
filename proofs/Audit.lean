@@ -1,0 +1,46 @@
+import CanisterProofs
+
+#print axioms CanisterProofs.Guard.execute_checks
+#print axioms CanisterProofs.Guard.seven_day_delay
+#print axioms CanisterProofs.Guard.claim_sets_executing
+#print axioms CanisterProofs.Guard.no_second_claim
+#print axioms CanisterProofs.Guard.cannot_cancel_in_flight
+#print axioms CanisterProofs.Guard.terminal_cannot_execute
+#print axioms CanisterProofs.Guard.retry_preserves_reservation
+#print axioms CanisterProofs.Budget.consume_preserves_safe
+#print axioms CanisterProofs.Budget.paused_only_reconciles
+#print axioms CanisterProofs.Budget.risk_leaves_exit_capacity
+#print axioms CanisterProofs.Budget.all_reachable_safe
+#print axioms CanisterProofs.Budget.recent_dispatch_is_charged
+#print axioms CanisterProofs.Budget.collected_grant_cannot_be_valid
+#print axioms CanisterProofs.Ledger.checkedTotal_correct
+#print axioms CanisterProofs.Ledger.accepted_balanced
+#print axioms CanisterProofs.Ledger.every_committed_history_balanced
+#print axioms CanisterProofs.Ledger.posting_templates_balanced
+#print axioms CanisterProofs.Ledger.positive_templates_accepted
+#print axioms CanisterProofs.Ledger.withdrawable_partition
+
+#print axioms CanisterProofs.Outbox.stale_cas_rejected
+#print axioms CanisterProofs.Outbox.successful_cas_matches
+#print axioms CanisterProofs.Outbox.successful_cas_step
+#print axioms CanisterProofs.Outbox.step_epoch_monotone
+#print axioms CanisterProofs.Outbox.trace_epoch_monotone
+#print axioms CanisterProofs.Outbox.stale_after_reclaim
+#print axioms CanisterProofs.Outbox.step_preserves_safe
+#print axioms CanisterProofs.Outbox.trace_preserves_safe
+#print axioms CanisterProofs.Outbox.at_most_one_dispatch_claim
+#print axioms CanisterProofs.Outbox.edge_preserves_post
+#print axioms CanisterProofs.Outbox.step_preserves_post
+#print axioms CanisterProofs.Outbox.no_redispatch_after_unknown
+#print axioms CanisterProofs.Outbox.post_cannot_abort
+#print axioms CanisterProofs.Outbox.send_transaction_trace
+
+#print axioms CanisterProofs.SendPermit.successful_cancel_is_terminal
+#print axioms CanisterProofs.SendPermit.cancelled_never_authorizes
+#print axioms CanisterProofs.SendPermit.authorized_never_cancels
+#print axioms CanisterProofs.SendPermit.authorization_is_single_use
+#print axioms CanisterProofs.SendPermit.legacy_is_not_unsent_evidence
+#print axioms CanisterProofs.SendPermit.cancellation_survives_interleavings
+#print axioms CanisterProofs.SendPermit.delayed_callback_cannot_send
+#print axioms CanisterProofs.SendPermit.authorization_survives_interleavings
+#print axioms CanisterProofs.SendPermit.cancellation_excludes_prior_authorization

@@ -27,6 +27,8 @@ mod private_api;
 mod random;
 mod recovery;
 mod rest_budget;
+#[cfg(feature = "test-venue")]
+mod test_atomicity;
 mod venue;
 
 /// HPKE封筒は共有クレートへ移設した（`trading_core`も同じ封筒を使う）。

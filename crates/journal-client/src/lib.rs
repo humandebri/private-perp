@@ -101,7 +101,8 @@ pub async fn resume(role: &str) -> Result<(), ErrorCode> {
             reason: "journal resume requires guard".into(),
         });
     }
-    db::tx::update(|c| db::repo::send_journal_client::set_locked(c, true)).map_err(map_db)?;
+    let resume_epoch =
+        db::tx::update(db::repo::send_journal_client::begin_resume).map_err(map_db)?;
     let principal = configured()?.ok_or(ErrorCode::PolicyUnavailable)?;
     let response = Call::bounded_wait(principal, "head")
         .with_arg(())
@@ -124,7 +125,7 @@ pub async fn resume(role: &str) -> Result<(), ErrorCode> {
     if recovery_contiguous && recovery_sequence < recovery_remote.sequence {
         stage_missing_recovery(principal, &recovery_remote).await?;
     }
-    let (sequence, hash, contiguous) =
+    let (sequence, _hash, contiguous) =
         db::tx::query(db::repo::send_journal_client::local_head).map_err(map_db)?;
     let unresolved =
         db::tx::query(|c| db::repo::send_journal_client::unresolved_without_receipt(c, role))
@@ -134,6 +135,19 @@ pub async fn resume(role: &str) -> Result<(), ErrorCode> {
         // 台帳・予約・外部状態の再構築証跡がまだ無い記録は送信停止のままにする。
         stage_missing(principal, &remote).await?;
     }
+    // A new-protocol send can be cancelled only if the independent journal has
+    // never granted its single-use authorization. Legacy/authorized sends fail closed.
+    if role == "vault"
+        && recovery_contiguous
+        && recovery_sequence == recovery_remote.sequence
+        && recovery_hash.as_slice() == recovery_remote.hash.as_ref()
+        && !db::tx::query(db::repo::send_journal_client::has_recovery_staged).map_err(map_db)?
+    {
+        recover_prepared_send(principal, &remote).await?;
+    }
+    // Re-read after recovery and its await boundary.
+    let (sequence, hash, contiguous) =
+        db::tx::query(db::repo::send_journal_client::local_head).map_err(map_db)?;
     // Both streams may be ahead of an older backup. Stage each independent
     // chain before returning the fail-closed result so a later recovery pass
     // has the complete pair of deltas.
@@ -181,7 +195,43 @@ pub async fn resume(role: &str) -> Result<(), ErrorCode> {
     {
         return Err(ErrorCode::PolicyUnavailable);
     }
-    db::tx::update(db::repo::send_journal_client::unlock_after_resume).map_err(map_db)
+    db::tx::update(|c| db::repo::send_journal_client::unlock_after_resume(c, resume_epoch))
+        .map_err(map_db)
+}
+
+async fn recover_prepared_send(
+    principal: Principal,
+    remote: &JournalHead,
+) -> Result<(), ErrorCode> {
+    let candidate = db::tx::query(|c| {
+        let (sequence, hash) = db::repo::send_journal_client::stage_head(c)?;
+        if sequence != remote.sequence || hash.as_slice() != remote.hash.as_ref() {
+            return Ok(None);
+        }
+        db::repo::send_journal_client::unsent_candidate(c)
+    })
+    .map_err(map_db)?;
+    let Some(candidate) = candidate else {
+        return Ok(());
+    };
+    let response = Call::bounded_wait(principal, "cancel_prepared_send")
+        .with_args(&(candidate.kind.clone(), candidate.action_id.to_vec()))
+        .await
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let cancelled = response
+        .candid::<Result<bool, ErrorCode>>()
+        .map_err(|_| ErrorCode::PolicyUnavailable)??;
+    if !cancelled {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    db::tx::update(|c| {
+        db::repo::send_journal_client::finish_cancelled_send(
+            c,
+            &candidate,
+            ic_cdk::api::time() / 1_000_000,
+        )
+    })
+    .map_err(map_db)
 }
 
 fn validate_staged_recovery_event(
@@ -1691,6 +1741,34 @@ pub async fn ensure_ready(role: &str) -> Result<(), ErrorCode> {
 
 /// 応答喪失時は送信せず、独立ジャーナルとの差を照合するまで停止する。
 pub async fn append(role: &str, intent: SendIntent) -> Result<JournalAck, ErrorCode> {
+    append_impl(role, intent, "append").await
+}
+
+pub async fn prepare_send(role: &str, intent: SendIntent) -> Result<JournalAck, ErrorCode> {
+    append_impl(role, intent, "append_prepared").await
+}
+
+pub async fn authorize_send(intent: &SendIntent) -> Result<(), ErrorCode> {
+    let principal = configured()?.ok_or(ErrorCode::PolicyUnavailable)?;
+    let response = Call::bounded_wait(principal, "authorize_send")
+        .with_args(&(intent.kind.clone(), intent.request_id.clone()))
+        .await
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    if response
+        .candid::<Result<bool, ErrorCode>>()
+        .map_err(|_| ErrorCode::PolicyUnavailable)??
+    {
+        Ok(())
+    } else {
+        Err(ErrorCode::PolicyUnavailable)
+    }
+}
+
+async fn append_impl(
+    role: &str,
+    intent: SendIntent,
+    method: &str,
+) -> Result<JournalAck, ErrorCode> {
     let request_id: [u8; 32] = intent
         .request_id
         .as_ref()
@@ -1717,7 +1795,7 @@ pub async fn append(role: &str, intent: SendIntent) -> Result<JournalAck, ErrorC
         return Err(error);
     }
     let principal = configured()?.ok_or(ErrorCode::PolicyUnavailable)?;
-    let response = Call::bounded_wait(principal, "append")
+    let response = Call::bounded_wait(principal, method)
         .with_arg(intent.clone())
         .await;
     let decoded = response

@@ -11,6 +11,7 @@
 - Phase 0の契約・画面仕様：`docs/phase-0/README.md`
 - 完了範囲と残件：`docs/implementation-status.md`
 - 共通入金口座の実装と制限：`docs/phase-3/shared-reserve.md`
+- Leanによるupgrade・REST予算・台帳・Outboxモデルの証明と適用範囲：`proofs/README.md`（`python3 proofs/verify.py`）
 
 ICPバックエンド（`crates/`）は雛形ではなく、資金・署名・認証を担うCanisterを実装済みです。`funds_vault`（認証・セッション・複式台帳・予約・outboxの署名送信と照合・入金計上・回収・HPKE・Agent承認要求）、`trading_core`（認可境界・注文受付・取消送信・Agent鍵署名・照合）、`policy_registry`、`control_guard` が該当します。
 

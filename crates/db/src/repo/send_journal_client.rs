@@ -185,12 +185,29 @@ pub fn release_writer(
 
 /// Called only after the guard verified both remote heads and staged state.
 /// A later callback cannot use its old epoch once another append claims it.
-pub fn unlock_after_resume(c: &mut UpdateConnection<'_>) -> Result<(), Error> {
+pub fn begin_resume(c: &mut UpdateConnection<'_>) -> Result<u64, Error> {
+    c.execute(
+        "UPDATE send_journal_client SET locked = 1, writer_epoch = writer_epoch + 1
+        WHERE singleton = 1 AND writer_epoch < 9223372036854775807",
+        params![],
+    )
+    .map_err(sql)?;
+    crate::cas::ensure_changed(crate::cas::changes(c)?, "resume epoch", "unavailable")?;
+    let epoch: i64 = c
+        .query_scalar(
+            "SELECT writer_epoch FROM send_journal_client WHERE singleton = 1",
+            &[],
+        )
+        .map_err(sql)?;
+    u64::try_from(epoch).map_err(|_| Error::Overflow)
+}
+
+pub fn unlock_after_resume(c: &mut UpdateConnection<'_>, epoch: u64) -> Result<(), Error> {
     c.execute(
         "UPDATE send_journal_client
          SET locked = 0, writer_kind = NULL, writer_request_id = NULL
-         WHERE singleton = 1 AND replay_pending_validation = 0",
-        params![],
+         WHERE singleton = 1 AND replay_pending_validation = 0 AND locked = 1 AND writer_epoch = ?1",
+        params![i64::try_from(epoch).map_err(|_| Error::Overflow)?],
     )
     .map_err(sql)?;
     crate::cas::ensure_changed(
@@ -282,6 +299,129 @@ pub fn has_staged(c: &Connection) -> Result<bool, Error> {
         c.query_optional_scalar::<i64>("SELECT 1 FROM send_journal_stage LIMIT 1", params![])
             .map_err(sql)?
             .is_some(),
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnsentCandidate {
+    pub writer_epoch: u64,
+    pub sequence: u64,
+    pub kind: String,
+    pub action_id: [u8; 32],
+    pub account_id: [u8; 32],
+    pub nonce: u64,
+    pub digest: [u8; 32],
+    pub hash: [u8; 32],
+}
+
+/// Only the outstanding writer's one staged record can be resolved here.
+/// Cancellation evidence must still be obtained from the independent journal.
+pub fn unsent_candidate(c: &Connection) -> Result<Option<UnsentCandidate>, Error> {
+    let row = c.query_optional(
+        "SELECT w.writer_epoch, s.sequence, s.kind, s.request_id, s.account_id, s.nonce, s.digest, s.hash
+         FROM send_journal_client w JOIN send_journal_stage s
+           ON s.kind = w.writer_kind AND s.request_id = w.writer_request_id
+         JOIN fund_actions a ON a.action_id = s.request_id
+         JOIN fund_requests f ON f.user_id = a.user_id AND f.client_request_id = a.client_request_id
+         WHERE w.singleton = 1 AND w.locked = 1 AND w.replay_pending_validation = 0
+           AND s.kind IN ('allocation', 'withdrawal', 'recovery')
+           AND a.kind = s.kind AND a.nonce = s.nonce AND a.digest = s.digest
+           AND a.dispatch_state IN ('queued','signing') AND a.signature IS NULL AND a.wire_payload IS NULL
+           AND f.kind = a.kind AND f.state = 'reserved'
+           AND (SELECT COUNT(*) FROM send_journal_stage) = 1",
+        params![], |r| Ok((r.get::<i64>(0)?, r.get::<i64>(1)?, r.get::<String>(2)?,
+            r.get::<Vec<u8>>(3)?, r.get::<Vec<u8>>(4)?, r.get::<i64>(5)?,
+            r.get::<Vec<u8>>(6)?, r.get::<Vec<u8>>(7)?)),
+    ).map_err(sql)?;
+    row.map(
+        |(epoch, sequence, kind, id, account, nonce, digest, hash)| {
+            Ok(UnsentCandidate {
+                writer_epoch: u64::try_from(epoch).map_err(|_| Error::Overflow)?,
+                sequence: u64::try_from(sequence).map_err(|_| Error::Overflow)?,
+                kind,
+                action_id: id
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad staged action"))?,
+                account_id: account
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad staged account"))?,
+                nonce: u64::try_from(nonce).map_err(|_| Error::Overflow)?,
+                digest: digest
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad staged digest"))?,
+                hash: hash
+                    .try_into()
+                    .map_err(|_| Error::Invariant("bad staged hash"))?,
+            })
+        },
+    )
+    .transpose()
+}
+
+/// Called only with durable cancellation evidence, inside one local transaction.
+pub fn finish_cancelled_send(
+    c: &mut UpdateConnection<'_>,
+    expected: &UnsentCandidate,
+    now: u64,
+) -> Result<(), Error> {
+    if unsent_candidate(c)?.as_ref() != Some(expected) {
+        return Err(Error::Conflict);
+    }
+    let (local, _, contiguous) = local_head(c)?;
+    if !contiguous || local.checked_add(1) != Some(expected.sequence) {
+        return Err(Error::Conflict);
+    }
+    let action =
+        crate::repo::actions::action_row(c, &expected.action_id)?.ok_or(Error::NotFound)?;
+    let request_id = action.client_request_id.as_deref().ok_or(Error::NotFound)?;
+    let request =
+        crate::repo::funds::fund_request(c, &action.user_id, request_id)?.ok_or(Error::NotFound)?;
+    crate::repo::actions::abort_unsent(
+        c,
+        &action.action_id,
+        action.worker_epoch,
+        action.dispatch_state,
+        "journal_send_cancelled",
+        now,
+    )?;
+    if expected.kind == "withdrawal" {
+        crate::repo::ledger::withdrawal_release(
+            c,
+            &action.user_id,
+            request.amount,
+            now,
+            request_id,
+        )?;
+    }
+    crate::repo::funds::release_reservation(c, &action.user_id, request_id, now)?;
+    crate::repo::funds::set_request_state(
+        c,
+        &action.user_id,
+        request_id,
+        api_types::fund::FundRequestState::Rejected,
+        now,
+    )?;
+    // Receipt acknowledges the cancelled intent, not a successful exchange POST.
+    record(
+        c,
+        expected.sequence,
+        &expected.kind,
+        &expected.action_id,
+        &expected.account_id,
+        expected.nonce,
+        &expected.digest,
+        &expected.hash,
+    )?;
+    c.execute(
+        "DELETE FROM send_journal_stage WHERE sequence = ?1",
+        params![i64::try_from(expected.sequence).map_err(|_| Error::Overflow)?],
+    )
+    .map_err(sql)?;
+    release_writer(
+        c,
+        expected.writer_epoch,
+        &expected.kind,
+        &expected.action_id,
     )
 }
 
