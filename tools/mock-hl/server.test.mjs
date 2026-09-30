@@ -28,7 +28,7 @@ test('market fills, limit rests, and cancellation succeeds', () => {
   assert.equal(info({ type: 'orderStatus', oid }).order.status, 'open')
   assert.deepEqual(info({ type: 'openOrders' }), [{ oid }])
   const cancelled = exchange({ action: { type: 'cancel', cancels: [{ o: oid }] } })
-  assert.equal(cancelled.response.data.statuses[0].success, true)
+  assert.equal(cancelled.response.data.statuses[0], 'success')
   assert.equal(info({ type: 'orderStatus', oid }).order.status, 'canceled')
   assert.deepEqual(info({ type: 'openOrders' }), [])
   assert.equal(info({ type: 'userFills' }).length, 1)
@@ -143,4 +143,19 @@ test('ledger history respects inclusive time bounds and page size', () => {
   const next = info({type: 'userNonFundingLedgerUpdates', user: address, startTime: 500})
   assert.deepEqual(next.map((entry) => entry.time), [500, 501])
   assert.equal(info({type: 'userNonFundingLedgerUpdates', user: address, startTime: 500, endTime: 500}).length, 1)
+})
+
+test('fill history by time uses inclusive bounds and caps each page', () => {
+  reset()
+  for (let i = 0; i < 2001; i++) {
+    exchange({ nonce: i + 1, action: { type: 'order', orders: [{ a: 1, b: true, p: '3000', s: '0.001', t: { limit: { tif: 'Ioc' } } }] } })
+  }
+  const all = info({ type: 'userFills' })
+  const startTime = all[0].time
+  const endTime = all.at(-1).time
+  const page = info({ type: 'userFillsByTime', startTime, endTime })
+  assert.equal(page.length, 2000)
+  assert.equal(page[0].tid, all[0].tid)
+  assert.ok(page.every(fill => fill.time >= startTime && fill.time <= endTime))
+  assert.deepEqual(info({ type: 'userFillsByTime', startTime: endTime + 1, endTime: endTime + 100 }), [])
 })

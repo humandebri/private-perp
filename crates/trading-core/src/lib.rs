@@ -856,8 +856,11 @@ async fn submit_inner(
     // leverage・kind を除くと、同一IDで反対売買やreduce_onlyを変えた再送が
     // 「同一本文」と誤判定され、黙って捨てられる。
     let mut body = Vec::new();
+    body.extend_from_slice(&(market.len() as u64).to_be_bytes());
     body.extend_from_slice(market.as_bytes());
+    body.extend_from_slice(&(quantity.as_str().len() as u64).to_be_bytes());
     body.extend_from_slice(quantity.as_str().as_bytes());
+    body.extend_from_slice(&(args.limit_price.as_deref().unwrap_or("").len() as u64).to_be_bytes());
     body.extend_from_slice(args.limit_price.as_deref().unwrap_or("").as_bytes());
     body.push(u8::from(matches!(args.side, api_types::order::Side::Buy)));
     body.push(u8::from(args.reduce_only));
@@ -875,6 +878,7 @@ async fn submit_inner(
             trigger.kind,
             api_types::order::TriggerKind::StopLoss
         )));
+        body.extend_from_slice(&(trigger.trigger_price.len() as u64).to_be_bytes());
         body.extend_from_slice(trigger.trigger_price.as_bytes());
         body.push(u8::from(trigger.is_market));
     }

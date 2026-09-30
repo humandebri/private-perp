@@ -102,7 +102,8 @@ pub fn fund_events(
     .map_err(|error| map_db(error, None))?;
 
     let next_cursor = if rows.len() as u32 == limit {
-        rows.last().map(|row| encode_cursor(row.at).to_vec().into())
+        rows.last()
+            .map(|row| encode_cursor(row.at, &row.request_id).into())
     } else {
         None
     };
@@ -132,16 +133,21 @@ fn request_kind(value: &str) -> api_types::fund::FundActionKind {
     }
 }
 
-fn encode_cursor(at: u64) -> [u8; 8] {
-    at.to_be_bytes()
+fn encode_cursor(at: u64, request_id: &[u8]) -> Vec<u8> {
+    let mut bytes = at.to_be_bytes().to_vec();
+    bytes.extend_from_slice(request_id);
+    bytes
 }
 
-fn decode_cursor(blob: &[u8]) -> Result<u64, ErrorCode> {
-    let bytes: [u8; 8] = blob.try_into().map_err(|_| ErrorCode::BadRequest {
-        code: api_types::error::BadRequestCode::MalformedPayload,
-        detail: "cursor must be 8 bytes".to_string(),
-    })?;
-    Ok(u64::from_be_bytes(bytes))
+fn decode_cursor(blob: &[u8]) -> Result<(u64, Vec<u8>), ErrorCode> {
+    if !(9..=72).contains(&blob.len()) {
+        return Err(ErrorCode::BadRequest {
+            code: BadRequestCode::MalformedPayload,
+            detail: "cursor must contain timestamp and request ID".into(),
+        });
+    }
+    let at = u64::from_be_bytes(blob[..8].try_into().expect("checked cursor length"));
+    Ok((at, blob[8..].to_vec()))
 }
 
 /// 受付の結果をAPI型へ写す。

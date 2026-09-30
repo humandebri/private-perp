@@ -317,7 +317,7 @@ type OrderSummary = record {
 
 - 1回の上限：送信4件・取消4件・照合2口座・注文状態4件/口座（outcallの回数を抑える）。
 - 送信（`/exchange`）は**非replicated** POST。HTTP/外側の`ok`だけでなく各statusを解釈し、受理は`open`または即時`filled`、明示拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`とし**再送しない**（リスク予約も解放しない。解消は照合またはcontrollerの確認済み操作で行う）。
-- 照合（`/info`）は料金方式v2の**replicated** outcall＋変換関数（`transform_info`）で行う。約定（`userFills`）は`tid`で冪等に取り込み、建玉（`clearinghouseState`）は**観測の全量**で置き換え、注文状態（`orderStatus`）はoidが分かる未終端注文だけに反映する。replicatedでもHL自体の虚偽や履歴欠落は排除できないため、外部証跡の信頼条件と履歴の完全性は別途検証する。
+- 照合（`/info`）は料金方式v2の**replicated** outcall＋変換関数（`transform_info`）で行う。約定（`userFillsByTime`）は`tid`で冪等に取り込み、建玉（`clearinghouseState`）は**観測の全量**で置き換え、注文状態（`orderStatus`）はoidが分かる未終端注文だけに反映する。replicatedでもHL自体の虚偽や履歴欠落は排除できないため、外部証跡の信頼条件と履歴の完全性は別途検証する。
 - 照合の対象は`accounts`に取引所アドレスを保存済みの有効口座で、`account_id`順のカーソルで巡回する（先頭N件固定にしない）。アドレスは本人の署名済み要求の処理中にvaultから一度だけ取得して保存する。
 - 自動sweep（timer）は本番ビルドのみで組む。試験ビルドでは明示的な`test_sweep_now`で同じ経路を駆動する（PocketICで試験が待つoutcallと取り違えないため）。
 

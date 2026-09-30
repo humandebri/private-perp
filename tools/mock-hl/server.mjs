@@ -173,7 +173,7 @@ export function exchange(body) {
       const oid = Number(cancellation.o)
       if (state.orders.has(oid)) state.orders.get(oid).status = 'canceled'
     }
-    return { status: 'ok', response: { type: 'cancel', data: { statuses: [{ success: true }] } } }
+    return { status: 'ok', response: { type: 'cancel', data: { statuses: ['success'] } } }
   }
   return { status: 'err', response: `unsupported action: ${String(action.type)}` }
 }
@@ -208,6 +208,7 @@ export function info(body) {
     return [...state.orders.values()].filter((order) => order.status === 'open').map(({ oid }) => ({ oid }))
   }
   if (body.type === 'userFills') return state.fills
+  if (body.type === 'userFillsByTime') return state.fills.filter(fill => fill.time >= body.startTime && fill.time <= body.endTime).sort((a, b) => a.time - b.time).slice(0, 2000)
   if (body.type === 'clearinghouseState') {
     const margin = [...state.positions.entries()].reduce(
       (total, [coin, position]) => total + Math.abs(position.size) * marketState[coin].mid / 3,

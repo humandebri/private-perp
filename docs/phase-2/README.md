@@ -50,7 +50,7 @@ Phase 3以降（複数ユーザー分離・負荷・backup復元・cycles通知�
 ### 4. 本番の注文パイプラインと照合（M3残余）— **完了**
 - `test-venue`限定だった署名・送信・照合を `crates/trading-core/src/venue.rs`（outcall・変換）と `pipeline.rs`（送信・照合）へ移し、**feature無しの本番wasmで動作**するようにした。`submit_order` は従来どおり受付（`pending`）だけを確定する。
 - 送信（`/exchange`）は非replicated POST。受理は`open`＋oid、拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`（**再送しない**・予約も解放しない）。取消も同じ経路で送る。
-- 照合（`/info`）はreplicated outcall＋決定論的な変換関数`transform_info`（用途別に必要な要素だけを残す）。`userFills`は`tid`で冪等に取り込み、`clearinghouseState`は観測の全量で置き換え、`orderStatus`はoidが分かる未終端注文だけに反映する。
+- 照合（`/info`）はreplicated outcall＋決定論的な変換関数`transform_info`（用途別に必要な要素だけを残す）。`userFillsByTime`は`tid`で冪等に取り込み、`clearinghouseState`は観測の全量で置き換え、`orderStatus`はoidが分かる未終端注文だけに反映する。
 - 起動はグローバルtimer（`ic-cdk-timers`の`set_timer_interval`・本番ビルドのみ・5秒間隔）で、`init`／`post_upgrade`で再armする。`sweep`（controller手動）が同じ`sweep_once`を呼ぶ。heartbeatは使わない（毎ラウンド呼ばれ、アイドル時もコストが乗るため）。試験ビルドでは自動sweepを組まず、`test_sweep_now`で決定的に駆動する（PocketICで試験が待つoutcallと取り違えないため）。
 - 照合対象は`accounts`に取引所アドレスを保存済みの有効口座で、`account_id`順のカーソルで巡回する（固定窓にしない）。アドレスは本人の署名済み要求の処理中にvaultから一度だけ取得して保存する（`cache_trading_address`）。
 - 上限：送信4件・取消4件・照合2口座・注文状態4件/口座。結果は`SweepOutcome{dispatched, cancels, reconciled}`で返す。
@@ -101,3 +101,5 @@ bash scripts/bootstrap-local.sh
 - PocketICは必ずスクリプト経由：`POCKET_IC_TEST_DIR=$PWD/target/test-venue-mine bash scripts/pocket-ic-test.sh --test <name>`。
 - 素の `cargo test` は本番用wasm（feature無し）を読むため偽の失敗になる。
 - 封筒を使う試験は、controllerが `rotate_hpke_key` を呼んで鍵を生成しておく（未生成の個人APIはfail-closedで拒否する）。
+
+約定履歴は時間範囲と永続カーソルで取得し、1回最大2,000件・応答上限1MiBとする。カーソルの境界時刻を含めて再取得し、tidで重複を除く。 不明だった注文のoidを復旧するときは、同じトランザクションで履歴カーソルを注文作成時点まで戻し、取得待ちとして保存する。後続の通信失敗やアップグレードでも遡及取得を失わず、復旧ジャーナルの再適用時にも同じ処理を行う。同一時刻で上限に達した場合はカーソルを進めず、照合未完了として保持する。注文状態の問い合わせは最終照合時刻で巡回し、約定取得失敗が注文状態の照合を妨げない順序で処理する。資金履歴のカーソルは時刻と要求IDの組である。

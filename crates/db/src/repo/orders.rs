@@ -1536,20 +1536,28 @@ pub fn resolve_unknown_preflight(
 ///
 /// 結果不明（`unknown`）でもoidがあれば照合で解消できるため対象に含める。
 pub fn oids_awaiting_status(
-    connection: &Connection,
+    connection: &mut UpdateConnection<'_>,
     account_id: &[u8; 32],
     limit: u32,
+    now: u64,
 ) -> Result<Vec<u64>, Error> {
     let rows = connection
         .query_all(
             "SELECT hl_oid FROM orders
               WHERE account_id = ?1 AND hl_oid IS NOT NULL
                 AND state IN ('open', 'partially_filled', 'unknown')
-              ORDER BY rowid LIMIT ?2",
+              ORDER BY last_status_checked_at, rowid LIMIT ?2",
             params![account_id.as_slice(), limit as i64],
             |row| row.get::<i64>(0),
         )
         .map_err(sql)?;
+    // Charge selection before awaiting the venue so failures also rotate.
+    for oid in &rows {
+        connection.execute(
+            "UPDATE orders SET last_status_checked_at = ?3 WHERE account_id = ?1 AND hl_oid = ?2",
+            params![account_id.as_slice(), *oid, i64::try_from(now).map_err(|_| Error::Overflow)?],
+        ).map_err(sql)?;
+    }
     rows.into_iter()
         .map(|oid| u64::try_from(oid).map_err(|_| Error::Invariant("bad oid")))
         .collect()
@@ -1949,6 +1957,9 @@ pub fn bind_observed_oid(
         return Err(Error::Conflict);
     }
     c.execute("UPDATE orders SET hl_oid=?3 WHERE account_id=?1 AND order_id=?2 AND hl_oid IS NULL AND state='unknown'",params![account_id.as_slice(),order_id.as_slice(),oid]).map_err(sql)?;
+    if crate::cas::changes(c)? == 1 {
+        super::accounts::rewind_fills(c, account_id)?;
+    }
     Ok(())
 }
 

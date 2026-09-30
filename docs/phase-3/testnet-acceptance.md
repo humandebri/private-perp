@@ -2,6 +2,10 @@
 
 更新: 2026-09-26。状態: **未合格**。ユーザーの指示により、まず[ローカルCanister + HL testnet](local-canister-hl-testnet.md)の接続試験を開始した。口座準備・認証・実市場読取りは成功し、テストUSDCの入金待ち。実HLへの注文・資金移動POSTは未実施。公開ICPでの受入は引き続き別判定とする。
 
+## 実口座の残高確認（2026-09-30）
+
+`https://api.hyperliquid-testnet.xyz/info`の`clearinghouseState`で、保存済みの公開アドレスを再確認した。本人用テスト口座`0x08ef566005b8f2b5ed94273add6cbbb414fe3bab`と共通保管用テスト口座`0xf9b2b86555bde4bd83ce5b5590ae56d0fd9d1a0f`は、どちらも`accountValue=0.0`、`withdrawable=0.0`、建玉0件だった。実取引・資金移動のPOSTは実行していない。実HLでの通し検証は、テスト資金の用意と現在のローカルcanister状態・口座の対応確認を済ませてから行う。
+
 ## GATE 0
 
 | 条件 | 現在の確認結果 |
