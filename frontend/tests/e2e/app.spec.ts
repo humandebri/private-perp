@@ -204,6 +204,9 @@ test.describe('real local canister flow', () => {
     await expect(page.getByRole('button', { name: 'Close 100%' })).toBeVisible()
     await page.getByRole('button', { name: 'Set SL/TP' }).click()
     await expect(page.getByRole('button', { name: 'Set SL/TP' })).toBeEnabled({ timeout: 30_000 })
+    await expect(page.getByRole('cell', { name: /\bOpen$/ })).toHaveCount(2, {
+      timeout: 30_000,
+    })
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.getByRole('button', { name: 'Limit', exact: true }).click()
     await referencePrice.click()
@@ -279,11 +282,35 @@ test.describe('real local canister flow', () => {
     await page.getByRole('link', { name: 'History' }).click()
     await expect(page.getByRole('cell', { name: 'Withdrawal' })).toBeVisible()
     await expect(
+      page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Withdrawal' }) }),
+    ).toContainText('Settled', { timeout: 30_000 })
+    await expect(
       page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Allocation' }) }),
     ).toContainText('Settled')
     await expect(page.getByRole('cell', { name: 'BTC' }).first()).toBeVisible()
     await page.getByRole('link', { name: 'Trade', exact: true }).click()
     await page.getByRole('button', { name: 'Refresh trading information' }).click()
+    // A contended final monitor may have stopped. Only the owner's explicit
+    // control grants another observation; ordinary refresh must not do so.
+    const stoppedPanel = page
+      .locator('details')
+      .filter({ has: page.getByText('Stopped work and manual checks', { exact: true }) })
+    if ((await stoppedPanel.getAttribute('open')) === null)
+      await stoppedPanel.locator('summary').click()
+    await page.getByRole('button', { name: 'Check stopped work' }).click()
+    await expect(page.getByRole('button', { name: 'Check stopped work' })).toBeEnabled({
+      timeout: 30_000,
+    })
+    const resumeMonitor = page.getByRole('button', { name: 'Resume monitoring' })
+    if (await resumeMonitor.count()) await resumeMonitor.click()
+    await expect(page.getByRole('button', { name: 'Refresh trading information' })).toBeEnabled({
+      timeout: 30_000,
+    })
+    await page.getByRole('button', { name: 'Refresh trading information' }).click()
+    await expect(page.getByRole('button', { name: 'Refresh trading information' })).toBeEnabled({
+      timeout: 30_000,
+    })
+    await expect(page.getByRole('alert')).toHaveCount(0)
     await expect(page.getByLabel('Order price')).toHaveCount(0)
     // 通信失敗は口座表示を保持しても、新規注文をfail-closedにする。
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
@@ -381,7 +408,8 @@ test.describe('real local canister flow', () => {
         | 'revoke_session'
         | 'prepare_trading_account'
         | 'eligibility_signing_claims'
-        | 'register_eligibility',
+        | 'register_eligibility'
+        | 'confirm_deposit',
       plaintext: Uint8Array,
     ) => {
       const id = newRequestId()
@@ -450,6 +478,9 @@ test.describe('real local canister flow', () => {
         }),
       })
       expect(seeded.ok).toBeTruthy()
+      vaultPrivateCodec.empty(
+        await privateCall('confirm_deposit', vaultPrivateCodec.session(fixtureSession)),
+      )
       await expect
         .poll(
           async () => unwrap(await clients.vault.get_fund_status(fixtureSession)).withdrawable,

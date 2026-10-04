@@ -72,6 +72,21 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: PocketIC integration tests
         run: bash scripts/pocket-ic-test.sh --no-fail-fast
+      - name: Install pinned Candid and Wasm inspection tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/contract-tools"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/dfinity/candid/releases/download/didc-v0.6.2/didc-x86_64-unknown-linux-gnu.tar.xz \
+            --output "$RUNNER_TEMP/didc.tar.xz"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/dfinity/ic-wasm/releases/download/0.11.1/ic-wasm-x86_64-unknown-linux-gnu.tar.xz \
+            --output "$RUNNER_TEMP/ic-wasm.tar.xz"
+          printf '%s  %s\n' '9990d2646a2b023df50c8765fd34e43951ba947303d3ce9d06590b2d58e89469' "$RUNNER_TEMP/didc.tar.xz" | sha256sum --check
+          printf '%s  %s\n' '099776a745c4d4495761da18f2fe2216759a4166beacd05453bf031d61631746' "$RUNNER_TEMP/ic-wasm.tar.xz" | sha256sum --check
+          tar -xJf "$RUNNER_TEMP/didc.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/contract-tools"
+          tar -xJf "$RUNNER_TEMP/ic-wasm.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/contract-tools"
+          echo "$RUNNER_TEMP/contract-tools" >> "$GITHUB_PATH"
       - name: Production and mock unified canister checks
         run: PRIVATE_PERP_TEST_TARGET="$PWD/target/test-venue" POCKET_IC_BIN="$PWD/.pocket-ic/pocket-ic" bash scripts/test-single-canister.sh
       - name: PocketIC runner failure propagation
