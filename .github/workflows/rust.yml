@@ -1,6 +1,7 @@
 name: Rust verification
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 concurrency:
@@ -73,6 +74,6 @@ jobs:
         run: bash scripts/pocket-ic-test.sh --no-fail-fast
       - name: PocketIC runner failure propagation
         if: always()
-        run: node --test scripts/pocket-ic-runner.test.mjs
+        run: node --test scripts/pocket-ic-runner.test.mjs scripts/fetch-pocket-ic.test.mjs
       - name: Official SDK fixture comparison
         run: cargo test --locked -p hl-sign --test fixtures
