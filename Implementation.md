@@ -20,10 +20,10 @@ In addition to D1 to D8 in `Plan.md`, we decided the following as implementation
 
 | # | the point | Decision | Influence |
 |---|---|---|---|
-| D9 | signature path | Orders are handled by the trading_core Agent, and fund transfers and Agent approvals are handled by the funds_vault master. The browser EOA is used for login, deposit, and withdrawal intentions. | Do not transfer the funding key to trading_core and do not provide the optional digestsigning API. |
+| D9 | signature path | Orders are handled by the trading_core Agent, and fund transfers and Agent approvals are handled by the funds_vault master. The browser EOA is used for login, deposit, and withdrawal intentions. | Do not transfer the funding key to trading_core and do not provide the arbitrary digest-signing API. |
 | D10 | The configuration of trading_core | Maintain Confidential Subnet (D7 maintenance). Accept delays | The signature is a cross-net call to `pzp6e` each time. Analyze the structure in Chapter 2. |
 | D11 | Real-time route | Direct connection between the public market status and the browser↔HL WS. The personal data is encrypted polling authorized by Canister. | Do not directly link the browser IP and trading account to the user-related WS. Measure HL reconciliation costs and delays. |
-| D12 | Sustainability | Only `ic-sqlite-vfs`. Do not use `StableBTreeMap` | While the implementation becomes simpler, we entrust all states to young dependence. Establish mitigation measures at 4.9 |
+| D12 | Persistence | Only `ic-sqlite-vfs`. Do not use `StableBTreeMap` | While the implementation becomes simpler, we entrust all states to young dependence. Establish mitigation measures at 4.9 |
 
 Combining D9 and D10 means that "all orders will be waiting for cross-net signature". This is the strongest restriction in the current plan and will be dealt with in Chapter 2.
 
@@ -430,7 +430,7 @@ Charts will use Lightweight Charts. The old description that "Advanced Charts ca
 4. Reconcile the HL approval status independently and make it active. Ignore callbacks that have changed generation or ownership during the request.
 5. If you use the builder fee, you must separately confirm the approveBuilderFee and the limit with master signing. Agent approval does not constitute fee approval.
 
-Explicitly specify the address, purpose, permissions, and expiration date in the UI. Reusing the account after the expiration or loss of validity is prohibited, and a new key is derived from the opaque account_id and generation. The derived results are cached for each generation. The 30-day validity and 27-day switching are verified on testnet. Requests to halt or lose validity are executed by Canister, and HL direct unbinding and direct withdrawal are not guaranteed by the user themselves.
+Explicitly specify the address, purpose, permissions, and expiration date in the UI. Reusing the account after the expiration or loss of validity is prohibited, and a new key is derived from the opaque account_id and generation. The derived results are cached for each generation. Verify the planned 30-day validity and switching from day 27 on testnet. Requests to halt or lose validity are executed by Canister, and HL direct unbinding and direct withdrawal are not guaranteed by the user themselves.
 
 ## 8. Front-end distribution
 
@@ -668,7 +668,7 @@ Each Canister has its own separate DB. Do not mix the MemoryId 0 of funds_vault 
 | Table group | Mandatory restrictions |
 |---|---|
 | identities / sessions / challenges | Consistent with EOA and random user_id. Challenge nonce is one-time, and Principal, origin, purpose, expiration, and revocation are verified. |
-| custody_accounts | Purpose of reserve/trading, opaque account_id, derivation path, master address, network. Do not approve tradingAgent in reserve. |
+| custody_accounts | Purpose of reserve/trading, opaque account_id, derivation path, master address, network. Do not approve trading agent in reserve. |
 | journals / postings | Debit and credit amounts per journal are equal, and assets and units match. Integer overflow is rejected. Duplicate journal entries from external events or requests are rejected with a strict constraint. |
 | fund_requests / reservations | Identity, request ID, text hash, amount, destination of confirmation, EOA intentsignature, expiration date. Refusal to accept insufficient balance, double binding, or substitution for others. |
 | fund_actions / master_nonces | Canonical action, digest, signature, wire payload, dispatch state, epoch, lease, reconciliation scheduled. Each master assigns a nonce via a synchronized commit. |
@@ -708,7 +708,7 @@ Failed exam requiring qualification:
 
 - Fake EOA, different Principal, expired, challenge reuse, destination change, intent of different network.
 - duplicate deposit events, inconsistent accounting, simultaneous withdrawal, orders during recovery, loss of response after transfer success.
-- master/Agent misidentification, optional withdrawal signature requests from core, revocation generation callback.
+- master/Agent misidentification, arbitrary withdrawal signature requests from core, revocation generation callback.
 - Non-SNS reservation to guard, early execution, WASM/index substitution, bypass by controller/reinstall/stop/delete.
 - Receiving and reconciling requests for insufficient cycles, HL suspension, Canister upgrade, DB restoration, and HPKEkey updates.
 - Plain text logs, queries from others, trading account transmission from the browser, confidential information infiltration into public proposals.
@@ -722,5 +722,5 @@ These are the test specifications that will be implemented in the future, and th
 | v0.1 | 2026-09-18 | First version. Determine D9~D12, consolidate the final architecture, latency design, repository configuration, only `ic-sqlite-vfs` persistence, order pipeline, client design, verification plan, task decomposition |
 | v0.2 | 2026-09-18 | Compatible with Plan v0.4. Clearly define the implementation baseline for agent-only, add consideration boundaries, dependency implementation gates, and verification items to separate the confidential fund layer and HL accounts. Maintain D9, and explicitly specify the IP/account exposure and tECDSA/outcall protection scope for D11. |
 | v0.3 | 2026-09-18 | Design and revise the separation of actions/orders, pre-transmission persistence, fencing, deadlines/cancellation/Agent generation, ownership verification, recovery, and risk reconciliation. Clarify the boundaries between fund privacy and signature pathways. |
-| v0.4 | 2026-09-18 | Consolidated with Plan v0.8 B. Vault master/tradingAgent, EOA authentication, identity data via Canister, funds DB and state machines, immutable guard, and the decision on development and live gate. Agent-only withdrawal prohibited, direct exit, and withdrawal of old work periods. |
+| v0.4 | 2026-09-18 | Consolidated with Plan v0.8 B. Vault master/trading agent, EOA authentication, identity data via Canister, funds DB and state machines, immutable guard, and the decision on development and live gate. Retracted the Agent-only withdrawal prohibition, direct-exit guarantee, and old development schedule. |
 | v0.5 | 2026-09-18 | Added fixed dependencies, linting, type checking, and testing to the composite UI foundation for Workers main distribution and Start+React. Recorded 6 ADRs. Changed the reference to the old ICP distribution estimate and retracted TradingView's overly definitive conclusions. There is no actual ICP API, and the connection process is pending. |

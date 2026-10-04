@@ -35,7 +35,7 @@ This document does not change the existing authority model. If older phase descr
 - EOA authentication such as MetaMask. When withdrawing, it is necessary to add the signature of the person.
 - USDC on HyperCore. Deposits from the user's HL account and withdrawals to the same user's HL account.
 - Shared reserve account and independent HL trading account for each user.
-- master key management by funds_vault, tradingAgent management by trading_core.
+- master key management by funds_vault, trading agent management by trading_core.
 - BTC/ETH perps, Market / Limit / Cancel / Cancel All / Close / SL / TP.
 - HL standard positions unit SL/TP, reduce-only. Do not create independent settlement.
 - Only the public status is directly connected from the browser to HL. The personal data is authenticated and encrypted and obtained through Canister.

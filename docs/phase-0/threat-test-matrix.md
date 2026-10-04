@@ -18,7 +18,7 @@
 | Only record the deposit once, and do not include the undecided transfer in the final balance. | T-201, T-202, T-204 |
 | Verify the person's signature, recipient, amount, deadline, and nonce for withdrawal | T-102, T-104, T-203 |
 | Even if the response loss occurs after a transfer is successful, double payment will not be automatically resended. | T-205, T-206 |
-| Cannot request master-key signing or optional withdrawal from trading_core | T-301, T-302 |
+| Cannot request master-key signing or arbitrary withdrawal from trading_core | T-301, T-302 |
 | Do not query per-user trading accounts directly from the browser to HL. | T-601, T-602 |
 | Record delays in signature/reconciliation, outcall/signature/storage costs | T-801 (Measurement. Results are in `Implementation.md` 2.4) |
 | Record whether Confidential Subnet is available and the unverified trust assumption | T-802 |

@@ -126,7 +126,7 @@ Response to the points of reading-only reviews regarding the commit difference i
 | `pocket-ic-tests` is not subject to linting | Expand host lint to `cargo clippy --workspace --all-targets` | Clean the entire workspace (detect and fix `manual_is_multiple_of` once with this expansion) |
 | No version or completeness verification for the obtained binary | Add `POCKET_IC_SERVER_MAJOR` / `POCKET_IC_SHA256` and verify both when using the cache and after retrieval. | Finished with non-zero in the old version of the stub, finished with non-zero due to tampering (digest mismatch), and successfully completed with real binary |
 | Double definition of `ActionStateView` | Remove and integrate to `fund::ActionState` | `cargo test -p api-types` |
-| Release of the live keysignature helper | Rename `sign_digest_for_tests` / `sign_action_for_tests` and block references from canister crates in `scripts/check-signing-boundary.sh` | Boundary check: 0 successful paths; non-0 ends when violations occur. |
+| Release of the live key signing helper | Rename `sign_digest_for_tests` / `sign_action_for_tests` and block references from canister crates in `scripts/check-signing-boundary.sh` | Boundary check: 0 successful paths; non-0 ends when violations occur. |
 | `preserve_order` function integration propagation | Remove the dev-dependency feature and replace it with the `OrderedJson` on the test side (which preserves document order using a Visitor) | `cargo tree -e features -p hl-sign` has `preserve_order` not included. Fixture comparison remains 11 matches. |
 | Test helper hex length unverified | Add an even length check | Success with 11 existing fixtures |
 | Dead variant `SigningFailed` | deletion | `clippy --workspace` Clean |

@@ -136,7 +136,7 @@ Go/No-Go is not passed** and testnet reverse is not performed.
 | HPKE (keygeneration update, public key distribution, envelope encryption, `aad` binding) | Installed and verified | P1-007 |
 | `control_guard` (SNS exclusive, 7-day grace period, content matching, no bypass API, single-execution consistency) | Implemented and verified (execution of real-sizewasm is pending under the following restrictions) | P1-009 |
 | `policy_registry` (only fail-closed and stop-direction) | Installed and verified | P1-010 |
-| `trading_core` (authorization boundary, order reception, agent keysignature, sending, cancellation sending, fill receipt, `orderStatus` reconciliation, snapshot, risk reservation, SL/TP, full settlement, personal API envelope, environment settings) | Installed and verified | P1-008 |
+| `trading_core` (authorization boundary, order reception, agent key signing, sending, cancellation sending, fill receipt, `orderStatus` reconciliation, snapshot, risk reservation, SL/TP, full settlement, personal API envelope, environment settings) | Installed and verified | P1-008 |
 | Environment separation (network, endpoint, tECDSA key ID startup settings, mainnet rejection = E-2) | Implemented and verified (E-1 is not performed because eligibilityunimplemented) | `core_environment.rs` and `vault_environment.rs` |
 
 The local threshold ECDSA is enabled in PocketIC's **test threshold key subnet** (key id `test_key_1`).

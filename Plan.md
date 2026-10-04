@@ -104,7 +104,7 @@ The configuration comparison and decision are as follows: adopt B (D15). Do not 
 
 | composition | Funding route and public link | HL's trading processing | Power and dependence |
 |---|---|---|---|
-| A: Old Agent-only proposal (not adopted) | Deposit directly from the user's dedicated HL account. The transfer graph link remains. | Standard processing for user-specific accounts | master key is for users. ICP is only for tradingAgent. |
+| A: Old Agent-only proposal (not adopted) | Deposit directly from the user's dedicated HL account. The transfer graph link remains. | Standard processing for user-specific accounts | master key is for users. ICP is only for trading agent. |
 | B: confidential fund layer + user-specific HL account (hire) | Make the handling of internal balance and withdrawal transactions confidential. External amounts and times may remain available. | Standard processing for user-specific accounts | vault manages the master key, and changes from SNS are passed through guard (Chapter 16) |
 | C: Single HL account + internal position | Internal management of allocation of funds and positions | Internal margin, profit and loss allocation and settlement are required. | All users' funds and trading risks are concentrated. This plan will not be adopted. |
 
@@ -159,22 +159,22 @@ This chapter is the goal privilege model of B. tECDSA, TEE, and SNS respectively
 
 ### 3.1 Permission table
 
-| operation | a user | trading_core / Agent | funds_vault | Operation / SNS |
+| Operation | User | trading_core / Agent | funds_vault | Operator / SNS |
 |---|---|---|---|---|
-| Order/cancellation/payment | authorization/request | Verify and enforce | Not responsible for the principle | Arbitration trading is not allowed by the operation. |
-| Deposit recording and allocation to HL | deposit and allocation are authorization | No withdrawal rights | Manage deposit confirmation and balance/allocation | Voluntary relocation by the operation is not allowed. |
-| withdrawal | The person authorizing the recipient and amount | Prohibited | Verify balance and restraint and enforce it | No DAO voting required for normal withdrawal |
-| Transfer of funds to any third party | Only the withdrawal of the user's balance | Prohibited | Not possible without valid authorization | Repurchasing as a DAO budget is prohibited. |
-| Agent approval/decline | Request to stop/unsubscribe | Stop new signature | Execute and reconcile with master signing | HL direct uninstallation is not allowed by users. |
-| New order suspension and risk limit reduction | Stop your trading | Force restrictions | Limit new allocation | Possible with limited operating rights |
-| Withdrawal destination and change of balance | owner authorization is required | Prohibited | Only state transition with evidence | We do not provide an operation API for optional changes. |
-| Changing the WASM controller | Verify and exit public information | Not allowed by self-judgment | Not allowed by self-judgment | SNS + guard. Upgrade is allowed for 7 days, controller change is prohibited (16.3) |
+| Orders, cancellation, position closing | Authorize and request | Validate and execute | Generally outside its responsibility | No discretionary operator trading |
+| Deposit credit and allocation to HL | Authorize deposit and allocation | No withdrawal permission | Confirm deposits and manage balances/allocation | No arbitrary operator fund movement |
+| Withdrawal | Owner authorizes destination and amount | Prohibited | Validate balance and reservations, then execute | Ordinary withdrawals require no DAO vote |
+| Transfer to arbitrary third parties | Withdrawal of the owner's balance only | Prohibited | Prohibited without valid authorization | Customer funds must not be diverted into the DAO budget |
+| Agent approval/revocation | Request stopping or revocation | Stop new signing | Execute with master signing and reconcile | Users cannot directly revoke on HL |
+| Stop new orders or lower risk limits | Stop own trading | Enforce limits | Restrict new allocation | Allowed through limited operational authority |
+| Change withdrawal destination or ownership shares | Owner authorization required | Prohibited | Only evidenced state transitions | No operator API for arbitrary rewrites |
+| Change Wasm or controllers | Inspect public information and exit | Cannot act independently | Cannot act independently | SNS + guard: 7-day upgrade delay; controller changes prohibited (16.3) |
 
-This table is usually the code's authority. Even if SNS can upgrade at its own discretion, funds and information leaks caused by malicious decisions of the DAO will remain.
+This table describes permissions in the ordinary code. If SNS can install arbitrary upgrades, malicious DAO votes can still cause fund loss or information disclosure.
 
-### 3.2 Design invariable conditions
+### 3.2 Design invariants
 
-1. **Separation of funds and trading permissions.** trading_core only has a trading agent. funds_vault is responsible for fund transfers and does not publicly disclose any digestsigning API. It not only verifies the caller but also the purpose of the transfer, amount, destination, owner authorization, and balance.
+1. **Separation of funds and trading permissions.** trading_core only has a trading agent. funds_vault is responsible for fund transfers and does not publicly disclose any digest-signing API. It not only verifies the caller but also the purpose of the transfer, amount, destination, owner authorization, and balance.
 2. **Separation of customer funds and operational funds.** Do not divert customer funds to cycles, development expenses, or DAO Treasury transfers. Fees are charged according to the agreed rules, and undecided funds are not treated as revenue.
 3. **Consensual alignment of holdings and backing.** Double counting and duplicate withdrawals are prohibited, and the available amount, assets allocated to HL, margin restrictions, withdrawal reservations, and transfer periods are distinguished. Align the reconciliation date and valuation standards to ensure that real assets, HL holdings, user liabilities, fees, and profits and losses are consistent. Do not add any amounts that cannot be withdrawn to the balance.
 4. **withdrawal owner authorization.** Restricts the user's withdrawal requests to the amount, recipient, chain, asset, nonce, and deadline. Typically, DAO voting is not required for withdrawals, and operations are designed to prevent the recipient from changing the address. Authorization is granted using an EOAsignature on 16.1.
@@ -186,7 +186,7 @@ This table is usually the code's authority. Even if SNS can upgrade at its own d
 ### 3.3 Permissions not granted to the operator
 
 - Customers' voluntary withdrawal of funds, changes of withdrawal destination and transfers to other accounts without owner authorization.
-- Complete private key acquisition, funds keysignature for arbitrary messages.
+- Complete private key acquisition, funds key signing for arbitrary messages.
 - Transfer of customer funds to the DAO operation budget.
 - Orders exceeding the user's stated limit.
 - Arbitrary interference with legitimate trading suspension and withdrawal requests.
@@ -243,9 +243,9 @@ Use MetaMask EOA as the gateway for connection, authentication, and withdrawal a
 
 ### 5.3 trading suspension, withdrawal, membership cancellation
 
-- Users can stop their new orders and automatic trading. Existing orders and positions will be cancelled and settled separately. Agent uninstallation is executed by funds_vault.
+- Users can stop their new orders and automatic trading. Existing orders and positions will be cancelled and settled separately. Agent revocation is executed by funds_vault.
 - The withdrawal request is authorized by the person in charge of the amount and destination, and funds_vault verifies the balance and margin restrictions and reserves it. If recovery from HL is required, it will be completed by reconciliation before transferring.
-- Display them separately as "Request Received", "HL recovery in progress", "transferunknown outcome", and "Completed". Do not confirm withdrawable amount or completion time as unconfirmed.
+- Display them separately as "Request Received", "HL recovery in progress", "transfer outcome unknown outcome", and "Completed". Do not confirm withdrawable amount or completion time as unconfirmed.
 - Resolve undecidedtransfer, debt, and positions before canceling membership. Do not delete the ledger required for balance and recovery solely by requesting cancellation.
 - The alternative request path when UI stops, recovery when Canister stops, and exit procedure before SNS changes are determined in U24/U26. Alternative UI does not solve the problem of Canister itself stopping.
 
@@ -617,7 +617,7 @@ The action transmission has the following statuses: queued / signing / signed / 
 - Batch orders are limited to compatible child orders on the same account or agent generation, and the results are reconciled by child order.
 - Service internal risk reservations are counted as parallel orders, but they are distinguished from the strict upper limit of the entire account, including HL trading and other agents, directly.
 
-### 8.7 Sustainability and upgrades
+### 8.7 Persistence and upgrades
 
 - Place orders, cloid indexing, nonce, Agent metadata, eligibility verification results, risk limits, and kill-switch state in stable memory.
 - Order parameters are permanent and irreversible to 8.3.2. funds_vault is permanent to a different canonical as funds_ledger, deposit identifier, owner authorization, allocation, withdrawal reservation, transfer result, keygeneration. Order history deletion rules are not applied to funds_ledger.
@@ -689,7 +689,7 @@ The following are reference values for the old order path, and will be re-measur
 | Asset index resolution error | An unintended order for an unwanted stock fills | Do not compress `universe`, resolve it each time from meta, reject if inconsistent (8.5.4) |
 | Slippage on a thin stock | Fill at an unexpected price | Unlocking based on liquidity standards, nominal limits per stock, and estimates via l2Book (6.3.1) |
 | Positions under suspension or settlement | Payment cannot be processed / Forced settlement | Monitoring of the deprecation flag, suspension of new orders when deprecation detection is detected, notification of position consolidation (Chapter 11 Phase 3) |
-| Uncertain response | Double order/state inconsistency | cloidreconciliation, resend prohibited, explicit indication of unknown status |
+| Uncertain response | Double order/state inconsistency | cloid reconciliation, resend prohibited, explicit indication of unknown status |
 | Confidential Subnet unresolved issues | Confidentiality cannot be claimed | Make the prerequisites of 8.3.3 the conditions for actual deployment. If not met, stop. |
 | Availability of Confidential Subnet | Service suspension | Early real-world verification, cancel-only mode, explicit alternative policy |
 | Violation of control rights of canisters and SNS decision rights | Unauthorized orders, outflow of entrusted funds, disclosure of internal information | Limited change rights in 8.3.4, exit opportunities, public verification and audit |
@@ -778,7 +778,7 @@ Go/No-Go: All items of 8.8.
 - Dead-man's switch, trading suspension, Agent failure, emergency full cancellation.
 - Recovery test after upgrade.
 - Implement funds_vault's owner authorization, ledger reservation, withdrawal, and HL funds recovery.
-- Verify that withdrawal and optional funds signature cannot be done from trading_core.
+- Verify that withdrawal and arbitrary fund signing cannot be done from trading_core.
 - Test for duplicate deposit, duplicate withdrawal, response loss, recovery from old ledger, and malicious changes.
 
 ### Phase 3 — Multi-user closed beta（testnet）
@@ -906,7 +906,7 @@ Maintain the following U numbers for tracking purposes. Distinguish between the 
 | U14 | Verification methods such as attestation for Confidential Subnet, and the scope of guarantee for state sync, recovery, and outcall. Do not assume that undetectable anomalies can be detected. | Verification plan is completed in Phase 0~1 before the actual deployment | Implementation and business |
 | U15 | Adopting immutable guard + 7-day grace period (16.3). SNS connection and bypass prevention are unverified. | Phase 1 verification and pre-production audit | Implementation |
 | U23 | HyperCore USDC, common custody → transfer between independent accounts (16.2). Allocation correlation countermeasures will be finalized after the comparative test. | Phase 1 | Implementation |
-| U24 | EOA authentication, vault master, withdrawalsignature every time. No guarantee of withdrawal from the same EOA (16.1) | Phase 1-2 examination and legal affairs before the actual test | Implementation and legal affairs |
+| U24 | EOA authentication, vault master, and a signature for each withdrawal. Payouts go to the same EOA; independent exit is not guaranteed (16.1) | Phase 1-2 examination and legal affairs before the actual test | Implementation and legal affairs |
 | U25 | Personal data is via Canister, only market status is directly connected to HL (16.5) | Phase 1 communication inspection | Implementation |
 | U26 | The stop range, cycles, and alternative UI are decided at 16.4. Fund recovery requires a disruption exercise. | Phase 2 | Implementation and operation |
 | U27 | double-entry ledger, equity separation, in transit reservation, unknown holding (16.2). The API compatibility of confirmed evidence is unverified. | Phase 1〜3 | Implementation and audit |
@@ -964,7 +964,7 @@ This chapter is an implementation decision as of 2026-09-18. Referencing the U n
 - funds_vault manages the master keys for shared reserve accounts and per-user trading accounts using tECDSA. Each user's account is an independent master account and is not a shared master's HL sub-account. trading_core only manages agent keys for each account and for each generation.
 - For withdrawals, EOAsignature is required each time to restrict the amount, asset, recipient, network, nonce, and expiration date. The initial withdrawal destination is only the HL account of the authentication EOA. Transfers to third parties, changes to registered EOAs, and authentication resets by the operator are not implemented. The fund transfer nonce and login challenge nonce are managed separately.
 - We do not provide compensation via email or other means in case of loss of EOA. We do not guarantee user-only withdrawal when the canister is suspended. We do not confuse re-login with fund recovery. We display this restriction before depositing.
-- Agent is valid for 30 days, and from the 27th, it will try to switch to a new generation. Approval and revocation are handled by funds_vault, and it will be activated after HLreconciliation. Until the API compatibility with time-specified deadlines is verified on testnet, this value will not be treated as HL's guarantee.
+- Agent is valid for 30 days, and from the 27th, it will try to switch to a new generation. Approval and revocation are handled by funds_vault, and it will be activated after HL reconciliation. Until the API compatibility with time-specified deadlines is verified on testnet, this value will not be treated as HL's guarantee.
 
 ### 16.2 Initial capital pathways and ledger (U23/U27)
 
@@ -979,8 +979,8 @@ This chapter is an implementation decision as of 2026-09-18. Referencing the U n
 ### 16.3 Change rights of SNS (U15/U28)
 
 - The target for the live version is `SNS governance → control_guard → funds_vault / trading_core / policy_registry`. As the only controller for the Canister targeting `guard`, leave the controllers of `guard` themselves empty. Do not attach direct controller permissions for the SNS root to the Canister targeting `guard`.
-- guard only accepts reservation and cancellation requests from SNS governance principal. It does not disclose the target ID, WASM hash, argument hash, executable time, state, and customer information. Only 7 days after the reservation is confirmed, it allows an upgrade that matches the reservation content. The execution trigger can be anyone, but content changes are not allowed.
-- We do not provide any APIs for arbitrary management calls, controller addition/transfer, reinstall, deletion, single stop, or short-term suspension. Emergency operational permissions are only for accepting new applications and stopping new orders, and arbitrary transfer, immediate upgrade, and change of withdrawal destination are not allowed. Normalization will be recorded via SNS.
+- guard only accepts reservation and cancellation requests from SNS governance principal. It publishes only the target ID, WASM hash, argument hash, executable time, and state; customer information is excluded. Only 7 days after the reservation is confirmed, it allows an upgrade that matches the reservation content. The execution trigger can be anyone, but content changes are not allowed.
+- We do not provide any APIs for arbitrary management calls, controller addition/transfer, reinstall, deletion, single stop, or shortening the delay. Emergency operational permissions are only for accepting new applications and stopping new orders, and arbitrary transfer, immediate upgrade, and change of withdrawal destination are not allowed. Normalization will be recorded via SNS.
 - We will test the fixed settings of guard, the SNS generic function integration, cycle replenishment, and the behavior during upgrade in the test environment first. We do not assume that this controller configuration can be automatically obtained just by the SNS standard launch. The irreversible removal of the controller in the actual production will be carried out after audit and separate approval.
 - Withdrawal is an opportunity for 7 days, but it is not a guarantee of fund recovery. You may not be able to withdraw due to HL suspension, unresolved transfers, collateral margin, or canister bugs. Malicious upgrades after the delay may access remaining funds and stored information. We do not display that the past confidentiality can be protected by a timelock.
 - The flaws of guard itself cannot be corrected with upgrade. This recovery restriction will be audited. In the development environment, developers can leave the development controller, but they do not claim the same security as the real one. The token allocation and sales conditions of SNS are not determined by imagination, but are retained as the conditions for the start of the actual operation.
@@ -989,7 +989,7 @@ This chapter is an implementation decision as of 2026-09-18. Referencing the U n
 
 - The initial allowlist consists only of BTC and ETH perps in HL standard. HIP-3, spot, portfolio margin, and unified account are not included in the initial scope. Standard account mode and separate margin are set as initial values, with leverage at the standard 3x and UI limit at 5x. This is a restriction for development purposes and is not a recommendation for safe investment multipliers.
 - Market offers IOC limit orders with a slippage limit, with a fixed tolerance range of 0.5%. Limits are GTC, SL/TP are HL per position `positionTpsl`, and reduce-only. Complex brackets, custom bots, and TWAP are not eligible for initial entry. Margin changes after fund allocation are also authorized as master operations.
-- The dead-man's switch is set to OFF. In consideration of the possibility that all order cancellations will be deleted up to the protection SL/TP, we display the suspension, unfilled order cancellation, and position settlement as separate operations. Emergency suspension does not automatically execute the order.
+- The dead-man's switch is set to OFF. In consideration of the possibility that all order cancellations will be deleted up to the protection SL/TP, we display the suspension, unfilled order cancellation, and position settlement as separate operations. An emergency stop does not automatically market-close positions.
 - The builder fee for testnet is 0. The actual fee, collection address, upper limit consent, and calculation are considered business decisions before the mainnet launch and are not collected implicitly.
 - When an issue occurs, we prioritize stopping the increase of new risks, continuing reconciliation, and allowing cancellation, reduce-only, and confirmed withdrawals where possible. We design the system so that alternative minimum clients can request authentication, cancellation, and withdrawal, but we do not consider this an alternative execution basis for the Canister stop.
 - Cycles are replenished from the operating budget rather than customer funds. The target is to cover 30 days of actual consumption, with notifications for 7 days and a mandatory suspension of new deposits and new risk acceptance for 3 days. Withdrawal and reconciliation amounts are secured separately. The funding recovery deadline is not promised without measuring actual consumption and HL restrictions.
@@ -999,7 +999,7 @@ This chapter is an implementation decision as of 2026-09-18. Referencing the U n
 - The initial mode is RFC 9180 HPKE (X25519 / HKDF-SHA256 / ChaCha20-Poly1305). Choose an implementation with audited experience and do not create cryptographic primitives. Because it is decrypted in the Canister inside the TEE, trust in the Canister code and the TEE itself remains.
 - The client verifies HPKE public key, key ID, and expiration date using an authentication response from the IC. It protects both the request and response directions in the browser, and encrypts the response to the browser public key bound to the request. It includes network, canister, method, caller, request ID, and expiration date in the authentication target, and refuses to reuse them in different environments and purposes. HPKE itself is not a substitute for person authentication or resend prevention.
 - HL direct connection in the browser is only based on the public market status. User-specific WS/REST, agent approval, and trading account reconciliation are centralized on the Canister side, and the connection IP and trading account are not directly transmitted via browser communication. HL itself knows the account and orders, and the gateway can observe the connection source IP and time.
-- The initial distribution of personal data is done through encrypted polling. The browser reads Canister cache with an estimated 2 seconds of operation and 30 seconds of visibility. HLreconciliation is controlled by a separate shared budget and does not query HL for every browser polling. It stops the increase in new risks for accounts that have been in a state over 10 seconds old. It narrows the simultaneous usage limit when reconciliation capabilities are insufficient.
+- The initial distribution of personal data is done through encrypted polling. The browser reads Canister cache with an estimated 2 seconds of operation and 30 seconds of visibility. HL reconciliation is controlled by a separate shared budget and does not query HL for every browser polling. It stops the increase in new risks for accounts that have been in a state over 10 seconds old. It narrows the simultaneous usage limit when reconciliation capabilities are insufficient.
 - Development eligibility is a composite attribute with the test issuer. The real external issuer registers after contract and legal verification. The mock token tests the separation of network, key, and build settings that do not work in the real network.
 - Development data is only synthetic data. Signature payloads that have been terminal reconciliation are deleted after 24 hours, and detailed histories are deleted after 30 days. However, records required to prevent double processing, such as unknown, balance, unreleased reservations, current authentication and Agent status, are not deleted. The actual storage period and deletion basis require legal approval. We do not guarantee that deletion in the database will erase past snapshots or replica storage.
 
@@ -1011,7 +1011,7 @@ The basic path B is the starting point for safety verification and is not a comp
 2. Compare A (direct deposit), B0 (immediate allocation equal to the amount via common custody), and B1 (simulation of attempting to separate and consolidate allocation timing) with the same input. In B1, it does not lend others' funds without permission and always maintains balance restrictions and backing. The allocation algorithm adopted is determined by the results, and it does not fix untested methods into the live specifications.
 3. 1/5/20/100 users, generate 30 days worth of repetitive entry/withdrawal, small amounts, characteristic amounts, partial withdrawal, full withdrawal, and profit/loss using fixed seeds. Separate them into attack adjustment and unseen evaluation, and do not pass the correct answer response table to the attack input. Add public information not in the simulation through actual testnet bidirectional observation.
 4. The development success criterion is set as a top-1 assignment success rate of less than 20% in each evaluation group with more than 20 people, a success rate reduction of more than 80% compared to A, and a proportion of less than 5% that can be directly identified. It is reported not only on the average but also by scenario and including repetitive history. The uncertainty interval for individual users is also reported, and the accuracy is not inflated by treating repetitive events as independent samples.
-5. This number is a technical screening standard and does not guarantee mathematical anonymity. It does not guarantee it for individual or low-usage scenarios. We do not initiate new confidential deposits until the actual usage volume does not increase the water supply for synthetic users, and we do not start new confidential deposits until conditions are met. We do not allow existing funds to be withdrawn indefinitely until anonymity is achieved. If the protection weakens during withdrawal, we will notify you before proceeding.
+5. This number is a technical screening standard and does not guarantee mathematical anonymity. It does not guarantee it for individual or low-usage scenarios. Do not inflate production usage with synthetic users. Do not open new confidential deposits while the required conditions are unmet. Do not make existing users wait indefinitely to withdraw until anonymity is achieved. If the protection weakens during withdrawal, we will notify you before proceeding.
 
 Whether the test can be conducted in real-world conditions requires an independent review that includes the final algorithm, the actual observation range, and low-utilization conditions. If the criterion is not met, the fund transfer design for B will be reviewed, and unauthorized aggregation of trading accounts or switching to Agent-only mode will not be permitted.
 
@@ -1034,7 +1034,7 @@ Detailed Candid, DDL, and screen layouts will be implemented within this boundar
 | v0.3 | 2026-09-18 | Fix 8.3.2. Due to the need for temporary persistence of order parameters after separation of reception and signature (`Implementation.md` 2.3), specify the scope of storage and deletion conditions. Add 0.5 and set the record location for decision-making on implementation policy (D9~D12). |
 | v0.4 | 2026-09-18 | Reconsider D1 and record D13/D14. Based on NEAR official specifications, separate the confidential fund layer and HL accounts. Explicitly define agent-only as the existing baseline, and add U23–U25 unresolved custody, withdrawal, and recovery matters, along with a pre-adoption gate. Distinguish between public links, amount correlation, and the scope of protection for signatures and communication. |
 | v0.5 | 2026-09-18 | Corrected the design of fund privacy and signature pathway separation, Agent generation, action/order state, pre-transmission recording, fencing, deadlines, and recovery. Compatible with Implementation v0.3. |
-| v0.6 | 2026-09-18 | Adopt confidential canister for customer fund management and SNS governance on D15/D16. Update the permission table, immutable conditions, deposits withdrawal, funds_vault, audit, and completion conditions for the B version. Prioritize accounts per HL user and do not combine single accounts. Add the risk of optional DAO updates, forced suspension, exit, recovery, fund separation, and U26–U28. Maintain the order safety correction in v0.5. Change the old delivery date to a reference value and explicitly disclose the misalignment in Implementation.md. |
+| v0.6 | 2026-09-18 | Adopt confidential canister for customer fund management and SNS governance on D15/D16. Update the permission table, immutable conditions, deposits withdrawal, funds_vault, audit, and completion conditions for the B version. Prioritize accounts per HL user and do not combine single accounts. Add the risk of arbitrary DAO upgrades, forced suspension, exit, recovery, fund separation, and U26–U28. Maintain the order safety correction in v0.5. Change the old delivery date to a reference value and explicitly disclose the misalignment in Implementation.md. |
 | v0.7 | 2026-09-18 | Maintain confidential fund layer + SNS governance, and strengthen D13 to meet the actual requirements for open links and time correlation of amounts. Add D17 and 6.4.1/U29, and advance the A/B comparison of reverse fund flow to Phase 1. Clearly state that both fund safety and privacy improvement are conditions for live migration, and do not use NEAR's unconfirmed implementation as a qualification basis. |
 | v0.8 | 2026-09-18 | In Chapter 16, master key, EOA authentication, USDC reverse transfer, guard, HPKE, account communication, initial market, and privacy evaluation are determined. Implementable items are separated from real-world, legal, and live gate systems, and Implementation v0.4 is integrated. |
 | v0.9 | 2026-09-18 | Adopt Start+React, Workers as the main distribution, and Oxlint/Oxfmt, etc. Add 6 ADRs and a synthesized UI foundation. ICP backend, Candid, and connection points are unimplemented, and HPKE, authentication, and real trading are not connected yet. |

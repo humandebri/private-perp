@@ -350,7 +350,7 @@ type UpgradeStatus = record {
 ```
 
 - `schedule_upgrade` does not accept changes to reservation details. Changes are made by `cancel_upgrade` + new reservation, and a new 7-day period begins.
-- Do not provide APIs for optional management call, controller addition/transfer, reinstall, deletion, standalone stop, or shortening of the delay.
+- Do not provide APIs for arbitrary management calls, controller addition/transfer, reinstall, deletion, standalone stop, or shortening of the delay.
 - `execute_upgrade` does not care about the caller but rejects upgrades that do not match the reserved `wasm_hash` and `arg_hash` (`threat-test-matrix.md` T-501-T-505).
 
 ## 5. policy_registry
@@ -366,7 +366,7 @@ type UpgradeStatus = record {
 | 28 | `get_role_principal` | query | Public (diagnostic) |
 
 - If reading fails, it will be fail-closed and will stop accepting new requests and increasing new risks.
-- Clearing an emergency stop and relaxing restrictions will be carried out through the recorded SNS route (`clear_emergency_stop`). We do not provide optional transfer, immediate upgrade, or change of withdrawal destination.
+- Clearing an emergency stop and relaxing restrictions will be carried out through the recorded SNS route (`clear_emergency_stop`). We do not provide arbitrary transfers, immediate upgrade, or change of withdrawal destination.
 - Policy changes are limited to the `control_guard` principal, and each element in the allowlist is rejected if it is empty, comma-separated, or duplicated.
 
 ### 5.1 Additional additions from Implementation.md 14.3
