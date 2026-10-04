@@ -1,30 +1,31 @@
-# ADR-0004：本人データの通信境界
+# ADR-0004: Personal-data transport boundary
 
-- 日付：2026-09-18
-- 設計状態：accepted
-- 実証状態：未実装・未実証。UIデモは資金・暗号化・ガバナンスの証明ではない
+- Date: 2026-09-18
+- Design status: accepted
+- Evidence status: Not implemented or demonstrated. A UI demo is not evidence of fund safety, encryption, or governance.
 
-## 背景
+## Context
 
-公開のHL口座情報と、本人と取引口座の対応関係を分けて保護する必要がある。
+Protect the mapping between users and trading accounts separately from public HL account information.
 
-## 比較した案
+## Options considered
 
-本人口座のブラウザ直接購読、Workersでの中継、機密Canister経由の取得を比較した。
+Direct browser subscriptions to personal accounts, relaying through Workers, and retrieval through confidential canisters.
 
-## 決定
+## Decision
 
-公開市況だけHLへ直結する。本人データは認証・HPKEによる暗号化の上でCanisterと直接通信する。Workersに平文注文・本人残高・ウォレット署名を送らない。セッション鍵・本人キャッシュをブラウザで永続化しない。
+Connect directly to HL only for public market data. Personal data communicates directly with canisters through authentication and HPKE encryption. Do not send plaintext orders, personal balances, or wallet signatures to Workers. Do not persist session keys or personal caches in the browser.
 
-## 欠点・残存リスク
+## Drawbacks and residual risks
 
-ポーリング・照合の遅延とコストが増える。HL自体や通信入口の観測をなくすものではない。フロントエンド改ざんも暗号化だけでは防げない。
+Polling and reconciliation increase latency and cost. This does not eliminate observation by HL itself or at transport entry points. Encryption alone cannot prevent frontend tampering.
 
-## 再検討条件
+## Reconsideration criteria
 
-照合予算・遅延が目標未達の場合。改善は保護境界を維持して検討し、中継主体の追加は別ADRで承認する。
+Reconsider if reconciliation budget or latency misses its targets. Evaluate improvements while retaining the protection boundary; adding a relay requires approval in a separate ADR.
 
-## 検証の正
+## Source of verification status
 
-実行結果・未実装範囲はfrontend/README.mdとdocs/implementation-status.mdで追跡する。既存のPlan.md 16章の本番ゲートを省略しない。
-
+Track execution results and unimplemented scope in frontend/README.md and
+docs/implementation-status.md. Do not bypass the production gates in Plan.md,
+section 16.

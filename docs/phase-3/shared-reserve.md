@@ -1,75 +1,75 @@
-# 共通保管口座と本人別取引口座
+# Shared reserve account and individual trading account
 
-更新: 2026-09-27。未デプロイを前提とする破壊的変更。旧schema・旧ジャーナル形式からの移行は実装しない。通常の同一バージョンのupgrade・snapshot復元で残高と対応表を守る要件は維持する。
+Update: 2026-09-27. Destructive changes assuming no deployment yet. We will not implement migration from the old schema and old journal format. The requirement to maintain balance and the corresponding table by performing regular upgrade and snapshot restoration of the same version will remain.
 
-## 実装
+## Implementation
 
-- `custody_accounts` のreserveはユーザーに属さない1口座。`user_id`はNULL、reserveの一意制約と種別ごとの所有者制約を置く。取引口座は従来どおり本人別の独立master口座。各vaultは1つのHL networkに属する。
-- 入金案内は共通宛先と、送金元として使用すべき認証済みEOAのHLアドレスを返す。外部の入金先が共通でも、内部の残高・予約・移動中資金・取引equityは本人別に保持する。
-- HLの`internalTransfer`の宛先を検証し、送金元と登録済みEOAが一致した場合だけ本人へ計上する。金額の端数、時刻、公開tx hashの申告だけで本人を決めない。送金元が不明なbridge depositや未登録送金元は未帰属勘定に置く。既存のcontroller用振替APIは管理権限の信頼境界として残る。
-- 管理下の取引口座から共通保管口座への回収は新規入金に計上しない。本人の回収actionの決済処理で反映する。外部イベントの重複排除は継続する。
-- ジャーナルの口座イベントではreserveの所有者をNoneとし、入金イベントには送金元の証跡を含める。snapshot復元でも同じ入金帰属ロジックを使う。口座生成はwriter fence内で存在を再確認する。
-- reserveの既存nonce系列は共通署名口座の系列として使用する。個人別の資金予約・署名済み出金intent・回収フェンスは維持する。共通口座では取引せず、他人の残高の立替は行わない。
+- The reserve of `custody_accounts` is one account that does not belong to the user. `user_id` is NULL, reserve has a unique constraint and ownership constraints based on the type. trading account is an independent master account for the individual as usual. Each vault belongs to one HL network.
+- Deposit information is returned to a common address and to the authentication-verified EOA HL address that should be used as the transfer source. Even if the external deposit address is common, internal balances, reservations, in transit funds, and trading equity are held separately by the individual.
+- Only the person will be credited if the destination of HL's `internalTransfer` is verified and the transfer source and registered EOA match. The person is not identified only by the declaration of the amount, time, and public tx hash. Bridge deposits with unknown transfer sources or unregistered transfer sources will be placed in the unassigned account. The existing transfer API for controllers will remain as a trust boundary for management permissions.
+- Recovery from a managed trading account to a shared reserve account will not be credited to a new deposit. It will be reflected in the settlement processing of the owner's recovery action. The elimination of duplicate external events will continue.
+- In the journal account events, reserve owners are set to None, and in the deposit events, include the proof of transfer. The same deposit attribution logic is used for snapshot restoration. Account creation is reconfirmed in the writer fence.
+- The existing nonce series of reserve will be used as the series of common signature accounts. The individual's fund reservation, signature withdrawal intent, and recovery fence will be maintained. No trading will be conducted on the common account, and no proxy transactions of others' balances will be carried out.
 
-## ローカル画面
+## Local screen
 
-通常操作は「LOCAL MOCK 保管残高に入金」「保管残高から取引に使う」「MetaMask署名で出金」。入金は保管残高への反映だけを待って完了し、自動配分しない。利用者が後から必要額を指定して配分し、取引口座への反映を確認して完了する。保管期限や匿名化のための強制待機は設けない。出金は共通保管口座の本人分の利用可能残高を先に使い、不足額だけ取引口座から回収して、回収フェンス解除と出金可能残高の反映後に出金署名を求める。注文ごとの配分・回収は行わない。
+Normal operations are "deposit to LOCAL MOCK custody balance", "use custody balance for trading", and "withdrawal with MetaMask signature". Deposit only waits for the reflection on custody balance to be completed and does not allocate automatically. Users specify the required amount later and allocate it, then confirm the reflection on the trading account and complete it. No custody expiration period or forced waiting for anonymity is set. Withdrawal uses the available balance of the user's shared reserve account first, recovers only the insufficient amount from the trading account, requests withdrawal signature after the recovery fence is lifted and the reflection of the withdrawable balance. Allocation and recovery are not performed for each order.
 
-この自動化はブラウザの操作手順であり、新しい常駐送金workerではない。再読込・ログアウト・タイムアウト・結果不明で後続操作は止まる。受け付け済みの資金処理は既存Canisterのoutboxで継続し、次回は残高・フェンスを読み直す。45回の読取ポーリングで確認できなければ待機を終了し、別IDで送金を自動再送しない。任意の回収操作は「残高の調整」に残す。
+This automation is a browser operation procedure and is not a new permanent transfer worker. Subsequent operations will stop if re-reading, logging out, timeout, or unknown outcome occur. Accepted fund processing will continue in the existing Canister's outbox, and the next time will be to re-read the balance and fence. If verification cannot be completed after 45 reading polling attempts, the waiting will be terminated, and the transfer will not be automatically resended with a different ID. Any recovery operations will be left to "balance adjustment".
 
-mock HLは回収前の未約定注文確認（`openOrders`）にも応答する。入金seedに送金元を持ち、`usdSend`では署名から送金元を復元して`internalTransfer`履歴を返す。mockを起動する前に`cargo build -p e2e-signer`で補助バイナリもビルドする。
+mock HL also responds to unfilled order confirmation (`openOrders`) before recovery. It carries the transfer source in the deposit seed, and in `usdSend` it recovers the transfer source from the signature and returns the `internalTransfer` history. Before launching mock, it also builds auxiliary binaries with `cargo build -p e2e-signer`.
 
-## プライバシーの範囲
+## Scope of privacy
 
-共通化は直接の送金経路による本人と取引口座の対応付けを避けるための土台。時間窓によるバッチ、金額単位の変更、匿名性の人数判定は未導入。配分を意図的に遅延させず、現在の方式は相関評価のB0に近い。既存の合成評価でB0は未達であり、この変更をもって匿名性の合格とはしない。
+Commonization serves as the foundation to avoid direct transfer pathways that correspond the individual to the trading account. Batches based on time windows, changes in amount units, and anonymity person-count determination are not yet implemented. It does not intentionally delay allocation, and the current method is close to the B0 of correlation evaluation. In the existing composite evaluation, B0 is not met, and this change does not constitute a pass for anonymity.
 
-実HLの入出金往復、同一時刻に取得上限を超える履歴の完全性、共通口座への集中による実レート制限・cycles費用は別途受入が必要。全履歴の単発取得を匿名性や完全な資金復旧の証明には用いない。既存のtestnet接続環境は変更せず、今回の画面試験は独立したローカルCanisterとmock HLで行う。
+Real HL withdrawal and re-withdrawal, the completeness of transactions exceeding the acquisition limit at the same time, and real rate restrictions and cycles fees due to concentration in common accounts require separate acceptance. The single-time acquisition of all transactions is not used for anonymity or proof of complete fund recovery. The existing testnet connection environment will not be changed, and this screen test will be conducted with an independent local Canister and mock HL.
 
-## 検証対象
+## Verification target
 
-- 同一共通宛先に2人が同額を入金し、送金元ごとに分離して計上する。
-- 同じイベントの再取込み、送金元を変更した再申告で二重計上しない。
-- 送金元不明・未登録の入金を本人へ自動計上しない。
-- 取引口座からの回収を新規入金として計上しない。
-- 口座間分離、署名付き出金、結果不明時の拘束、ジャーナル停止、snapshot復元を既存PocketIC群で確認する。
-- ブラウザの自動回収は不足額のみ、既存の回収待ちは再送しない、タイムアウト・unknownは後続送金を止める。
+- Two people deposit the same amount into the same common address, and separately account for it by transfer source.
+- Double counting is not done for re-incorporation of the same event or re-declaration with change of transfer source.
+- Do not automatically charge the deposit from an unknown transfer source or not registered to the person in charge.
+- Do not account the recovery from the trading account as a new deposit.
+- Check account separation, signature-signed withdrawal, binding in case of unknown outcome, journal suspension, and snapshot restoration in the existing PocketIC group.
+- The browser's automatic recovery only recovers the insufficient amount, does not resend existing recovery waits, and stops subsequent transfers when timeouts or unknown errors occur.
 
-## 実行結果
+## Execution results
 
-- PocketICの全37統合試験ファイル、136件が成功（途中で追加試験のID/addressの取り違えを修正し、失敗したファイル以降を再実行）。20人・100人の混合負荷試験を含む。最後の入金writer fence修正後、入金・照合の4件を再ビルドして再検証。
-- フロント単体38件、mock HL 7件、プライバシー評価ツール単体3件が成功。
-- Rust clippy（Wasm、warningsをエラー扱い）、format、署名境界、DBトランザクション中のawait検査、フロント型検査・lintが成功。
-- 既存の合成プライバシー評価を再実行。共通口座を即時・同額で経由するB0はtop-1対応付け率100%であり、秘匿性の合格ではない。
+- All 37 integrated test files for PocketIC were successfully completed (136 files were completed) (corrected a mistake in the ID/address of the additional test files in the middle and re-executed files that failed). Includes a mixed load test with 20 and 100 participants. After the final depositwriter fence correction, rebuilt the 4 deposit and reconciliation files and re-verified them.
+- 38 successful front-only items, 7 successful mock HL items, and 3 successful privacy evaluation tools.
+- Rust clippy (Wasm, warnings are treated as errors), format, signature boundaries, await inspection during DB transactions, front-type inspection and linting are successful.
+- Re-execute the existing synthetic privacy evaluation. B0, which passes through the common account immediately and at the same amount, has a 100% top-1 matching rate, but it does not meet the secrecy requirement.
 
-- 画面の資金ページは3 viewportのintegrity・横方向overflow・interaction検査でsuspectなし。handler検査は配線の存在だけを確認する警告が1件あり、interaction検査とPlaywright操作で補完した。ログイン後の配分済み画面もスクリーンショットで確認。
-- 既存の注文を含む長いブラウザE2Eは3件成功・1件失敗。新規環境で入金と配分、成行注文までは通り、その後の指値注文が結果照合待ちとなった。再実行した環境ではunknownにより資金の後続操作を停止した。全ブラウザE2E成功とはしない。
-- 資金経路の単独Playwright試験は成功（独立ローカルCanister＋mock、約1.4分）。100 USDC入金→本人の取引残高100→5 USDCの不足額回収→出金と回収の両方がSettled→取引残高95を確認。検証fixtureは`target/shared-reserve-e2e/frontend/tests/e2e/funds-flow.spec.ts`、ログは`target/shared-reserve-e2e/funds-check-retry.log`。途中で見つかったmockの`openOrders`未対応を補完し、未約定注文の存在／取消後の空配列をmock単体試験で検証した。
+- The screen's funding page has no suspicion in the 3 viewport integrity, horizontal overflow, or interaction inspection. There is only one warning indicating the presence of wiring in the handler inspection, which was supplemented by the interaction inspection and Playwright operations. The allocated screen after login is also confirmed by screenshots.
+- Out of the 3 long browser E2E orders including existing orders, 3 were successful and 1 failed. In the new environment, deposits, allocation, and market orders were successful, but subsequent limit orders were waiting for result reconciliation. In the re-executed environment, the funds were stopped from subsequent operations due to unknown. It does not mean all browser E2E orders were successful.
+- The standalone Playwright test for the funding path was successful (independent local Canister + mock, approximately 1.4 minutes). 100 USDC deposit → personal trading balance of 100 → recovery of the shortfall of 5 USDC → both withdrawal and recovery were settled → trading balance of 95 was confirmed. The verification fixture is `target/shared-reserve-e2e/frontend/tests/e2e/funds-flow.spec.ts`, and the log is `target/shared-reserve-e2e/funds-check-retry.log`. We completed the missing `openOrders` in the mock found in the process, and verified the existence of unfilled orders or empty arrays after cancellation using the mock test alone.
 
-## レビュー修正（2026-09-28）
+## Review correction (2026-09-28)
 
-入金照合はnetwork・口座ごとの永続時刻カーソルで1巡につき1ページ取得する。末尾時刻をinclusiveに再取得し、同時刻の別入金を落とさずイベントIDで重複排除する。全件の計上が成功してからカーソルを単調に進め、取得・ジャーナル失敗時は同じページを再試行する。手動照合も同じ処理を使う。同一時刻だけで500件以上が返り進めない場合は、完全な証跡が必要なエラーとしてカーソルを保持し、時刻を加算して飛ばさない。
+depositreconciliation retrieves one page per round using a network and account-specific permanent time-point cursor. It re-retries the last time point inclusive, and removes duplicates by event ID without dropping other deposits at the same time. After the total sum of all entries is successful, it proceeds the cursor sequentially, and if retrieval or journaling fails, it retries the same page. Manual reconciliation uses the same processing. If more than 500 entries are not returned only for the same time point, the cursor is retained as an error requiring complete evidence, and the time point is added without skipping.
 
-出金E2Eは全取消を承認し、venueの未約定注文が0件であることを確認した後に建玉を100%決済する。venueの建玉が0件となってから自動回収・出金へ進む。
+After withdrawingE2E approves all cancellations and confirms that there are no unfilled orders on the venue, it will settle the positions 100%. After the venue's positions are zero, it will proceed to automatic recovery and withdrawal.
 
-検証: PocketICの入金・照合・回収16件が成功。照合試験に500件境界、同時刻の別入金、重複、ジャーナル失敗後のカーソル保持、同一時刻飽和の拒否を追加し、さらにWasm upgrade後のカーソル保持とsnapshotからの台帳再生を確認した。mock 8件・frontend単体38件・型検査・lint・Wasm clippy・署名境界・await検査も成功。今回の独立ローカル環境での総合Playwrightは3件成功・1件失敗で、修正した出金手順より前の配分後に「結果照合中」で停止した（`target/review-fixes-e2e/browser.log`）。変更した出金手順を含む総合E2Eの成功は未確認。
+Verification: 16 deposit, reconciliation, and recovery operations in PocketIC were successful. Additional tests included 500 operations at the boundary of reconciliation, concurrent separate deposits, duplicates, cursor retention after journal failures, and rejection of saturation at the same time. Furthermore, cursor retention and ledger reconstruction from snapshots after Wasm upgrade were verified. Mock tests for 8 operations, 38 individual frontend operations, type checks, linting, Wasm clippy, signature boundary checks, and await checks were also successful. Overall Playwright in this independent local environment was successful in 3 cases and failed in 1 case. It stopped with "result reconciliation in progress" after allocation before the corrected withdrawal procedure (`target/review-fixes-e2e/browser.log`). The success of overall E2E, including the modified withdrawal procedure, is not confirmed.
 
-## 残高保持の操作（2026-09-28）
+## Balance maintenance operation (2026-09-28)
 
-通常の入金から自動配分を外し、共通保管口座の本人残高への反映で完了する。「保管残高から取引に使う」を独立した通常操作にして、後から指定額だけ配分する。出金時の不足額回収は維持する。保管残高はブラウザのメモリではなくCanisterの台帳に保持される。
+Remove automatic allocation from the usual deposit and complete it by reflecting the person's balance on the shared reserve account. Make "using custody balance for trading" an independent normal operation and allocate only the specified amount later. Maintain the recovery of the shortfall at the time of withdrawal. The custody balance is stored not in the browser's memory but in the Canister's ledger.
 
-型検査・lint・frontend単体40件が成功。追加したgateway試験は入金で配分しないことと、後から20だけ配分して新規入金を起こさないことを検証。実Canister＋mockの保管E2Eは成功し、100入金後の「保管100・取引0」と画面往復後の保持を確認。20の実配分まで含む試験は既知の「結果照合中」で停止し、取引口座への到着完了は未確認。保存したログイン後画面のvlmkit 0.22.0によるintegrity・scroll検査はsuspectなし（既存の小さいUSDC文字のコントラスト警告あり）。
+40 individual type inspection, lint, and frontend tests were successful. The additional gateway test verified that allocation is not done via deposit, and that only 20 allocations are made later to avoid creating a new deposit. The custody E2E between real Canister and mock was successful, confirming "custody 100 and trading 0" after 100 deposits, and the screen-to-screen retention after the exchange. The test that includes up to 20 real allocations was halted with the known "result reconciliation in progress," and the completion of arrival to the trading account is not confirmed. The integrity and scroll inspection by vlmkit 0.22.0 on the screen after logged in was without suspicion (there is an existing contrast warning for the small USDC characters).
 
-## 全体レビューの修正（2026-09-28）
+## Correction of the overall review (2026-09-28)
 
-- 配分・出金のPOST応答をローカルの永続キューへ保存し、独立ジャーナルへの記録と仕訳適用だけを再試行する。取引所へのPOSTは再送しない。適用処理はsnapshot replayと共通化した。
-- 配分・出金の応答喪失も資金履歴照合の対象にした。送金元・宛先・金額・時刻範囲が一致する証跡を確認する。同額の競合送金や複数の一致履歴は推測で解消しない。未実行の確定は従来の履歴完全性設定とnonce受付期限の経過を要求する。結果の記録より先に配分着金を取り込まない。
-- 注文JSONにも署名対象と同じcloidを含める。oid不明の注文をcloidで照会し、実APIの入れ子になったorderStatusを正規化する。確認したoidと注文状態をジャーナルへ記録してから約定・取消へ進む。
-- 回収受付前と定期照合でHLのaccountValueを観測し、本人の取引資産・負債へ差額を計上する。利益・損失・手数料・Fundingを含む残高になる。資金移動中や観測中に台帳が変化した場合は観測を適用しない。観測記録は独立ジャーナルから再生できる。
-- 残高観測を始めた取引口座への直接入金は、次の絶対残高観測で反映する。履歴の遅着を加算して二重計上しないための扱いであり、共通保管口座への通常入金と配分着金の確定処理は継続する。HLの可変な応答時刻はreplicated outcallの比較対象から除く。
-- 約定feeを小数文字列から符号付きmicro-USDCへ変換する。maker rebateも保持し、欠損・不正値を0へ置き換えない。private Candid codec、表示、mock、fixtureを揃えた。
+- Save the POST responses for allocation and withdrawal to the local permanent queue, and retry only the recording and reconciliation to the independent journal. Do not resend POSTs to the trading platform. The reconciliation processing has been unified with snapshot replay.
+- The loss of response for allocation and withdrawal is also considered for the reconciliation of fund history. We verify evidence that the sender, recipient, amount, and time range match. We do not eliminate competing transfers of the same amount or multiple matching histories by inference. Confirmation of unexecuted transactions requires the traditional history completeness setting and the expiration of the nonce acceptance deadline. Allocation deposits are not included before recording the results.
+- Include the same cloid in the order JSON as the signing payload. Query orders with unknown oids using cloid and normalize the orderStatus that has become a nested order in the real API. Record the confirmed oid and order status in the journal before proceeding to fill and cancellation.
+- Before the recovery process and during regular reconciliation, observe the HL accountValue and record the difference between the trader's trading assets and liabilities. The balance will include profits, losses, fees, and funding. If the ledger changes during the in transit of funds or while observing, no observation will be applied. Observation records can be played back from the independent journal.
+- Direct deposits to a trading account where balance observation has been started are reflected in the following absolute balance observation. This is a handling to avoid double counting by adding the delayed history. The normal deposit and allocation deposit confirmation processing for shared reserve accounts continue. The variable response time of HL is excluded from the comparison object of replicated outcalls.
+- Convert the fillfee from a decimal string to a signed micro-USDC. Also retain the maker rebate and do not replace missing or incorrect values with 0. Provide private Candid codec, display, mock, and fixture.
 
-この修正でも、証跡が曖昧な送金の拘束は維持する。実HLの資金往復と複数ノードでのHTTPS応答合意は、PocketIC・mockによる検証とは別の受入項目である。
+Even with this modification, the binding of transfers with ambiguous evidence will be maintained. The real HL's fund transfers and multiple node HTTPS response agreement are a separate acceptance item from verification by PocketIC and mock.
 
-画面の資金ポーリングはDispatchingを待機し、Unknownで後続操作を停止する。通常の送信中に待機を打ち切っていた挙動も修正した。
+Screen funding polling waits for Dispatching and stops subsequent operations in Unknown. I also fixed the behavior of interrupting the wait during normal transmission.
 
-最終検証: 関連PocketIC 56件（core_pipeline / send_journal / vault_deposits / vault_outbox / vault_reconcile / vault_recovery）、フロント単体41件、mock HL 8件が成功。型検査・lint・Wasm clippy・Rust format・署名境界・DBトランザクション中のawait検査も成功。Candidとフロントの生成済みバインディングを更新した。ログは`target/review-fix-final-tests.log`。実HL送金と総合ブラウザE2Eは今回未実行。
+Final verification: 56 related PocketIC files (core_pipeline / send_journal / vault_deposits / vault_outbox / vault_reconcile / vault_recovery), 41 front-end individual files, and 8 mock HL files were successful. Type checking, linting, Wasm clippy, Rust format, signature boundaries, and await checks during DB transactions were also successful. Candid and the front-end's generated bindings were updated. Logs are in `target/review-fix-final-tests.log`. Real HLtransfer and comprehensive browser E2E tests were not executed this time.

@@ -1,30 +1,31 @@
-# ADR-0005：TanStack Startと限定的なUI再利用
+# ADR-0005: TanStack Start and limited UI reuse
 
-- 日付：2026-09-18
-- 設計状態：accepted
-- 実証状態：UI基盤・デモのローカル検証対象。本番未検証
+- Date: 2026-09-18
+- Design status: accepted
+- Evidence status: UI infrastructure and demo are subject to local verification; production is unverified.
 
-## 背景
+## Context
 
-Next.jsを避けつつ、HL利用者が慣れた高品質の取引UIを作りたい。
+Build a high-quality trading UI familiar to HL users while avoiding Next.js.
 
-## 比較した案
+## Options considered
 
-Start＋React、Preact＋Vite、Start＋Preact互換層、既存アプリ全体のforkを比較した。
+Start with React, Preact with Vite, Start with a Preact compatibility layer, and forking an entire existing application.
 
-## 決定
+## Decision
 
-Start＋React＋TypeScript＋Vite、TanStack Router/Query/Table、Tailwind、Lightweight Chartsを採用する。pnpmで依存を完全固定し、Oxlint＋型対応、Oxfmt、tsc、Vitest、Playwrightを使う。React Compilerは初期採用しない。HypeTerminalは部品の参考候補のみとし、初期UIは独自作成する。
+Use Start, React, TypeScript, Vite, TanStack Router/Query/Table, Tailwind, and Lightweight Charts. Pin dependencies exactly through pnpm; use type-aware Oxlint, Oxfmt, tsc, Vitest, and Playwright. Do not initially adopt React Compiler. Treat HypeTerminal only as a possible component reference and build the initial UI independently.
 
-## 欠点・残存リスク
+## Drawbacks and residual risks
 
-Preactより軽量とは限らない。HL並みの全機能・執行速度は保証しない。Chartの描画・操作機能は段階追加。Tableは検証したv8系APIに固定し、v9への追従は別の変更として試験する。
+This is not necessarily lighter than Preact. Full HL feature parity or execution speed is not guaranteed. Chart rendering and interaction features are added incrementally. Pin Table to the verified v8 API; test v9 adoption as a separate change.
 
-## 再検討条件
+## Reconsideration criteria
 
-UI再利用による短縮効果が確認できた場合はライセンス・依存・通信処理を監査して部品単位で採用する。Next.jsやPreactへの自動変更はしない。
+If UI reuse demonstrates a time saving, audit licenses, dependencies, and transport behavior before adopting individual components. Do not automatically switch to Next.js or Preact.
 
-## 検証の正
+## Source of verification status
 
-実行結果・未実装範囲はfrontend/README.mdとdocs/implementation-status.mdで追跡する。既存のPlan.md 16章の本番ゲートを省略しない。
-
+Track execution results and unimplemented scope in frontend/README.md and
+docs/implementation-status.md. Do not bypass the production gates in Plan.md,
+section 16.

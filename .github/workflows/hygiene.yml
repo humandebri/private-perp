@@ -1,6 +1,7 @@
 name: Repository hygiene
 on:
   push:
+    branches: [main]
   pull_request:
 permissions:
   contents: read
@@ -15,6 +16,8 @@ jobs:
           fetch-depth: 0
       - name: Reject tracked local state and signing files
         run: python3 scripts/check-public-files.py
+      - name: Check English documentation and local links
+        run: python3 scripts/check-documentation.py
       - name: Scan Git history for secrets
         run: |
           set -euo pipefail

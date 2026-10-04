@@ -58,9 +58,9 @@ It has been consolidated into Chapter 14. The implementation choices were finali
 
 ### 0.5 Determination of implementation policy
 
-D9 (signature path), D10 (trading_core placement), D11 (real-time path), and D12 (persistence) are recorded in Chapter 0 of Implementation.md. Implementation decisions are made in the same document, and changes related to the permission model and invariant conditions (3.2) are recorded in this document.
+Record D9 (signing route), D10 (trading_core placement), D11 (real-time route), and D12 (persistence) in `Implementation.md` chapter 0. Record implementation decisions there, and return authority-model or invariant changes to this document (3.2).
 
-`Implementation.md` v0.5 supports the B plan of this project. It retains the existing order status, fencing, and signaturereconciliation, and aligns the funds ledger, master key, authentication, communication, and change permissions. The values in Chapter 16 are the design default values and do not mean that they are implemented or audited. The scope of implementation for the UI foundation and composite demo is refer to docs/implementation-status.md.
+`Implementation.md` v0.5 supports the B plan of this project. It retains the existing order status, fencing, and signature reconciliation, and aligns the funds ledger, master key, authentication, communication, and change permissions. The values in Chapter 16 are the design default values and do not mean that they are implemented or audited. The scope of implementation for the UI foundation and composite demo is refer to docs/implementation-status.md.
 
 ---
 
@@ -68,7 +68,7 @@ D9 (signature path), D10 (trading_core placement), D11 (real-time path), and D12
 
 ### 1.1 Definition in one sentence
 
-A service that allows users to use HL standard perpetual futures trading while reducing the public links to their regular wallets and Hyperliquid trading accounts, and depositing funds into confidentialCanister, which is governed by SNS DAO, with the exclusion of US citizens and restricted regions.
+A service that allows users to use HL standard perpetual futures trading while reducing the public links to their regular wallets and Hyperliquid trading accounts, and depositing funds into confidential canister, which is governed by SNS DAO, with the exclusion of US citizens and restricted regions.
 
 We entrust orders, fills, margin, and settlements to Hyperliquid standards as much as possible. Since Canister manages customer funds, we do not assume that users can independently manage their funds or directly withdraw funds during service suspension. We distinguish between technical custody and transfer permissions and legal custody classification, and do not determine the entire service as "non-custody."
 
@@ -165,7 +165,7 @@ This chapter is the goal privilege model of B. tECDSA, TEE, and SNS respectively
 | Deposit recording and allocation to HL | deposit and allocation are authorization | No withdrawal rights | Manage deposit confirmation and balance/allocation | Voluntary relocation by the operation is not allowed. |
 | withdrawal | The person authorizing the recipient and amount | Prohibited | Verify balance and restraint and enforce it | No DAO voting required for normal withdrawal |
 | Transfer of funds to any third party | Only the withdrawal of the user's balance | Prohibited | Not possible without valid authorization | Repurchasing as a DAO budget is prohibited. |
-| Agent approval/decline | Request to stop/unsubscribe | Stop new signature | Execute and reconcile with mastersignature | HL direct uninstallation is not allowed by users. |
+| Agent approval/decline | Request to stop/unsubscribe | Stop new signature | Execute and reconcile with master signing | HL direct uninstallation is not allowed by users. |
 | New order suspension and risk limit reduction | Stop your trading | Force restrictions | Limit new allocation | Possible with limited operating rights |
 | Withdrawal destination and change of balance | owner authorization is required | Prohibited | Only state transition with evidence | We do not provide an operation API for optional changes. |
 | Changing the WASM controller | Verify and exit public information | Not allowed by self-judgment | Not allowed by self-judgment | SNS + guard. Upgrade is allowed for 7 days, controller change is prohibited (16.3) |
@@ -455,7 +455,7 @@ Separate funds_vault with a funds signature and trading_core with a trading agen
 |---|---|---|
 | frontend | Public page SSR and asset distribution. Personal data and wallet operations are only for the client. Do not transfer signature and funds API to Workers. | Cloudflare Workers + Static Assets (not Canister) |
 | trading_core | Order acceptance, Agent address extraction, Hyperliquidsignature generation, Order state machine, Risk limitation, Hyperliquidreconciliation | Confidential Subnet |
-| funds_vault | Customer funds custody, authentication, double-entry ledger, HL allocation/recovery, withdrawal, mastersignature and reconciliation | Confidential Subnet |
+| funds_vault | Customer funds custody, authentication, double-entry ledger, HL allocation/recovery, withdrawal, master signing and reconciliation | Confidential Subnet |
 | policy_registry | Allowed countries, prohibited countries, terms and conditions version, compliance token verification key, emergency stop state, ticker allowlist | Confidential Subnet |
 | control_guard | Change reservation via SNS with a 7-day delay. The only controller for the eligible Canister. | Subnet is also available normally. Do not store customer information or funds key. |
 
@@ -523,7 +523,7 @@ Alternative policy. If the Confidential Subnet cannot be secured during the deve
 
 Governed by an SNS DAO (D16). In standard SNS management, the SNS root becomes the controller of the app Canister, and WASM or controller configuration can be changed with approved proposals. Do not leave additional controllers or hidden management signature pathways for individual operators.
 
-Direct control of SNS root prevents developers from making unilateral changes, but malicious changes by DAO cannot be prevented. Since confidentialCanister processes plain text, the change permissions can also lead to data disclosure permissions. Confirm and verify the following before the production phase.
+Direct control of SNS root prevents developers from making unilateral changes, but malicious changes by DAO cannot be prevented. Since confidential canister processes plain text, the change permissions can also lead to data disclosure permissions. Confirm and verify the following before the production phase.
 
 - Evaluate the allocation of voting rights, centralization of delegation, and approval conditions, and include governance attacks on deposited assets as a threat model. SNS launch and token allocation and sale conditions will be determined separately (U28).
 - We are publishing the WASM hash, reproducible builds, and controller configuration and change proposals. We are not posting customer plaintext balance and destination addresses as public proposals.
@@ -553,7 +553,7 @@ Practice changes, exits, and recovery in Phase 2, and audit the detour paths in 
 
 #### 8.4.3 Agent's expiration date
 
-Hyperliquid agents have an expiration date. According to the explanation of the third-party SDK, it is said that by adding `valid_until <timestamp>` to the agent name, it can be extended up to 180 days. The exact specifications and restrictions will be finalized in Phase 1 through official documentation and testnet observations.
+Hyperliquid agents expire. Third-party SDK guidance describes a default of 90 days and extension up to 180 days by adding `valid_until <timestamp>` to the agent name. Confirm the exact specification and constraints with official documentation and testnet measurements in Phase 1.
 
 Operational consequences.
 
@@ -594,7 +594,7 @@ Hyperliquid requires a unique nonce for each signer. Since the Canister generate
 
 The asset index that refers to the ticker in Hyperliquid's order action is an integer, and in perpetual futures it is a subscript in the `universe` array of the `meta` response. This value is included in the msgpack of the signing payload.
 
-As of 2026-09-18, the `universe` contains 234 elements, with 56 elements having `isDelisted: true` and scattered between positions 3 and 20. The array consists of only additional elements, and the elements of discontinued stocks remain in their original positions.
+Measurements on 2026-09-18 found 234 `universe` entries, including 56 with `isDelisted: true`, scattered across indices 3 through 202. The array is append-only; delisted assets retain their positions.
 
 Therefore, keep the following invariant conditions.
 
@@ -913,7 +913,7 @@ Maintain the following U numbers for tracking purposes. Distinguish between the 
 | U28 | Adopt guard. SNS allocation, sales, launch, and final transfer are not approved. | Before receiving the actual funds | Business, implementation, legal affairs |
 | U29 | Observer, A/B0/B1, set the number of people, period, and success rate criteria at 16.6. The achievement result is not measured. | Phase 1 initial judgment and pre-show re-verification | Implementation and audit |
 
-U16-U22 are managed in Chapter 12 of Implementation.md.
+Manage U16–U22 in `Implementation.md` chapter 12.
 
 ---
 
@@ -969,7 +969,7 @@ This chapter is an implementation decision as of 2026-09-18. Referencing the U n
 ### 16.2 Initial capital pathways and ledger (U23/U27)
 
 - The initial assets are only USDC on HyperCore. Starting from testnet, the initial UI will be limited to deposits from users' existing HL accounts. It will not be an UI that can automatically transfer USDC from other chains just by connecting to MetaMask.
-- The basic path is "HL account of the person → shared reserve account not used for trading → HL trading account per user → shared reserve account → HL account of the person". The standard `usdSend` is verified as the target. Deposits from the person are signed by the person, and thereafter the mastersignature of funds_vault. The activation of a new account, minimum amount, transfer fees, and acquisition of confirmation events are measured in Phase 1.
+- The basic path is "HL account of the person → shared reserve account not used for trading → HL trading account per user → shared reserve account → HL account of the person". The standard `usdSend` is verified as the target. Deposits from the person are signed by the person, and thereafter the master signing of funds_vault. The activation of a new account, minimum amount, transfer fees, and acquisition of confirmation events are measured in Phase 1.
 - Withdrawals from other chains, proprietary bridges, ckUSDC, and proprietary swap tokens will not be implemented initially. Transfers between external wallets and the user's HL account will be explicitly stated to be outside of this service. The traditional Arbitrum Bridge2 will not be replaced by a newly designed version.
 - Do not allow trading agents or positions to be held in a shared reserve account. In user-specific accounts, HL standard margin and liquidation are used. Do not offset other users' margin and losses, and do not transfer losses to others' balances.
 - Separate unallocated balance, withdrawal reservation, in transit asset, and user-specific HL equity. Do not double-count common custody asset and user-specific account asset. Do not credit the unsettled PNL as a withdrawable balance. The recovery amount is determined by the actual withdrawable amount of HL and the transfer result.
@@ -1034,7 +1034,7 @@ Detailed Candid, DDL, and screen layouts will be implemented within this boundar
 | v0.3 | 2026-09-18 | Fix 8.3.2. Due to the need for temporary persistence of order parameters after separation of reception and signature (`Implementation.md` 2.3), specify the scope of storage and deletion conditions. Add 0.5 and set the record location for decision-making on implementation policy (D9~D12). |
 | v0.4 | 2026-09-18 | Reconsider D1 and record D13/D14. Based on NEAR official specifications, separate the confidential fund layer and HL accounts. Explicitly define agent-only as the existing baseline, and add U23–U25 unresolved custody, withdrawal, and recovery matters, along with a pre-adoption gate. Distinguish between public links, amount correlation, and the scope of protection for signatures and communication. |
 | v0.5 | 2026-09-18 | Corrected the design of fund privacy and signature pathway separation, Agent generation, action/order state, pre-transmission recording, fencing, deadlines, and recovery. Compatible with Implementation v0.3. |
-| v0.6 | 2026-09-18 | Adopt confidentialCanister for customer fund management and SNS governance on D15/D16. Update the permission table, immutable conditions, deposits withdrawal, funds_vault, audit, and completion conditions for the B version. Prioritize accounts per HL user and do not combine single accounts. Add the risk of optional DAO updates, forced suspension, exit, recovery, fund separation, and U26–U28. Maintain the order safety correction in v0.5. Change the old delivery date to a reference value and explicitly disclose the misalignment in Implementation.md. |
+| v0.6 | 2026-09-18 | Adopt confidential canister for customer fund management and SNS governance on D15/D16. Update the permission table, immutable conditions, deposits withdrawal, funds_vault, audit, and completion conditions for the B version. Prioritize accounts per HL user and do not combine single accounts. Add the risk of optional DAO updates, forced suspension, exit, recovery, fund separation, and U26–U28. Maintain the order safety correction in v0.5. Change the old delivery date to a reference value and explicitly disclose the misalignment in Implementation.md. |
 | v0.7 | 2026-09-18 | Maintain confidential fund layer + SNS governance, and strengthen D13 to meet the actual requirements for open links and time correlation of amounts. Add D17 and 6.4.1/U29, and advance the A/B comparison of reverse fund flow to Phase 1. Clearly state that both fund safety and privacy improvement are conditions for live migration, and do not use NEAR's unconfirmed implementation as a qualification basis. |
 | v0.8 | 2026-09-18 | In Chapter 16, master key, EOA authentication, USDC reverse transfer, guard, HPKE, account communication, initial market, and privacy evaluation are determined. Implementable items are separated from real-world, legal, and live gate systems, and Implementation v0.4 is integrated. |
 | v0.9 | 2026-09-18 | Adopt Start+React, Workers as the main distribution, and Oxlint/Oxfmt, etc. Add 6 ADRs and a synthesized UI foundation. ICP backend, Candid, and connection points are unimplemented, and HPKE, authentication, and real trading are not connected yet. |

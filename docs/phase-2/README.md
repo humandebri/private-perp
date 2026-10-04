@@ -1,105 +1,105 @@
-# Phase 2：単一ユーザーtestnet MVP（計画と進行）
+# Phase 2: Single user testnet MVP (planning and progress)
 
-`Implementation-Roadmap.md` §6 の実装計画。Phase 1の細部の作り込みより、**testnetで資金往復を通すこと**を優先する。
+Implementation plan in `Implementation-Roadmap.md` §6. Prioritize **transmitting funds on testnet** over the finer details of Phase 1 implementation.
 
-## GATE 0：前提（未達なら testnet へ進まない）
+## GATE 0: Prerequisites (if not met, do not proceed to testnet)
 
-| # | 前提 | 状態 | 必要な操作 |
+| # | a premise | State | Required operation |
 |---|---|---|---|
-| G0-1 | IC testnet用identityとcycles、4 canisterのデプロイ承認 | **未** | `icp identity`でidentity作成 → faucetでcycles取得 → `icp deploy`（`funds_vault`/`trading_core`/`control_guard`/`policy_registry`） |
-| G0-2 | HL testnet口座＋test USDC、MetaMask | **未** | HL testnet faucetでUSDC受領、MetaMaskにtestnetを追加 |
-| G0-3 | testnet tECDSA key IDの確定（`test_key_1`第一候補・未確認） | **未** | デプロイ後 `ecdsa_public_key` を実測し `docs/phase-0/environments.md` へ記録 |
-| G0-4 | HL testnetの制限（最小額・手数料・確定イベント） | **未** | 預入・出金を1往復して実測 |
+| G0-1 | Identity and cycles for IC testnet, 4 canister deployment approval | **Not yet** | Create identity with `icp identity` → obtain cycles with `faucet` → `icp deploy` (`funds_vault`/`trading_core`/`control_guard`/`policy_registry`) |
+| G0-2 | HL testnet account + test USDC, MetaMask | **Not yet** | Receive USDC on HL testnet faucet, add testnet to MetaMask |
+| G0-3 | Confirmation of testnet tECDSA key ID (`test_key_1` first candidate, unconfirmed) | **Not yet** | After deployment, measure `ecdsa_public_key` and record it to `docs/phase-0/environments.md` |
+| G0-4 | HL testnet restrictions (minimum amount, fees, final events) | **Not yet** | Real-time measurement of deposits and withdrawals in one round |
 
-## マイルストーン
+## a milestone
 
-| M | 内容 | ゲート |
+| M | Content | a gate |
 |---|---|---|
-| M1 | GATE 0 | 4 canisterがtestnetで起動し、key id確定 |
-| M2 | 2A 環境設定の一般化／2B HPKE封筒の個人API適用 | PocketIC＋E-1/E-2 |
-| M3 | 2C 建玉・PnL・SL/TP照合／2D 取消・Cancel All・決済／2E 鮮度ゲート | PocketIC、ローカルで代替フロー |
-| M4 | 3A ウォレット認証／3B IC接続＋封筒クライアント／資金フロー | testnetで預入→配分→回収→出金 |
-| M5 | 3C 取引画面／3D 非正常状態 | **ローカル実装済み**。testnet受け入れはGATE 0後 |
-| M6 | 3E 最小代替クライアント／Playwright／計測レポート／終了レビュー | **ローカル実装済み**。実測レポートはtestnet後に追記 |
+| M1 | GATE 0 | 4 canisters started on testnet and key id confirmed |
+| M2 | 2A Generalization of Environment Settings / 2B Application of Individual API for HPKE envelopes | PocketIC＋E-1/E-2 |
+| M3 | 2C positions, PnL, SL/TP reconciliation／2D cancellation, Cancel All, position closing／2E freshness gate | PocketIC, alternative flow locally |
+| M4 | 3A Wallet authentication / 3B IC connection + envelope client / fund flow | Deposit on testnet → allocation → recovery → withdrawal |
+| M5 | 3C trading screen / 3D abnormal state | **Local implementation completed**. Testnet acceptance is after GATE 0. |
+| M6 | 3E Minimum Alternative Client/Playwright/Measurement Report/End Review | **Local implementation is complete**. The test results report will be added after testnet. |
 
-## Phase 2で扱わないもの
-Phase 3以降（複数ユーザー分離・負荷・backup復元・cycles通知・eligibility/監査/保持削除）、実資金・mainnet（E-2で**拒否**を試験）、Phase 1の細部（UIの磨き込み等）。ただし `reconcile_all` の固定窓（入金先が3件以上で古い口座が対象外）は実バグのためM3までに修正する。
+## Things that are not handled in Phase 2
+Deferred: Phase 3 and later work (multi-user isolation, load, backup restoration, cycles alerts, eligibility, audit, and retention cleanup), real funds and mainnet (E-2 tests rejection), and Phase 1 refinements such as UI polish. The fixed window in `reconcile_all`, which excludes older accounts when there are at least 3 deposit destinations, is a real bug and must be fixed by M3.
 
-## 残りの実装（2026-09-21に1〜3を実装・ローカル検証済み）
+## Remaining implementation (1–3 implemented and locally verified on 2026-09-21)
 
-### 1. SL/TP（トリガー注文）— **完了**
-- `orders`表に`trigger_is_market`を追加し、`trigger_kind`・`trigger_price`と3列揃いのCHECKを付けた（`trigger_kind`が`tpsl`の役割を兼ねる）。`NewOrder`・`SignableOrder`・`OrderSummary`・`OrderView`まで配線した。
-- 受付検証（`submit_inner`）：`reduce_only`必須、トリガ価格の正値と精度（価格と同じ条件）、建玉の存在と`side`が建玉の反対売買であること。市場価格に対する上下は、coreがmark価格を持たないため受付では検査しない（取引所が最終判定）。
-- 署名action：`OrderType::Trigger`＋`Grouping::PositionTpsl`を`order_action`（msgpack用）と`order_action_json`（送信用JSON）の共通経路で出す。受付fingerprintにもトリガを含める。
-- 試験：`crates/pocket-ic-tests/tests/core_triggers.rs`（受付検証・署名actionの一致・送信本文・`orderStatus`反映）。
+### 1. SL/TP (Trigger Order) — **Completed**
+- Added `trigger_is_market` to `orders` with a CHECK requiring all 3 trigger fields (`trigger_is_market`, `trigger_kind`, and `trigger_price`) together. `trigger_kind` also represents `tpsl`. Connected this through `NewOrder`, `SignableOrder`, `OrderSummary`, and `OrderView`.
+- Acceptance verification (`submit_inner`): `reduce_only` is mandatory, the trigger price must be the actual price and the accuracy (same conditions as the price), the existence of positions and `side` must be opposite to the positions. Up and down movements relative to the market price are not checked at acceptance because the core does not have a mark price (the exchange makes the final judgment).
+- signatureaction: Output `OrderType::Trigger` + `Grouping::PositionTpsl` in the common path of `order_action` (for msgpack) and `order_action_json` (for sending JSON). Also include the trigger in the reception fingerprint.
+- Test: `crates/pocket-ic-tests/tests/core_triggers.rs` (receipt verification, signature action consistency, message body, `orderStatus` reflection).
 
-### 2. 全決済・部分決済（reduce-only）— **完了**
-- `submit_order`の受付〜登録を`submit_inner(user_id, args)`へ抽出した。
-- `close_position(session, client_request_id, market, ratio_bps, limit_price)`と`close_all(session, client_request_id)`を追加（`limit_price`はスリッページ上限。省略時は観測した建玉からmark価格を近似）。数量は建玉数量×比率を`szDecimals`で切り捨てる。
-- `reduce_only`はリスク予約と鮮度ゲートの対象外にした（建玉があるときに決済・保護を打てなくなる方が危険）。緊急停止は従来どおり決済も止める。
-- 建玉の取り込みを全量置換にした（決済済みの建玉が残らない）。`close_all`の受付IDは`client_request_id`と銘柄から導出する。
-- 試験：`crates/pocket-ic-tests/tests/core_close.rs`（反対売買・部分比率・全決済・送信と約定で建玉0）。
+### 2. Full payment/partial payment (reduce-only) - **Completed**
+- The receipt and registration of `submit_order` were extracted to `submit_inner(user_id, args)`.
+- Add `close_position(session, client_request_id, market, ratio_bps, limit_price)` and `close_all(session, client_request_id)` (`limit_price` is the slippage limit. If omitted, the mark price is approximated from the observed positions). The quantity is rounded down to `szDecimals` by multiplying the number of positions by the ratio.
+- `reduce_only` has excluded risk reservations and freshness gates (it is more dangerous if you cannot make a settlement or protection when there are positions). Emergency suspension will also stop the settlement as usual.
+- Replace all the positions taken into account (no positions that have been settled will remain). The receipt ID for `close_all` is derived from `client_request_id` and the stock name.
+- Test: `crates/pocket-ic-tests/tests/core_close.rs` (opposite trade, partial ratio, full settlement, positions0 with send and fill).
 
-### 3. HPKE封筒の個人API適用（T-605）— **完了**
-- 封筒実装を共有クレート `crates/hpke-envelope` へ移設し、`funds-vault`は再輸出、`trading-core`は同クレートを使う。
-- coreへ`hpke_keys`（v7）・`hpke_requests`（v8）を追加し、`rotate_hpke_key`（controllerのみ）と`get_hpke_public_key`を実装。
-- `get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`を**封筒必須**にした。`key_id`（現行公開鍵）・`network`・`canister`・`method`・`caller`・`request_id`・期限を束縛し、`aad`は再計算して一致を確認（改竄は復号失敗）。`request_id`は復号成功時に単回使用として記録し再送を拒否する。応答は`client_public_key`宛に封をする。
-- 未適用：`submit_order`・`cancel_all`・`close_position`・`close_all`・`request_agent_generation`・`get_agent_status`（契約§6の適用範囲を4メソッドとしたため）。
-- 試験：`crates/pocket-ic-tests/tests/core_hpke.rs`（正規の往復・期限・改竄・caller/canister/network/method束縛・request_id再利用拒否・鍵更新）。
+### 3. Apply HPKE envelope personal API (T-605) - **Completed**
+- Transfer the envelope implementation to the shared crate `crates/hpke-envelope`, and reuse `funds-vault` and `trading-core` in the same crate.
+- Add `hpke_keys` (v7) and `hpke_requests` (v8) to core and implement `rotate_hpke_key` (only for controller) and `get_hpke_public_key`.
+- `get_account_snapshot`, `list_orders`, `list_fills`, and `cancel_order` are **mandatory envelopes**. `key_id` (current public key), `network`, `canister`, `method`, `caller`, and `request_id` are used to bind the expiration date, and `aad` is recalculated to verify consistency (tampering results in decryption failure). `request_id` is recorded as a single-use entry upon successful decryption and is rejected for resending. The response is sealed to `client_public_key`.
+- Not applicable: `submit_order`, `cancel_all`, `close_position`, `close_all`, `request_agent_generation`, `get_agent_status` (because the scope of application of Contract §6 is defined by 4 methods).
+- Test: `crates/pocket-ic-tests/tests/core_hpke.rs` (normal bidirectional, expiration, tampering, caller/canister/network/method binding, request_id reuse refusal, key update).
 
-### 4. 本番の注文パイプラインと照合（M3残余）— **完了**
-- `test-venue`限定だった署名・送信・照合を `crates/trading-core/src/venue.rs`（outcall・変換）と `pipeline.rs`（送信・照合）へ移し、**feature無しの本番wasmで動作**するようにした。`submit_order` は従来どおり受付（`pending`）だけを確定する。
-- 送信（`/exchange`）は非replicated POST。受理は`open`＋oid、拒否は`rejected`＋リスク予約の解放、結果不明は`unknown`（**再送しない**・予約も解放しない）。取消も同じ経路で送る。
-- 照合（`/info`）はreplicated outcall＋決定論的な変換関数`transform_info`（用途別に必要な要素だけを残す）。`userFillsByTime`は`tid`で冪等に取り込み、`clearinghouseState`は観測の全量で置き換え、`orderStatus`はoidが分かる未終端注文だけに反映する。
-- 起動はグローバルtimer（`ic-cdk-timers`の`set_timer_interval`・本番ビルドのみ・5秒間隔）で、`init`／`post_upgrade`で再armする。`sweep`（controller手動）が同じ`sweep_once`を呼ぶ。heartbeatは使わない（毎ラウンド呼ばれ、アイドル時もコストが乗るため）。試験ビルドでは自動sweepを組まず、`test_sweep_now`で決定的に駆動する（PocketICで試験が待つoutcallと取り違えないため）。
-- 照合対象は`accounts`に取引所アドレスを保存済みの有効口座で、`account_id`順のカーソルで巡回する（固定窓にしない）。アドレスは本人の署名済み要求の処理中にvaultから一度だけ取得して保存する（`cache_trading_address`）。
-- 上限：送信4件・取消4件・照合2口座・注文状態4件/口座。結果は`SweepOutcome{dispatched, cancels, reconciled}`で返す。
-- リスク予約の解放：注文が終端（約定・取消・拒否）になった時点で予約を解放する（`state-machines.md` 5節）。解放しないと予約が永久に残り、equityに対する新規注文の枠を食い潰す。建玉の証拠金は取引所の観測（`clearinghouseState`）が表すため、予約は未約定注文のリスクを表す。
-- 試験：`crates/pocket-ic-tests/tests/core_pipeline.rs`（送信→照合の往復、拒否・不明の分類と非再送、約定後の予約解放、3口座の巡回、controller限定の手動sweep）。既存の送信試験は`venue_router_default`（送信応答のみ指定し、照合は既定応答）で駆動する。
-- 未実施：実HLへの送信はGATE 0後。自動timerは本番ビルドにしか組まないため、間隔・再arm・周期コストはtestnetデプロイ時に実測する（timerが失われても永続状態と手動`sweep`で再開できる）。`state-machines.md` 5節が求めるcycles予算の上限（残cyclesが閾値未満ならsweepを休止する等）は件数上限のみで未実装。建玉の証拠金は取引所の`marginSummary.totalMarginUsed`を取り込んでおらず、`margin_used`は未約定注文の予約合計を表す。
+### 4. Live order pipeline and reconciliation (M3 balance) — **Completed**
+- We moved the signature, sending, and reconciliation functions that were limited to `test-venue` to `crates/trading-core/src/venue.rs` (outcall and conversion) and `pipeline.rs` (sending and reconciliation), and made them work in productionwasm without features. `submit_order` only confirms acceptance (`pending`) as usual.
+- Sending (`/exchange`) is a non-replicated POST. Acceptance is `open` + oid, rejection is `rejected` + risk reservation release, unknown outcome is `unknown` (do not **resend** and do not release reservation). Cancellation is also sent through the same path.
+- reconciliation (`/info`) is replicated outcall + deterministic transformation function `transform_info` (only keep the elements needed by the purpose). `userFillsByTime` is taken into power by `tid`, `clearinghouseState` is replaced by the total number of observations, and `orderStatus` is reflected only in the non-terminal orders that can be identified by `oid`.
+- The startup is done with the global timer (`ic-cdk-timers` `set_timer_interval` only for production builds, 5-second intervals), and is rearmed with `init`/`post_upgrade`. `sweep` (controller manual) calls the same `sweep_once`. Heartbeat is not used (it is called every round, and it also incurs cost even when idle). In the test build, automatic sweep is not set up, and it is driven definitively with `test_sweep_now` (to avoid conflicting with the outcall where the test waits in PocketIC).
+- The reconciliation target is an active account that has the trading exchange address saved in `accounts`, and it is traversed by a cursor in order of `account_id` (do not traverse by fixed window). The address is obtained and saved from the vault only once during the processing of the signature-verified request of the owner (`cache_trading_address`).
+- Limit: Send 4 items, cancellation 4 items, reconciliation 2 accounts, order status 4 items per account. The result is returned as `SweepOutcome{dispatched, cancels, reconciled}`.
+- Release of risk reservation: Release the reservation at the time of the order becoming terminal (fill, cancellation, rejection) (`state-machines.md` section 5). If not released, the reservation will remain permanently and will exhaust the new order limit for equity. The margin of positions is represented by the observation of the trading floor (`clearinghouseState`), so the reservation represents the risk of unfilled orders.
+- Test: `crates/pocket-ic-tests/tests/core_pipeline.rs` (forwarding/reconciliation of send→reconciliation, rejection/unknown classification and non-resend, reservation release after fill, 3 account rotation, controller-limited manual sweep). Existing send tests are driven by `venue_router_default` (only specify send response, reconciliation is default response).
+- not performed: Sending to real HL is after GATE 0. The automatic timer is only set up for the live build, so the interval, rearm, and periodic cost are measured during testnet deployment (even if the timer is lost, it can be restarted with a permanent state and manual `sweep`). The cycles budget limit requested by the 5th paragraph of `state-machines.md` (such as pausing the sweep if the remaining cycles are below the threshold) is only a count limit and is unimplemented. The margin of positions does not include the `marginSummary.totalMarginUsed` from the trading exchange, and `margin_used` represents the total reservation of unfilled orders.
 
-### 5. 環境設定の一般化とE-2（M2の2A・残余）— **完了**
-- network・HL endpoint・tECDSA key IDをビルド定数から**起動時の設定**へ移した（`docs/phase-0/environments.md` 4.1節）。`funds_vault`は`set_network`・`set_venue_endpoints`・`set_ecdsa_key_id`、`trading_core`は`set_market_context`（network検証を追加）・`set_venue_endpoints`・`set_ecdsa_key_id`を持ち、いずれもcontroller専用。`get_environment`は公開の診断query。
-- 検証は純粋クレート`hl-types::environment`に集約：**mainnetを拒否**（Phase 2で実資金を扱わない）、endpointのhostがnetworkと一致しない場合は拒否（lookalike domainも拒否）、ローカルの設定で実venueのhostを拒否、key IDの形式検証。ホスト試験で固定。
-- 未設定の既定は`local`・ループバックendpoint・`test_key_1`。outcall（`/exchange`・`/info`）と署名鍵は呼び出し時に設定から解決する（`venue.rs`・`crypto.rs`）。
-- 試験：`core_environment.rs`・`vault_environment.rs`（mainnet拒否・不一致拒否・`get_environment`・**設定したendpointが実際のoutcall URLになること**）、`hl-types`のホスト試験。
-- E-1（mock eligibility token）は**未実施**：eligibility発行はPhase 3で、tokenが存在しない。E-5（mock endpointの本番混入）はmock endpointをコードへ埋め込まず設定でのみ与えることで構造的に満たす。
+### 5. Generalization of environmental settings and E-2 (M2 2A/remainder) — **Completed**
+- Moved the network, HL endpoint, and tECDSA key ID from the build constants to the **configuration at startup** (section 4.1 of `docs/phase-0/environments.md`). `funds_vault` has `set_network`, `set_venue_endpoints`, and `set_ecdsa_key_id`, while `trading_core` has `set_market_context` (adds network validation), `set_venue_endpoints`, and `set_ecdsa_key_id`, both dedicated to the controller. `get_environment` is a public diagnostic query.
+- Verification is centralized in pure crate `hl-types::environment`: **reject mainnet** (do not handle real funds in Phase 2), reject if the endpoint host does not match the network (also reject lookalike domains), reject the real venue host in local settings, format verification of key ID. Host testing is fixed.
+- The default settings are `local`, `loopbackendpoint`, and `test_key_1`. `outcall` (`/exchange`,`/info`) and `signaturekey` are resolved from the settings at the time of invocation (`venue.rs`, `crypto.rs`).
+- Tests: `core_environment.rs` and `vault_environment.rs` (mainnet rejection, inconsistent rejection, `get_environment` and **the configured endpoint becomes the actual outcall URL**), host tests for `hl-types`.
+- E-1 (mock eligibility token) is **not performed**: eligibility issuance is done in Phase 3, and the token does not exist. E-5 (mock endpoint real-world inclusion) is structurally satisfied by setting it only in the configuration without embedding the mock endpoint into the code.
 
-### ローカル接続（M4 3A/3Bの前提・2026-09-22に構築）
+### Local connection (assuming M4 3A/3B and built on 2026-09-22)
 
-testnet（GATE 0）を待たずに画面とcanisterを結ぶため、ローカルネットワークへの
-デプロイと初期設定をスクリプト化した。Candidはwasmから抽出してリポジトリに固定する。
+To connect the screen and canister without waiting for testnet (GATE 0), to the local network
+Deployed and scripted the initial setup. Candid is extracted fromwasm and fixed in the repository.
 
 ```sh
-# 1. Candid（.did）を抽出（本番feature無しのwasm。試験専用entry pointの混入も検査）
+# 1. Extract Candid (.did) (wasm without real features. Also inspect the inclusion of test-only entry points)
 bash scripts/extract-candid.sh
 
-# 2. ローカルネットワークとidentity（プロジェクト専用のICP_HOMEを使う）
+# 2. Local network and identity (use ICP_HOME for project-specific)
 export ICP_HOME="$PWD/.icp-home"
-icp identity new private-perp-local --storage plaintext   # 初回のみ
-icp identity default private-perp-local                   # 初回のみ
+icp identity new private-perp-local --storage plaintext   # Only the first time
+icp identity default private-perp-local                   # Only the first time
 icp network start -d
 icp deploy --yes
 
-# 3. 初期設定（policyのallowlist・core/vaultのnetwork/endpoint/key id・HPKE鍵）
+# 3. Initial settings (policy's allowlist, core/vault's network/endpoint/key id/HPKEkey)
 bash scripts/bootstrap-local.sh
 ```
 
-- `ICP_HOME`をプロジェクト内へ向けることで、**他のプロジェクトのidentityと既定を変更しない**。`.icp-home/`と`.icp/`は`.gitignore`対象（鍵とCanister IDをコミットしない）。
-- Canister IDは`icp canister status <name> --json`で引く（デプロイごとに変わり得るため、スクリプト・画面へハードコードしない）。canisterへは`PUBLIC_CANISTER_ID:<name>`が注入される。
-- `candid/*.did`は`scripts/extract-candid.sh`の生成物。Rustの契約（`api-types`）とCandidのずれはこのスクリプトの再実行で検出する。
-- 画面（`frontend/`）はローカルcanisterへ接続済み。M5/M6として公開市況WS、建玉、SL/TP、取消、部分・全決済、異常状態、最小クライアントまでローカルmockで検証する。ローカルのendpointは`get_environment`で確認できる。
+- By directing `ICP_HOME` to the project, **do not change the identity and default of other projects**. `icp-home/` and `icp/` are subject to `.gitignore` (do not commit the key and Canister ID).
+- The Canister ID is fetched using `icp canister status <name> --json` (it can change for each deployment, so do not hardcode it in scripts or UI). `PUBLIC_CANISTER_ID:<name>` is injected into the canister.
+- `candid/*.did` is the output of `scripts/extract-candid.sh`. Rust's contract (`api-types`) and Candid's mismatch are detected by re-executing this script.
+- The screen (`frontend/`) is connected to the local canister. As M5/M6, it verifies the public market status WS, positions, SL/TP, cancellation, partial/full settlement, abnormal conditions, and even the minimum client using local mock. The local endpoint can be verified with `get_environment`.
 
-### ローカルM5/M6（2026-09-22）
+### Local M5/M6 (2026-09-22)
 
-- 公開市況はmock HLのWebSocketへ直結し、`BroadcastChannel`とWeb Locksで複数タブの接続を1本へ集約する。購読にはEOA・取引口座を含めない。
-- clearinghouse照合の`totalMarginUsed`・未実現PnLと、coreの未約定注文リスク予約を分離した。鮮度は最終約定ではなく口座観測時刻から算出する。
-- `/trade`でSL/TP、Cancel All、25/50/100%決済、全決済、pending・unknown・staleを扱う。`/fallback`は認証・取消・出金だけを提供する。
-- これらはローカル合成資金の検証であり、GATE 0やtestnet資金往復の完了を意味しない。
+- Public market status is directly connected to mock HL's WebSocket, and `BroadcastChannel` and Web Locks consolidate multiple tabs' connections into one. Subscription does not include EOA or trading account.
+- We separated the `totalMarginUsed` and unrealized PnL of clearinghousereconciliation from the core unfilled order risk reservation. The freshness is calculated from the account observation time rather than the final fill.
+- `/trade` handles SL/TP, Cancel All, 25/50/100% settlement, all settlements, pending, unknown, and stale. `/fallback` only provides authentication, cancellation, and withdrawal.
+- These are local synthetic fund validation and do not mean the completion of GATE 0 or testnet fund transfers.
 
-## 実行上の注意（並行作業対策）
-- PocketICは必ずスクリプト経由：`POCKET_IC_TEST_DIR=$PWD/target/test-venue-mine bash scripts/pocket-ic-test.sh --test <name>`。
-- 素の `cargo test` は本番用wasm（feature無し）を読むため偽の失敗になる。
-- 封筒を使う試験は、controllerが `rotate_hpke_key` を呼んで鍵を生成しておく（未生成の個人APIはfail-closedで拒否する）。
+## Operational precautions (parallel work countermeasures)
+- PocketIC must be executed via a script: `POCKET_IC_TEST_DIR=$PWD/target/test-venue-mine bash scripts/pocket-ic-test.sh --test <name>`.
+- The raw `cargo test` will fail falsely because it reads the productionwasm (without feature).
+- The envelope test uses the controller to call `rotate_hpke_key` to generate the key (ungenerated personal APIs are rejected with fail-closed).
 
-約定履歴は時間範囲と永続カーソルで取得し、1回最大2,000件・応答上限1MiBとする。カーソルの境界時刻を含めて再取得し、tidで重複を除く。 不明だった注文のoidを復旧するときは、同じトランザクションで履歴カーソルを注文作成時点まで戻し、取得待ちとして保存する。後続の通信失敗やアップグレードでも遡及取得を失わず、復旧ジャーナルの再適用時にも同じ処理を行う。同一時刻で上限に達した場合はカーソルを進めず、照合未完了として保持する。注文状態の問い合わせは最終照合時刻で巡回し、約定取得失敗が注文状態の照合を妨げない順序で処理する。資金履歴のカーソルは時刻と要求IDの組である。
+The fill history is obtained using a time range and a persistent cursor, with a maximum of 2,000 entries per request and a response limit of 1 MiB. It is re-obtained including the boundary timestamp of the cursor, excluding duplicates based on the tid. When restoring the oid of an order that was unknown, the history cursor is returned to the time of order creation within the same transaction and saved as pending acquisition. It will not lose retroactive acquisition even in subsequent communication failures or upgrades, and the same processing will be applied when the restoration journal is re-applied. If the limit is reached at the same time, the cursor will not be advanced and will be retained as incomplete reconciliation. Queries about the order status are processed in the order of the final reconciliation timestamp, and fill acquisition failures are handled in the order that do not interfere with the order status reconciliation. The fund history cursor is a combination of timestamps and request IDs.

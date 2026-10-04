@@ -1,153 +1,153 @@
-# 実装状況：UI・サーバー基盤とADR
+# Implementation status: UI/server base and ADR
 
-最新のローカル品質ゲートは[2026-09-23の検証記録](phase-2/local-quality-gate.md)を参照。以下には各段階の履歴を残しており、過去の試験件数・合成デモの記述を現在の状態とは扱わない。
+For the latest local quality gate, refer to [2026-09-23 verification record](phase-2/local-quality-gate.md). Below, we retain the history of each stage, and we do not treat the number of past test cases or descriptions of synthetic demos as current status.
 
-Phase 3は[ローカル実装の進捗](phase-3/local-progress.md)を参照。共有REST予算基盤を追加した段階であり、送信経路への接続と計画全体は未完了。
+Phase 3 is referenced in [Local Implementation Progress](phase-3/local-progress.md). It is the stage where the shared REST budget base has been added, but the connection to the transmission path and the overall plan are not complete.
 
-更新：2026-09-22。対象はローカル開発用の合成デモ、Phase 0の契約、Phase 1のS1〜S3（ローカルで検証できた範囲）。**testnet・mainnetは未検証**で、全Phase完了ではない。
+Update: 2026-09-22. Eligible are synthetic demos for local development, Phase 0 contracts, and Phase 1 S1–S3 (within the range that could be verified locally). **testnet and mainnet are unverified**, and all Phases are not complete.
 
-## Phase 1（S1・PocketIC基盤）
+## Phase 1 (S1/PocketIC base)
 
-2026-09-19に、Phase 1のうちローカルで完結する署名部分（S1）と統合試験基盤を実装・検証した。当時は資金台帳・モックHL往復・guardが未着手だったが、**その後S2・S3のローカル範囲まで実装・検証済み**である。最新の状態は `docs/phase-1/README.md` の台帳と本ファイル末尾の節を正とする。
+On 2026-09-19, we implemented and verified the integration test base for the signature component (S1), which is completed locally within Phase 1. At that time, the funding ledger, mock HL communication, and guard were not yet implemented, but **we have since implemented and verified them up to the local scope of S2 and S3**. The latest state is to align the ledger in `docs/phase-1/README.md` with the section at the end of this file.
 
-### 完了したもの
+### Completed ones
 
-- `hl-types`：正規化十進（`decimal`）、canonical msgpack（`msgpack`）、action構築（`action`、order/cancel/cancelByCloid/updateLeverage）。
-- `hl-sign`：Keccak-256、EIP-712（phantom agent、`Exchange`/`1`/`1337`/`0x0`）、actionハッシュ（`msgpack ‖ nonce(8B BE) ‖ vault ‖ expires`）、決定的署名と復元、`v` の候補復元、user-signed EIP-712（`HyperliquidSignTransaction`、`ApproveAgent`/`UsdSend`）。
-- `api-types`：`docs/phase-0/api-contract.md` のCandid型（CanisterとPocketIC試験で共有）。
-- `tools/hl-fixture-gen/`（公式SDK `@nktkas/hyperliquid@0.33.3` を固定）と、`crates/hl-sign/tests/fixtures/` の11件。
-- PocketIC基盤：`scripts/fetch-pocket-ic.sh`、`scripts/pocket-ic-test.sh`、`crates/pocket-ic-tests`。
+- `hl-types`: normalized decimal (`decimal`), canonical msgpack (`msgpack`), action construction (`action`, order/cancel/cancelByCloid/updateLeverage).
+- `hl-sign`: Keccak-256, EIP-712 (phantom agent, `Exchange`/`1`/`1337`/`0x0`), action hash (`msgpack ‖ nonce(8B BE) ‖ vault ‖ expires`), deterministic signature and recovery, `v` candidate recovery, user-signed EIP-712 (`HyperliquidSignTransaction`, `ApproveAgent`/`UsdSend`).
+- `api-types`: Candid type (shared in the Canister and PocketIC tests) from `docs/phase-0/api-contract.md`.
+- `tools/hl-fixture-gen/` (official SDK `@nktkas/hyperliquid@0.33.3` fixed) and 11 files in `crates/hl-sign/tests/fixtures/`.
+- PocketIC base: `scripts/fetch-pocket-ic.sh`, `scripts/pocket-ic-test.sh`, `crates/pocket-ic-tests`.
 
-### 検証結果（ローカル実行）
+### Verification result (local execution)
 
-- `cargo test`：ホスト66件成功（PocketIC統合試験は別ジョブ）（`api-types` 5、`db` 9、`hl-sign` 35〔`lib` 33・`fixtures` 2〕、`hl-types` 17）。`hl-sign` には公式SDK fixtureとの比較試験（11件）を含む。`api-types`の1件は`4c0e5e5`で追加した回帰試験で、`46b061d`の時点は65件。
-- `bash scripts/pocket-ic-test.sh`：**21ファイル・60試験すべて成功**（`crates/pocket-ic-tests/tests/`）。試験バイナリは21の統合試験ファイルにlib単体試験とDoc-testsを加えた23。
-- 公式SDKとの一致：actionハッシュ（`createL1ActionHash`）・署名（r/s/v、決定的）・復元アドレスのすべてが11件で一致。中間値（msgpack・digest）はSDKが公開しないためfixtureには入れず、署名一致で検証している。
-- `cargo clippy --workspace --all-targets -- -D warnings`（ホスト全体。`pocket-ic-tests` とCanisterクレートを含む）、`cargo fmt --all --check`、`bash scripts/check-no-await.sh`、`bash scripts/check-signing-boundary.sh`：成功。
-- `bash scripts/fetch-pocket-ic.sh`：サーバの版（`pocket-ic-server 16.x`）とsha256を検証する。旧版・digest不一致では非0終了することを確認済み。
-- `cargo build --release --target wasm32-unknown-unknown`（4 Canister）：成功。
-- `bash scripts/pocket-ic-test.sh`：PocketIC 16.0.0（arm64-darwin）で4 Canisterをdeployし、`version` queryが応答（`init` のDB初期化がtrapしないことを含む）。
+- `cargo test`: 66 hosts successful (PocketIC integration test is a separate job) (`api-types` 5, `db` 9, `hl-sign` 35(`lib` 33, `fixtures` 2), `hl-types` 17). `hl-sign` includes a comparison test with the official SDK fixture (11 items). One item of `api-types` is a regression test added with `4c0e5e5`, and at `46b061d` there are 65 items.
+- `bash scripts/pocket-ic-test.sh`: **21 files, 60 tests all passed** (`crates/pocket-ic-tests/tests/`). The test binaries are 23, including the single test library and Doc-tests added to the 21 integrated test files.
+- Match with the official SDK: action hash (`createL1ActionHash`), signature (r/s/v, definitive), and all recovery addresses match in 11 cases. Since the SDK does not disclose intermediate values (msgpack and digest), they cannot be included in fixtures, and they are verified by matching the signature.
+- `cargo clippy --workspace --all-targets -- -D warnings` (all hosts including `pocket-ic-tests` and Canister crate), `cargo fmt --all --check`, `bash scripts/check-no-await.sh`, `bash scripts/check-signing-boundary.sh`: Success.
+- `bash scripts/fetch-pocket-ic.sh`: Verifies the server version (`pocket-ic-server 16.x`) and sha256. We have confirmed that if the old version or digest is inconsistent, the program will terminate with a non-zero exit code.
+- `cargo build --release --target wasm32-unknown-unknown` (4 Canister): Success.
+- `bash scripts/pocket-ic-test.sh`: Deploy 4 Canisters with PocketIC 16.0.0 (arm64-darwin) and `version` query returns a response (including that `init` DB initialization does not fail).
 
-### Phase 1で残るもの（当時の記載。ローカル範囲は解消済み）
+### What remains in Phase 1 (as stated at that time. The local scope has been resolved)
 
-- 当時の残件だった `db` のスキーマ・Migration・複式台帳・予約・nonce・epoch CAS、`funds_vault` の認証・outbox・HPKE・API、`trading_core` の注文パイプラインとモックHL照合、`control_guard` の7日猶予は、いずれも**実装・ローカル検証済み**。
-- ローカルECDSAスパイクは完了（`sign_with_ecdsa` のkey idは `test_key_1`）。PocketICの障害注入とT-xxx試験は一部実行済み（`docs/phase-0/threat-test-matrix.md`）。
-- **残る残件**：実HL（testnet）での注文受理・照合の実測、`control_guard` の一致実行のサイズ制約（実サイズwasmは単一ingressで送れない）、testnet往復と実測（別途の環境・承認が必要）、恒久エラー時の運用手順。timer失敗の握り潰しは2026-09-22に解消し、Canisterログへ記録する。T-605（封筒の個人API適用）は2026-09-21に実装・ローカル検証済み（`docs/phase-2/README.md`）。
+- The `db` schema, Migration, double-entry ledger, reservation, nonce, epoch CAS, `funds_vault` authentication, outbox, HPKE, API, `trading_core` order pipeline and mock HLreconciliation, and the 7-day delay for `control_guard` were all **implemented and locally verified**.
+- Local ECDSA spike is completed (the key id for `sign_with_ecdsa` is `test_key_1`). Some of the PocketIC injection of faults and T-xxx tests have been executed (`docs/phase-0/threat-test-matrix.md`).
+- **Remaining tasks**: Real-world HL (testnet) order acceptance and reconciliation measurement, size constraints on `control_guard` matching execution (real-sizewasm cannot be sent via a single ingress), testnet forwarding and measurement (requires separate environment and approval), operational procedures for permanent errors. The rollback of timer failures will be resolved on 2026-09-22 and recorded in the Canister logs. T-605 (applying the envelope's personal API) was implemented and locally verified on 2026-09-21 (`docs/phase-2/README.md`).
 
-## Phase 0（契約・画面仕様・Rust雛形）
+## Phase 0 (Contract, screen specifications, Rust prototype)
 
-2026-09-19に、ロードマップ4章の実装契約と画面仕様を `docs/phase-0/` に固定し、12章-2のRust workspace雛形とローカル試験環境を用意した。
+On 2026-09-19, I fixed the implementation contract and screen specifications for Chapter 4 of the roadmap in `docs/phase-0/`, and prepared the Rust workspace prototype and local test environment for Chapter 12-2.
 
-### 用意したもの
+### What I prepared
 
-- 契約文書8本（`docs/phase-0/`）：権限表、API契約とエラー型、状態遷移、金額と一意性、環境分離、脅威と試験の対応、プライバシー評価の入力、画面仕様。
-- Rust workspace：`Cargo.toml`（依存を `=` で完全固定、`Cargo.lock` をコミット）、`rust-toolchain.toml`、`icp.yaml`、`crates/`（`hl-types`、`hl-sign`、`db`、`policy`、`funds-vault`、`control-guard`、`trading-core`）、`scripts/check-no-await.sh`。
-- （Phase 0の時点では）Canisterは `version` と `db::init`（`ic-sqlite-vfs 2.0.0`、Migrationは空）のみで、資金・署名・注文・照合は未実装だった。**現在は本ファイル末尾のとおり実装・検証済み**。
-- CI：`.github/workflows/rust.yml`（fmt / clippy（ホスト・wasm）/ test / no-await検査 / wasmビルド）。**リモートCIは未実行**。
-- （Phase 0の時点で）ホストで実行するテスト12件（`hl-types` 4、`hl-sign` 3、`db` 5）。現在は66件。
+- 8 contract documents (`docs/phase-0/`): permission table, API contracts and error types, state transitions, amount and uniqueness, environment separation, threat and test support, privacy evaluation input, screen specifications.
+- Rust workspace: `Cargo.toml` (dependencies are fully fixed with `=`, `Cargo.lock` is committed), `rust-toolchain.toml`, `icp.yaml`, `crates/` (`hl-types`, `hl-sign`, `db`, `policy`, `funds-vault`, `control-guard`, `trading-core`), `scripts/check-no-await.sh`.
+- (At Phase 0) Canister only had `version` and `db::init` (`ic-sqlite-vfs 2.0.0`, Migration is empty), and funds, signature, orders, and reconciliation were unimplemented. **Currently, they are implemented and verified as shown at the end of this file.**
+- CI: `.github/workflows/rust.yml` (fmt / clippy (host-wasm) / test / no-await test / wasm build). **Remote CI is not executed**.
+- (At Phase 0) 12 tests run on the host (`hl-types` 4, `hl-sign` 3, `db` 5). Currently 66.
 
-### 検証結果（ローカル実行）
+### Verification result (local execution)
 
-- ツールチェーン：`rustc`/`cargo` 1.97.0（`rust-toolchain.toml` で固定）。
-- `cargo fmt --all --check`：成功。
-- `cargo clippy --all-targets -- -D warnings`（ホスト既定メンバー）：成功。
-- （Phase 0の時点で）`cargo test`：12件成功。現在は66件。
-- `bash scripts/check-no-await.sh`：ok（`hl-sign`・`db` に非async規則違反なし）。
-- `cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -- -D warnings`：成功。
-- `cargo build --release --target wasm32-unknown-unknown`（4 Canister）：成功。各約1.25 MB（`ic-sqlite-vfs` 2.0.0をリンク）。
-- `icp project show`：`icp.yaml` のrecipe展開を確認。
-- `icp build`：4 Canister成功。`candid-extractor` と `ic-wasm` で `candid:service` を埋め込み、抽出した`.did`とfrontend bindingをリポジトリに同期する。
-- `icp network start -d` → `icp deploy` → `icp canister call <name> version --query`：4 Canisterが `("0.1.0")` を返し、`init` のDB初期化がtrapしないことを確認。`icp network stop` で停止し、停止も確認。
+- Toolchain: `rustc`/`cargo` 1.97.0 (fixed in `rust-toolchain.toml`).
+- `cargo fmt --all --check`: Success.
+- `cargo clippy --all-targets -- -D warnings` (default host members): Success.
+- (At Phase 0) `cargo test`: 12 successful. Currently 66.
+- `bash scripts/check-no-await.sh`: ok (no async rule violation in `hl-sign` and `db`).
+- `cargo clippy --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -- -D warnings`: Success.
+- `cargo build --release --target wasm32-unknown-unknown` (4 Canister): Success. Each about 1.25 MB (linked `ic-sqlite-vfs` 2.0.0).
+- `icp project show`: Check the recipe expansion of `icp.yaml`.
+- `icp build`: 4 Canister success. Embed `candid:service` with `candid-extractor` and `ic-wasm`, and synchronize the extracted `did` and frontend binding to the repository.
+- `icp network start -d` → `icp deploy` → `icp canister call <name> version --query`: Verify that the 4 Canisters return `("0.1.0")` and that the `init` DB initialization does not fail. Stop with `icp network stop` and verify the stop.
 
-### この環境での実行上の注意
+### Notes on execution in this environment
 
-- このセッションのサンドボックスはHOME配下へ書き込めないため、`CARGO_HOME=<repo>/.cargo-home` と `ICP_HOME=<repo>/.icp-home` を指定して実行した（両方とも `.gitignore` 済み）。通常の開発環境では不要。
-- 当初 `channel = "1.93.0"` を指定したが、`ic-sqlite-vfs 2.0.0` のMSRVが1.95.0であり、かつtoolchainの追加インストールがサンドボックス制約で失敗したため、要件を満たす導入済みの1.97.0を固定した。リリース用の完全固定はPhase 4で行う。
-- ローカルのCanister IDはicpが払い出した開発用の値である（`.icp/` 配下、未コミット）。testnet・mainnetの値は未確定。
+- The sandbox for this session cannot be written to HOME, so it was run with `CARGO_HOME=<repo>/.cargo-home` and `ICP_HOME=<repo>/.icp-home` specified (both are `.gitignore` files). Not needed in normal development environments.
+- Initially `channel = "1.93.0"` was specified, but the MSRV for `ic-sqlite-vfs 2.0.0` is 1.95.0, and because the additional installation of the toolchain failed due to sandbox restrictions, we fixed the already installed 1.97.0 that meets the requirements. The complete fixed version for release will be done in Phase 4.
+- The local Canister ID is the value that icp issued for development (under `.icp/`, not committed). The values for testnet and mainnet are undecided.
 
-### Phase 0で残るもの
+### What remains in Phase 0
 
-- 実Candid（`.did`）、レート制限と上限値、HL固有の価格精度・手数料・確定イベント、Agent世代の実挙動。いずれもPhase 1の実測で確定する。
-- 実テーブルとMigration（Phase 2-1）。PocketICの失敗試験基盤（Rust版 `pocket-ic` のApple Silicon対応は未確認）。
-- （Phase 0の時点で）脅威・試験表（`docs/phase-0/threat-test-matrix.md`）の試験は1件も実行していなかった。現在はローカルで実行可能な分を実行済み（同表の「実行済み」を参照）。
+- Real Candid (`.did`), rate limits and upper limits, HL-specific price precision, fees, and final events, and agent generation real-world actions, all are determined by Phase 1 measurements.
+- Real table and Migration (Phase 2-1). PocketIC failure test platform (Apple Silicon support for Rust version `pocket-ic` is not confirmed).
+- (At Phase 0) No test was executed in the Threat/Test Table (`docs/phase-0/threat-test-matrix.md`). Currently, the tests that can be executed locally have been executed (see the "Executed" column in the same table).
 
-## 完了したもの
+## Completed ones
 
-- ADR 0001〜0006。設計採用と実証状態を分離した。
-- Plan v0.9、Implementation v0.5、ロードマップv1.1への整合。
-- 新規TanStack Start＋React＋TypeScript/Vite、Workers＋Static Assetsのローカル配信。
-- pnpm固定依存・lockfile、Workers生成型、Oxlint型対応、Oxfmt、tsc、Vitest、Playwright。
-- `/`、`/trade`、`/funds`、`/history`。公開ページSSR、口座画面はクライアント描画。
-- Lightweight Charts、合成板、注文フォーム、TanStack Table注文一覧、資金確認・履歴。
-- 正常受理・部分約定・拒否・unknown・取消競合・古い状態のシミュレーション。
-- 合成資金の整数計算、要求IDの冪等性、ログアウト時のメモリ破棄。
-- WorkersのGET/HEAD限定、実モード503、CF国コードによる入口制限例、セキュリティヘッダー。
-- GitHub Actionsの検証workflow追加。リモートでの実行は未実施。
+- ADR 0001~0006. Separated design adoption and experimental status.
+- Compatibility with Plan v0.9, Implementation v0.5, and Roadmap v1.1.
+- Local delivery of new TanStack Start + React + TypeScript/Vite, Workers + Static Assets.
+- pnpm fixed dependencies and lockfile, Workers generation type, Oxlint type support, Oxfmt,tsc, Vitest, Playwright.
+- `/`,`/trade`,`/funds`,`/history`. SSR for public pages, account screens are client drawing.
+- Lightweight Charts, composite boards, order forms, TanStack Table order list, fund verification and history.
+- Normal acceptance, partial fill, rejection, unknown, cancellation competition, simulation of old state.
+- Integer computation of composite funds, idempotency of request IDs, memory destruction on logout.
+- Workers' GET/HEAD exclusive, real mode 503, example of entrance restrictions by CF country code, security header.
+- Added GitHub Actions validation workflow. Remote execution is not performed.
 
-## 検証結果
+## Verification results
 
-- `pnpm build`：成功。Cloudflare Workers向けのビルド。
-- `pnpm typecheck`：成功。
-- `pnpm lint`：成功。型対応あり。Table v8についてReact Compiler非採用を理由とする1行限定の除外がある。
-- `pnpm format:check`：成功。
-- `pnpm test`：39件成功。HPKEのclient/server往復・AAD不一致拒否を含む。
-- `pnpm test:e2e`：7件成功。build後のWorkers previewをPlaywright Chromiumで検証。
-- Playwright CLIによる画面表示・操作・コンソール確認。スクリーンショットは引渡し成果物に保存。
+- `pnpm build`: Success. Build for Cloudflare Workers.
+- `pnpm typecheck`: Success.
+- `pnpm lint`: Success. Type compatible. There is a one-line exclusion for Table v8 due to the absence of React Compiler.
+- `pnpm format:check`: Success.
+- `pnpm test`: 39 successful results. Includes client/server bidirectional HPKE and AAD mismatch rejection.
+- `pnpm test:e2e`: 7 successful. Verify the Workers preview after build with Playwright Chromium.
+- Display, operation and console confirmation of the screen by Playwright CLI. Screenshots are saved as the handover result.
 
-ブラウザ試験でJS/CSS配信の404とチャートautoSizeのレイアウト変動を検出・修正した。ビルド成功だけをUI完成とは扱っていない。Safari・Firefox、実MetaMask、実ICP、性能負荷、実資金の試験は未実施。
+We detected and corrected the 404 errors in JS/CSS delivery and layout changes in chart autoSize during the browser test. We do not treat only successful builds as UI completion. Testing for Safari, Firefox, real MetaMask, real ICP, performance load, and real funds was not performed.
 
-## 未実装・次工程を止めている条件
+## Conditions for unimplemented and stopping the next stage
 
-Canisterコードは `version` とDB初期化だけの雛形ではない（資金・署名・認証・注文の業務ロジックを実装済み。本ファイル末尾を参照）。Candidは`candid/`に固定しfrontend bindingも生成済みだが、testnet Canister IDはない。そのため実環境のICP接続段階を保留している。
+The Canister code is not a template for `version` and DB initialization alone (it has implemented the business logic for funds, signature, authentication, and orders. Please refer to the end of this file). Candid is fixed to `candid/` and frontend binding has also been generated, but there is no testnet Canister ID. Therefore, we are holding back the ICP connection stage in the live environment.
 
-必要な次の成果物：
+The following required results:
 
-1. ~~Rust/PocketICでの資金・署名・認証の実装と検証~~ → ローカル範囲は完了。testnet検証が残る。
-2. ~~Candid生成~~とCanister ID、本人認証・失効の実契約。network・endpoint・tECDSA key IDは起動時の設定（controller専用setter）として実装済みで、testnetデプロイ後に実値へ確定する。
-3. ~~認証済みHPKE公開鍵の取得・鍵更新・要求と応答の暗号化仕様~~ → 鍵レジストリ・封筒・個人API4件（`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`）への適用まで実装・検証済み。`submit_order`等の書き込み系への適用はPhase 3で判断する。
-4. ~~注文・資金移動の照合fixtureと、unknownの回復契約~~ → outboxの照合と`unknown`解消を実装・検証済み。`orderStatus`照合の自動化が残る。
-5. HL公開市況の接続、口座状態・建玉・PnL・SL/TP・決済の接続。
+1. ~~Implementation and verification of funds, signatures, and authentication in Rust/PocketIC~~ → Local scope is completed. testnet verification remains pending.
+2. ~~Candid generation~~ and Canister ID, real contract for identity authentication and expiration. network, endpoint, tECDSA key ID are implemented as settings at startup (controller-only setter) and will be confirmed to the real value after testnet deployment.
+3. ~~Specification for encryption of HPKE public key acquisition, key update, request and response after authentication~~ → Implementation and verification have been completed up to application to key registry, envelope, and 4 personal APIs (`get_account_snapshot`, `list_orders`, `list_fills`, `cancel_order`). Application to write-only operations such as `submit_order` will be determined in Phase 3.
+4. ~~Reconciliation fixture for orders and fund transfers, and recovery contract for unknown~~ → outbox reconciliation and `unknown` resolution have been implemented and verified. `orderStatus` reconciliation automation remains pending.
+5. Connection to the HL public market status, connection to account status, positions, PNL, SL/TP, and settlement.
 
-画面に建玉プレビューはあるが、SL/TP・決済は無効表示。デモで約定したことを根拠に本物の建玉を作らない。単体テストの整数残高モデルではなく、Canister側に複式台帳と永続outboxを実装済みである。
+There is a positions preview on the screen, but SL/TP and settlement are displayed as disabled. We do not create real positions based on the fact that they were filled in during the demo. It is not an integer balance model for individual tests; instead, a double-entry ledger and a permanent outbox have been implemented on the Canister side.
 
-## 本番前の残件
+## Remaining items before the production deployment
 
-Canisterの資金安全性・機密性・相関耐性、SNS/guard、controller移管、法務、eligibility発行、配信権限分離、nonce対応を含むCSP、依存ライセンス・NOTICEの再確認、独立監査が必要。Cloudflare配信権限が持つJS変更リスクは残る。
+CSP including funding security, confidentiality, correlation resistance, SNS/guard, controller transfer, legal, eligibility issuance, distribution permission separation, nonce support, and reconfirmation of dependency licenses and NOTICE, independent audit is required. The risk of JS changes carried by Cloudflare distribution permission remains.
 
-Cloudflare公開、SNSローンチ、controller変更、ウォレット接続、実資金操作は行っていない。
+Cloudflare public release, SNS launch, controller change, wallet connection, real funds operation have not been carried out.
 
-## Phase 1（S2・S3）のCanister実装状況（2026-09-21・ローカル検証）
+## Canister implementation status for Phase 1 (S2/S3) (2026-09-21, local verification)
 
-Canister側は「`version`とDB初期化だけの雛形」ではなくなった。資金層（S2）と統制（S3）のローカルで
-検証できる範囲が動作し、PocketICで**29ファイル・83試験すべて成功**している（2026-09-21のPhase 2
-2C/2D/2E＋T-605＋本番パイプライン＋環境設定の一般化の追加後。Phase 1時点は21ファイル・60試験）。ただし**Phase 1の
-Go/No-Goは未合格**であり、testnet往復は未実施。
+On the Canister side, it has become not just a template for `version` and DB initialization. Locally for the fund layer (S2) and control (S3).
+The verification range is working, and **29 files and 83 exams were all successful** in PocketIC (Phase 2 on 2026-09-21).
+After adding the generalization of environmental settings after 2C/2D/2E+T-605+main pipeline+Phase 1 at 21 files and 60 tests). However, **Phase 1's
+Go/No-Go is not passed** and testnet reverse is not performed.
 
-### 検証済み（証跡: `docs/phase-1/evidence/P1-001`〜`P1-010`）
+### Verified (evidence: `docs/phase-1/evidence/P1-001`~`P1-010`)
 
-| 領域 | 状態 | 証跡 |
+| an area | State | Evidence |
 |---|---|---|
-| EOA認証（challenge・セッション・失効・origin束縛・principal束縛T-102） | 実装・検証済み | P1-001〜003 |
-| 資金の参照・受付・予約・複式台帳 | 実装・検証済み | P1-004 |
-| 入金計上（`/info`搬送路・未知宛先のsuspense計上・controllerによる本人への振替） | 実装・検証済み | P1-004 |
-| outbox（claim→実tECDSA署名→`dispatching`永続化→非replicated POST→照合） | 配分・払出し・回収で実装・検証済み | P1-006 |
-| 不明な送金の扱い（再送しない・時間経過でも解放しない・`unknown`／`dispatching`の解消） | 検証済み（T-205・T-206） | P1-006 |
-| upgradeでの認証・台帳・未解決actionの保存 | 検証済み | P1-010 |
-| HPKE（鍵世代の更新・公開鍵配布・封筒の往復・`aad`束縛） | 実装・検証済み | P1-007 |
-| `control_guard`（SNS限定・7日猶予・内容一致・迂回APIなし・同時実行の単一性） | 実装・検証済み（実サイズwasmの実行は下記制約で保留） | P1-009 |
-| `policy_registry`（fail-closed・停止方向のみ） | 実装・検証済み | P1-010 |
-| `trading_core`（認可境界・注文受付・Agent鍵署名・送信・取消送信・約定取り込み・`orderStatus`照合・snapshot・リスク予約・SL/TP・全決済・個人API封筒・環境設定） | 実装・検証済み | P1-008 |
-| 環境分離（network・endpoint・tECDSA key IDの起動時設定、mainnet拒否＝E-2） | 実装・検証済み（E-1はeligibility未実装のため未実施） | `core_environment.rs`・`vault_environment.rs` |
+| EOAauthentication (challenge, session, expiration, origin binding, principal binding T-102) | Installed and verified | P1-001〜003 |
+| Reference, receipt, reservation, double-entry ledger of funds | Installed and verified | P1-004 |
+| Deposit recording (`/info` transmission route / suspension recording for unknown recipients / direct debit to the person by the controller) | Installed and verified | P1-004 |
+| outbox (claim→real tECDSAsignature→`dispatching` persistence→non-replicated POST→reconciliation) | Implemented and verified with allocation, disbursement, and recovery. | P1-006 |
+| Handling of unclear transfers (not resending, not releasing even after a certain time has passed, resolving `unknown`/`dispatching`) | Verified (T-205/T-206) | P1-006 |
+| Saving authentication, ledger, and unresolved actions during upgrade | Verified | P1-010 |
+| HPKE (keygeneration update, public key distribution, envelope encryption, `aad` binding) | Installed and verified | P1-007 |
+| `control_guard` (SNS exclusive, 7-day grace period, content matching, no bypass API, single-execution consistency) | Implemented and verified (execution of real-sizewasm is pending under the following restrictions) | P1-009 |
+| `policy_registry` (only fail-closed and stop-direction) | Installed and verified | P1-010 |
+| `trading_core` (authorization boundary, order reception, agent keysignature, sending, cancellation sending, fill receipt, `orderStatus` reconciliation, snapshot, risk reservation, SL/TP, full settlement, personal API envelope, environment settings) | Installed and verified | P1-008 |
+| Environment separation (network, endpoint, tECDSA key ID startup settings, mainnet rejection = E-2) | Implemented and verified (E-1 is not performed because eligibilityunimplemented) | `core_environment.rs` and `vault_environment.rs` |
 
-ローカルの閾値ECDSAはPocketICの**テスト用閾値鍵サブネット**で有効（key id `test_key_1`）。
-PocketIC上の署名往復は約17.9ms（本番subnetの性能値ではない）。
+The local threshold ECDSA is enabled in PocketIC's **test threshold key subnet** (key id `test_key_1`).
+The signature round trip on PocketIC is about 17.9ms (not the performance value of the production subnet).
 
-### 未解消・未検証（次段階）
+### Unresolved / unverified (next stage)
 
-1. `trading_core`：受付（認可・冪等性・allowlist・meta添字）→ Agent鍵での署名 → `dispatching`永続化 → 非replicated送信 → 受理（`open`＋`oid`）／拒否／不明の分類、`get_account_snapshot`、約定の取り込み（`tid`で冪等）、`orderStatus`照合の反映、リスク予約、緊急停止中の受付拒否、入力検証、取消の送信まで検証済み。SL/TP（`positionTpsl`・reduce-only）と全決済・部分決済（`close_position`・`close_all`）、個人APIの封筒必須化・鍵更新まで検証済み。受付後の**送信・取消・`/info`照合（userFills・clearinghouseState・orderStatus）・口座巡回**を本番wasmの`pipeline`／`venue`へ移し、グローバルtimer（本番のみ・5秒間隔）と`sweep`（controller手動）で駆動するようにした（2026-09-21）。**残るのは実HL（testnet）での受理挙動と、timer周期コストの実測。**
-2. 2C：入金の受信側（搬送路を含む）、払出しの送信（`payout_settled`／拒否で解放＋逆仕訳／不明で保持）、`unknown`の照合解消、回収（recovery）の送信経路（取引口座のequityに対する予約と、受理・拒否・不明の分岐。`vault_recovery.rs`の3試験で確認）まで検証済み。**残るのは60秒timeoutの再現とtestnetでの実HL受理。**
-3. ~~個人データAPIへの封筒適用と応答暗号化、鍵更新中の扱い（T-605）~~ → 2026-09-21に解消（4メソッドの封筒必須化・`request_id`再送拒否・`aad`束縛・鍵更新で旧封筒を拒否。試験 `core_hpke.rs`）。残余：封印するのは`get_account_snapshot`・`list_orders`・`list_fills`・`cancel_order`のみで、`submit_order`・`cancel_all`・`close_position`・`close_all`・`request_agent_generation`・`get_agent_status`は平文（セッション認可のみ）。
-4. `control_guard`の一致する実行：実行経路と同時実行の単一性は極小wasmで検証済み。ただし実サイズのwasmは `execute_upgrade` の引数として2 MiB上限を超えるため（実測2,193,336バイト）、チャンク導入かコードレジストリが必要（**未解消**）。
-5. 残りの失敗試験（T-401〜T-410等）と、Phase 1完了後の読み取り専用レビュー。
-6. 運用面の残件：**恒久エラー（ダイジェスト不一致等）発生時の運用手順**が未定義。定期sweepの失敗はCanisterログへ記録するよう解消済みだが、監視・通知経路は未実装。
-7. testnet：実HLの受理挙動、署名p50/p95、受付→HL受理、Confidential Subnetの成立性。**未検証**。
+1. `trading_core`: Receipt (authorization, idempotency, allowlist, metadata tagging) → signature via agent key → `dispatching` persistence → non-replicated transmission → Receipt (`open` + `oid`) / rejection / unknown classification, `get_account_snapshot`, inclusion of fill (power-of-zero with `tid`), `orderStatus` reconciliation, risk reservation, rejection of receipt during emergency halt, input validation, and verification up to sending of cancellation. SL/TP (`positionTpsl` and reduce-only) and full settlement/partial settlement (`close_position` and `close_all`), mandatory envelope for personal APIs and key updates, are all verified. After receipt, **transmission, cancellation,`/info` reconciliation (userFills, clearinghouseState, orderStatus)** and account traversal** were moved to the productionwasm `pipeline`/`venue`, and driven by a global timer (only for production, every 5 seconds) and `sweep` (controller manual) (2026-09-21). **What remains is the receipt behavior on real HL (testnet) and the measurement of timer cycle costs.**
+2. 2C: Received by the deposit side (including the transport path), sending of the withdrawal (release with `payout_settled` / rejection + reverse accounting / hold in case of unknown), resolution of `unknown` reconciliation, sending path for recovery (reservation against the equity of the trading account and branching for acceptance, rejection, and unknown cases. Confirmed in the 3 tests of `vault_recovery.rs`). **What remains is to reproduce the 60-second timeout and real HL acceptance on testnet.**
+3. ~~Envelope application to the personal data API, response encryption, and handling during key updates (T-605)~~ → Resolved on 2026-09-21 (mandatory envelope for 4 methods, `request_id` resend refusal, `aad` binding, refusal of old envelopes during key updates. Test `core_hpke.rs`). Remaining: Encrypting is only done for `get_account_snapshot`, `list_orders`, `list_fills`, and `cancel_order`; `submit_order`, `cancel_all`, `close_position`, `close_all`, `request_agent_generation`, and `get_agent_status` are plain text (only session authorization).
+4. Consistent execution of `control_guard`: The uniqueness of execution paths and concurrent execution has been verified in minimalwasm. However, because the actual size of awasm exceeds the 2 MiB limit as an argument to `execute_upgrade` (actual measurement 2,193,336 bytes), chunking or code registry is required (**not resolved**).
+5. Remaining failed tests (T-401-T-410, etc.) and reading-only review after Phase 1 completion.
+6. Operational remaining issues: **Operational procedures for permanent errors (e.g., digest mismatch) when they occur** are undefined. The failure of regular sweeps has been resolved by recording it in the Canister log, but the monitoring and notification pathways are unimplemented.
+7. testnet: real HL acceptance behavior, signaturep50/p95, acceptance→HL acceptance, the validity of Confidential Subnet. **unverified**.

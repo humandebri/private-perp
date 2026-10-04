@@ -1,307 +1,282 @@
 # hl-fixture-gen
 
-Rust 実装 (`crates/hl-sign`) の **digest / 署名検証**に使う Hyperliquid の署名テストベクタ（fixture）を、
-公式相当の TypeScript SDK で生成して `crates/hl-sign/tests/fixtures/` に固定するためのツール。
+> Fixture design and verification record from September 19, 2026. Counts and measurements below describe that run; later Rust tests also cover user-signed actions and Spot conversion fixtures.
 
-- SDK: **`@nktkas/hyperliquid` バージョン `0.33.3`（exact 固定）**
-- ウォレット / 検証: **`viem` バージョン `2.56.8`（exact 固定）**
-- 出力先: `crates/hl-sign/tests/fixtures/*.json`（1 ファイル 1 オブジェクト）
+The Hyperliquid signature test vector (fixture) used for **digest / signature verification** in Rust implementation (`crates/hl-sign`),
+A tool that generates equivalent to the official TypeScript SDK and fixes it to `crates/hl-sign/tests/fixtures/`.
 
-## 生成コマンド
+- SDK: **`@nktkas/hyperliquid` version `0.33.3` (exact fixed)**
+- Wallet / Verification: **`viem` version `2.56.8` (exact fixed)**
+- Output location: `crates/hl-sign/tests/fixtures/*.json` (1 file 1 object)
+
+## Generation command
 
 ```sh
 cd tools/hl-fixture-gen && pnpm install --frozen-lockfile && pnpm generate
 ```
 
-- `pnpm` は `packageManager: pnpm@12.4.2`（frontend と同じ）。corepack で解決できる。
-- `node_modules/` はコミットしない（リポジトリ直下の `.gitignore` の `node_modules/` が効く）。
-  `pnpm-lock.yaml` はコミット対象。
-- `pnpm-workspace.yaml` に `storeDir: .pnpm-store` を置いている。pnpm は既定でプロジェクトと同じ
-  ドライブのルートに store を作るため、これが無いと `pnpm install` がリポジトリ直下に
-  未追跡の `.pnpm-store/` を作ってしまう。この指定で `tools/hl-fixture-gen/.pnpm-store/` に閉じる
-  （`.gitignore` で無視）。
-- ネットワークは **不要**（`pnpm install` 以外）。生成処理は SDK をローカルで呼ぶだけで、
-  どこにもリクエストを送らない。transport は捕獲用のスタブに差し替えている。
+- `pnpm` is `packageManager: pnpm@12.4.2` (same as frontend). Can be resolved with corepack.
+- `node_modules/` is not committed (the `node_modules/` in the `.gitignore` directly below the repository is effective).
+  `pnpm-lock.yaml` is subject to commit.
+- `pnpm-workspace.yaml` contains `storeDir: .pnpm-store`. pnpm is by default the same as the project
+  To create a store in the drive route, if there is no store, `pnpm install` will be installed directly under the repository
+  Creates an untracked `.pnpm-store/` directory. Close `tools/hl-fixture-gen/.pnpm-store/` with this specification.
+  (Ignored by `.gitignore`).
+- Network is **not required** (except `pnpm install`). The generation process is just calling the SDK locally,
+  Don't send requests anywhere. transport has been replaced with a capture stub.
 
-## 使用している秘密鍵（テスト専用）
+## Using private key (for test only)
 
-**実資金の鍵は一切使っていない。**すべて Hardhat / Anvil の既定アカウント（広く公開されている
-開発用の鍵）で、mainnet に資産は無い。
+**No real-fund keys are used.** These are widely published Hardhat / Anvil development accounts. Never fund them or use them to protect real assets.
 
-| 用途 | 秘密鍵 | アドレス |
+| a use | private key | an address |
 | --- | --- | --- |
-| master（署名者） | `0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d` | `0x70997970c51812dc3a010c7d01b50e0d17dc79c8` |
-| agent（agent 署名の署名者 / `approveAgent` の agentAddress） | `0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a` | `0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc` |
-| `usdSend` の destination | （鍵は使わない） | `0x90f79bf6eb2c4f870365e785982e1f101e93b906` |
-| `vaultAddress` | （鍵は使わない） | `0x15d34aaf54267db7d7c367839aaf71a00a2c6a65` |
+| master (signature holder) | `0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d` | `0x70997970c51812dc3a010c7d01b50e0d17dc79c8` |
+| agent (the signer of the agent signature / agentAddress of `approveAgent`) | `0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a` | `0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc` |
+| `usdSend` destination | (Do not use the key) | `0x90f79bf6eb2c4f870365e785982e1f101e93b906` |
+| `vaultAddress` | (Do not use the key) | `0x15d34aaf54267db7d7c367839aaf71a00a2c6a65` |
 
-master の鍵は Anvil アカウント #1。Anvil #0 は `approveAgent` の例などで使われることがあるが、
-本 fixture では使っていない。`address` は **小文字**（SDK の `getWalletAddress()` の戻り値に合わせる）。
+The master key is Anvil Account #1. Anvil #0 can be used in examples like `approveAgent`, but
+This fixture does not use `address`. `address` should be **lowercase** (to match the return value of the SDK's `getWalletAddress()`).
 
-## fixture 一覧
+## Fixture list
 
-`crates/hl-sign/tests/fixtures/` に以下を生成する。`network` はすべて `"testnet"`。
+Generates the following in `crates/hl-sign/tests/fixtures/`: `network` is all `"testnet"`.
 
-| ファイル | 署名方式 | 内容 | `connection_id_hex` | `signature.v` |
+| a file | signature method | Content | `connection_id_hex` | `signature.v` |
 | --- | --- | --- | --- | --- |
-| `order_limit_btc.json` | L1 (phantom agent) | BTC perp の GTC 指値（`tif: "Gtc"`） | `0x3b3f5c5508dc8e8c59185f767bb5ba7ac0bcdf74993d62f2e48658d9d969dcd8` | 28 |
-| `order_market_ioc_eth.json` | L1 | ETH perp の IOC（指値がスリッページ上限、`tif: "Ioc"`） | `0x31de2f241b8ae7fd0cf73ecc7e2fa42ba94867f23ceb93dce582fcaad4bead83` | 27 |
-| `cancel.json` | L1 | oid 指定の取消 | `0x1cd673d1288bdf9f2367b83f147c107b6ef056f7ab2065ff123c4d9ed2ead3cc` | 27 |
-| `cancel_large_oid.json` | L1 | oid が 2^32 以上（`o: 4294967297`）の取消（**要件外の追加ケース**、msgpack 整数符号化の境界用） | `0x9c8632695c288dbe0a21cf5d24a31f0ae18b50c1efb17d18443b4dc13b75b740` | 28 |
-| `cancel_by_cloid.json` | L1 | cloid 指定の取消 | `0x6cb641b58354f44d668751e03483ac0e7e3e60a6ab914da635f21975dda39393` | 27 |
-| `update_leverage.json` | L1 | レバレッジ更新（cross、10x） | `0x3fa6e66ded7cb0fc2b73342cadb0ca11c21e9a126a5816ac14ec857c800488b1` | 28 |
-| `order_limit_vault_expires.json` | L1 | `vaultAddress` + `expiresAfter` 付きの BTC 指値（**要件外の追加ケース**） | `0x14763ac3c5f9ef33529a5965eef796bbcc597876bf45fb991f073eb56b4512de` | 27 |
-| `order_expires_only.json` | L1 | `expiresAfter` のみ（`vaultAddress` なし）の BTC 指値（**要件外の追加ケース**、連結の確認用） | `0x8b6cef43542256268b4b29c869b6491c1af5b1d5a0c0090e3d733c22e9f6fa89` | 27 |
-| `approve_agent.json` | User-signed EIP-712 | Agent 承認（master 署名、`is_agent: false`） | `null`（user-signed に connectionId は無い） | 27 |
-| `usd_send.json` | User-signed EIP-712 | USDC 送金（`usdSend`） | `null` | 27 |
-| `order_limit_agent.json` | L1 | Agent 鍵で署名した BTC 指値（`is_agent: true`） | `0x1de09e5c979dbef93d74a3b50a93fe413b1729453c6c1345554d7f5cc8976dd0` | 27 |
+| `order_limit_btc.json` | L1 (phantom agent) | GTC order limit for BTC perp (`tif: "Gtc"`). | `0x3b3f5c5508dc8e8c59185f767bb5ba7ac0bcdf74993d62f2e48658d9d969dcd8` | 28 |
+| `order_market_ioc_eth.json` | L1 | IOC for ETH perp (limit price at the slippage bound, `tif: "Ioc"`). | `0x31de2f241b8ae7fd0cf73ecc7e2fa42ba94867f23ceb93dce582fcaad4bead83` | 27 |
+| `cancel.json` | L1 | oid specified cancellation | `0x1cd673d1288bdf9f2367b83f147c107b6ef056f7ab2065ff123c4d9ed2ead3cc` | 27 |
+| `cancel_large_oid.json` | L1 | cancellation where oid is greater than 2^32 (`o: 4294967297`) (**extra case outside the requirement**, for msgpack integer encoding boundary) | `0x9c8632695c288dbe0a21cf5d24a31f0ae18b50c1efb17d18443b4dc13b75b740` | 28 |
+| `cancel_by_cloid.json` | L1 | cloid specified cancellation | `0x6cb641b58354f44d668751e03483ac0e7e3e60a6ab914da635f21975dda39393` | 27 |
+| `update_leverage.json` | L1 | Leverage update (cross, 10x) | `0x3fa6e66ded7cb0fc2b73342cadb0ca11c21e9a126a5816ac14ec857c800488b1` | 28 |
+| `order_limit_vault_expires.json` | L1 | BTC order with `vaultAddress` + `expiresAfter` (**additional cases not required**) | `0x14763ac3c5f9ef33529a5965eef796bbcc597876bf45fb991f073eb56b4512de` | 27 |
+| `order_expires_only.json` | L1 | BTC limit orders only with `expiresAfter` (without `vaultAddress`) (**additional cases not required, for linking verification**) | `0x8b6cef43542256268b4b29c869b6491c1af5b1d5a0c0090e3d733c22e9f6fa89` | 27 |
+| `approve_agent.json` | User-signed EIP-712 | Agent approval (master signature, `is_agent: false`) | `null` (there is no connectionId in user-signed) | 27 |
+| `usd_send.json` | User-signed EIP-712 | USDC transfer (`usdSend`) | `null` | 27 |
+| `order_limit_agent.json` | L1 | BTC limit order signed with Agent key (`is_agent: true`) | `0x1de09e5c979dbef93d74a3b50a93fe413b1729453c6c1345554d7f5cc8976dd0` | 27 |
 
-要件の 8 ケースに対する追加は 3 件:
+There are 3 additional cases for the 8 required cases:
 
-- `order_limit_vault_expires.json` … `vaultAddress` / `expiresAfter` の連結
-  （`0x01` マーカー + 20 バイト、`0x00` マーカー + 8 バイト big-endian）を Rust 側で検証するため、
-  **両方が null でない**唯一の fixture。
-- `order_expires_only.json` … `expiresAfter` のみ。`vaultAddress` なしでは vault マーカーが `0x00`
-  1 バイトだけになり、連結は
-  `msgpack(action) ‖ nonce(8B BE) ‖ 0x00 ‖ 0x00 ‖ expiresAfter(8B BE)` になる
-  （`_l1.js:28-38`。vault の 20 バイトは入らず、`expiresAfter` があるので `0x00` マーカーは入る）。
-- `cancel_large_oid.json` … msgpack の整数符号化の境界（下記「msgpack の整数・文字列の扱い」参照）。
+- `order_limit_vault_expires.json` ... concatenation of `vaultAddress` / `expiresAfter`
+  (`0x01` marker + 20 bytes, `0x00` marker + 8 bytes big-endian) to verify on the Rust side,
+  **Both are not null** The only fixture.
+- `order_expires_only.json` ... only `expiresAfter`. Without `vaultAddress`, the vault marker is one `0x00` byte. The concatenation is
+  `msgpack(action) ‖ nonce(8B BE) ‖ 0x00 ‖ 0x00 ‖ expiresAfter(8B BE)`
+  (`_l1.js:28-38`). No 20-byte vault address is included; the expiry marker is present because `expiresAfter` is set.
+- `cancel_large_oid.json` ... msgpack integer encoding boundary (see below for "handling of integers and strings in msgpack").
 
-## fixture の各フィールド
+## Each field of the fixture
 
-| フィールド | 意味 |
+| a field | Meaning |
 | --- | --- |
-| `name` | ケース名（ファイル名から `.json` を除いたもの） |
-| `sdk` | 生成に使った SDK 名とバージョン。`{"name": "@nktkas/hyperliquid", "version": "0.33.3"}` |
-| `network` | `"testnet"`。transport の `isTestnet = true` を意味し、phantom agent の `source` が `"b"`、user-signed の `hyperliquidChain` が `"Testnet"` になる |
-| `private_key_hex` | 署名に使ったテスト専用秘密鍵 |
-| `address` | 署名者のアドレス（小文字）。**復元アドレスがこれと一致することを検証済み** |
-| `is_agent` | 署名鍵が agent（API ウォレット）かどうか。`true` でも**署名方式は同じ L1 phantom agent**（後述） |
-| `vault_address` | `createL1ActionHash` に渡された vault アドレス。無指定なら `null` |
-| `expires_after` | `createL1ActionHash` に渡された有効期限（ms）。無指定なら `null` |
-| `nonce` | 固定 nonce（`Date.now()` は使っていない）。L1 では signed payload の `nonce`、user-signed では `action.nonce`（`approveAgent`）または `action.time`（`usdSend`）に入る |
-| `action` | **SDK が transport へ渡した action オブジェクトそのもの**（SDK が `canonicalize` 済み。キー順も SDK のスキーマ順） |
-| `msgpack_hex` | `msgpack(action)` のバイト列。**SDK の公開 API から取得できないため全 fixture で `null`**（後述） |
-| `payload_hex` | keccak256 の入力（`action` の msgpack + nonce + vault + expires）。**同じく `null`** |
-| `connection_id_hex` | **L1 action のみ**。phantom agent の `connectionId` = `createL1ActionHash(...)` の戻り値（`@nktkas/hyperliquid/signing` の公開関数）。user-signed action では `null` |
-| `digest_hex` | 実際に ECDSA で署名される EIP-712 digest。**SDK の公開 API から取得できないため全 fixture で `null`** |
-| `signature_hex` | `r ‖ s ‖ v`（65 バイト、`v` は 27/28 の 1 バイト）。**このツールが定義した表現**であり SDK の出力そのものではない（SDK/HL API は `{r, s, v}` のオブジェクトを送る） |
-| `signature` | SDK が返した署名コンポーネント。`v` は **27 または 28**（0/1 ではない） |
+| `name` | Case name (excluding `.json` from the filename) |
+| `sdk` | The name and version of the SDK used for generation. `{"name": "@nktkas/hyperliquid", "version": "0.33.3"}` |
+| `network` | `"testnet"` means that `transport`'s `isTestnet = true`, and the `source` of the phantom agent becomes `"b"`, and the `hyperliquidChain` of the user-signed becomes `"Testnet"` |
+| `private_key_hex` | Private key used for testing for signature |
+| `address` | Signature holder's address (lowercase). **The recovered address has been verified to match this one** |
+| `is_agent` | Whether signing key is an agent (API wallet). Even if `true`, the **signature method is the same L1 phantom agent** (as mentioned later). |
+| `vault_address` | The vault address passed to `createL1ActionHash`. If not specified, it is `null`. |
+| `expires_after` | The expiration date (ms) passed to `createL1ActionHash`. If not specified, it is `null`. |
+| `nonce` | Fixed nonce; `Date.now()` is not used. L1 actions use the signed payload nonce; user-signed actions use `action.nonce` (`approveAgent`) or `action.time` (`usdSend`). |
+| `action` | **The action object itself that the SDK passed to transport** (SDK has been canonicalized. The key order is also in the SDK schema order) |
+| `msgpack_hex` | Bytes of `msgpack(action)`. **Not exposed by the SDK public API; `null` in every fixture.** |
+| `payload_hex` | The keccak256 input (action msgpack + nonce + vault + expiry); also `null`. |
+| `connection_id_hex` | **Only L1 action**. The `connectionId` of the phantom agent is the return value of `createL1ActionHash(...)` (the public function `@nktkas/hyperliquid/signing`). For user-signed actions, it is `null`. |
+| `digest_hex` | The EIP-712 digest actually signed with ECDSA. **Because it cannot be obtained from the public API of the SDK, it is `null` in all fixtures.** |
+| `signature_hex` | `r ‖ s ‖ v` (65 bytes, `v` is 1 byte of 27/28). **This is an expression defined by this tool**, not the output of the SDK (SDK/HL API sends an object `{r, s, v}`). |
+| `signature` | The signature component returned by the SDK. `v` is **27 or 28** (not 0/1) |
 
-金額・数量・価格は **SDK へ渡した文字列のまま**になっている（丸めなし）。ただし SDK は
-`UnsignedDecimal` スキーマで「先頭の余分な 0・末尾の 0」を落とす正規化を行うため
-（`esm/api/_schemas.js` の `normalizeDecimalString`）、fixture は正規化後も同じ値になる文字列だけを使い、
-生成時に「入力文字列 == action の値」を assert している。`.5` や `1.2000` のような入力は
-SDK 側で書き換わるので fixture には入れていない。
+The amount, quantity, and price remain as the string passed to the **SDK** (without rounding). However, the SDK is
+To normalize by removing "leading extra 0s and trailing 0s" in the `UnsignedDecimal` schema.
+(`esm/api/_schemas.js` `normalizeDecimalString`), fixture uses only strings that are the same value after normalization,
+Asserts that "input string == action value" when generated. Input such as `.5` or `1.2000` is
+It will be changed on the SDK side, so I don't put it into the fixture.
 
-### 署名バイト列の並び
+### Signature byte order
 
-- HL API / SDK の payload は `{ action, signature: { r, s, v }, nonce, vaultAddress?, expiresAfter? }` で、
-  署名は **オブジェクト**として送られる（バイト列の連結は存在しない）。
-- `signature_hex` は本ツールが定義した `r(32B) ‖ s(32B) ‖ v(1B)` の連結（`v` は 27/28）。
-  `v ‖ r ‖ s` ではない。
-- `s` は **low-s 正規化済み**（EIP-2）。viem の `sign()` が `lowS: true` で署名している。
+- The payload of the HL API / SDK is `{ action, signature: { r, s, v }, nonce, vaultAddress?, expiresAfter? }`,
+  The signature is sent as an **object** (there is no concatenation of byte sequences).
+- `signature_hex` is the concatenation of `r(32B) ‖ s(32B) ‖ v(1B)` defined by this tool (`v` is 27/28).
+  `v ‖ r ‖ s` is not.
+- `s` is **low-s normalized** (EIP-2). viem's `sign()` is signed with `lowS: true`.
 
-## SDK から直接取得できた値と、そうでない値
+## Values that were directly obtained from the SDK and values that were not
 
-| 値 | 取得元 | 状態 |
+| cost | Source of acquisition | State |
 | --- | --- | --- |
-| `action`（canonicalize 済み） | `IRequestTransport.request("exchange", payload)` に SDK が渡した payload（`esm/api/exchange/_methods/_base/_shell.js:30-35`）。transport 差し替えは公開インターフェース `IRequestTransport`（`esm/transport/_base.d.ts`） | **取得できた**（加工なしでそのまま記録） |
-| `signature` / `signature_hex` | 同じ payload の `signature` | **取得できた** |
-| `nonce` / `vault_address` / `expires_after` | 同じ payload のフィールド | **取得できた** |
-| `connection_id_hex` | 公開関数 `createL1ActionHash()`（`esm/signing/mod.js:6`） | **取得できた（L1 action のみ）** |
-| `msgpack_hex` | — | **取得できない**（下記） |
-| `payload_hex` | — | **取得できない**（下記） |
-| `digest_hex` | — | **取得できない**（下記） |
+| `action` (canonicalized) | The payload passed by the SDK to `IRequestTransport.request("exchange", payload)` (`esm/api/exchange/_methods/_base/_shell.js:30-35`). The transport replacement is the public interface `IRequestTransport` (`esm/transport/_base.d.ts`). | **Obtained** (recorded as is without processing) |
+| `signature` / `signature_hex` | The same payload's `signature` | **Obtained** |
+| `nonce` / `vault_address` / `expires_after` | Fields with the same payload | **Obtained** |
+| `connection_id_hex` | Public function `createL1ActionHash()` (esm/signing/mod.js:6) | **Acquired (only L1 action)** |
+| `msgpack_hex` | Bytes of `msgpack(action)`. **Not exposed by the SDK public API; `null` in every fixture.** |
+| `payload_hex` | The keccak256 input (action msgpack + nonce + vault + expiry); also `null`. |
+| `digest_hex` | — | **Cannot be obtained** (below) |
 
-### `msgpack_hex` / `payload_hex` が取得できない理由
+### Reasons why `msgpack_hex` / `payload_hex` cannot be obtained
 
-`@nktkas/hyperliquid/signing` の公開エクスポートは
-`AbstractWalletError, getWalletAddress, getWalletChainId, canonicalize, createL1ActionHash,
-signL1Action, signUserSignedAction, signMultiSigL1, signMultiSigUserSigned` のみ
-（`esm/signing/mod.js`）。msgpack エンコーダは内部依存 `@std/msgpack` を
-`esm/_deps/jsr.io/@std/msgpack/1.0.3/encode.js` から直接 import しており、
-`package.json` の `exports` にも `_deps` は公開されていない。`_l1.js` の `createL1ActionHash` の内部で
-`encodeMsgpack(adjust(action))` として呼ばれるだけで、バイト列を返す公開関数は無い。
+The public exports of `@nktkas/hyperliquid/signing` are `AbstractWalletError`, `getWalletAddress`, `getWalletChainId`, `canonicalize`, `createL1ActionHash`, `signL1Action`, `signUserSignedAction`, `signMultiSigL1`, and `signMultiSigUserSigned` (`esm/signing/mod.js`). The internal msgpack encoder comes from `esm/_deps/jsr.io/@std/msgpack/1.0.3/encode.js`; `_deps` is not exported by `package.json`. There is no public function that returns the bytes produced by `encodeMsgpack(adjust(action))` inside `_l1.js`.
 
-辿った経路: `signL1Action`（公開）→ `createL1ActionHash`（公開。戻り値は keccak256 ハッシュのみ）
-→ `encodeMsgpack`（`esm/_deps/.../encode.js`、非公開）。
+The call path is `signL1Action` (public) → `createL1ActionHash` (public; returns only the keccak256 hash) → `encodeMsgpack` (private).
 
-### `digest_hex` が取得できない理由
+### Why you can't get `digest_hex`
 
-`signL1Action` / `signUserSignedAction`（公開）は EIP-712 の typed data を組み立てて
-`signTypedData`（`esm/signing/_abstractWallet.js:167`）へ渡すが、**戻り値は署名だけ**で digest は返さない。
-digest を返す公開関数は存在しない。`createL1ActionHash` が返すのは phantom agent の
-`connectionId`（= EIP-712 message のフィールド値）であって、署名対象の digest ではない。
-そのため `digest_hex` は全 fixture で `null` とし、**推測値・再計算値で埋めていない**。
+`signL1Action` / `signUserSignedAction` (public) constructs the typed data of EIP-712
+Pass to `signTypedData` (`esm/signing/_abstractWallet.js:167`), but **only the signature is returned** and the digest is not returned.
+There is no public function that returns digest. `createL1ActionHash` returns the phantom agent's
+It is not the digest of the signing payload, but `connectionId` (= the field value of the EIP-712 message).
+Therefore, `digest_hex` is set to `null` for all fixtures and is **not filled with estimated or recalculated values**.
 
-なお README の「検証」節に、**viem で再構成した digest**（SDK の値ではない）を記録している。
-Rust 側は署名一致（復元アドレス一致）で検証できるため、fixture の必須項目ではない。
+Additionally, the README section of the "Verification" section records a **digest** (not the SDK value) reconstructed with **viem**.
+The Rust side can be verified by signature matching (address recovery matching), so it is not a required fixture.
 
-## SDK ソースから確認した署名方式
+## Signature method verified from SDK source
 
-すべてインストール済みの `tools/hl-fixture-gen/node_modules/@nktkas/hyperliquid/` を読んで確認した事実。
+The fact that all of the installed `tools/hl-fixture-gen/node_modules/@nktkas/hyperliquid/` were read and verified.
 
-### 1. L1 action（phantom agent）の署名 — `esm/signing/_l1.js`
+### 1. Signature of L1 action (phantom agent) - `esm/signing/_l1.js`
 
-- `signL1Action`（114-148 行）が署名する EIP-712 typed data:
+- `signL1Action` (lines 114-148) signs EIP-712 typed data:
 
-  | 項目 | 値 |
+  | an item | cost |
   | --- | --- |
   | domain.name | `"Exchange"` |
   | domain.version | `"1"` |
-  | domain.chainId | `1337`（**固定**。testnet/mainnet で変わらない。`isTestnet` は message 側に入る） |
+  | domain.chainId | `1337` (**fixed**. Does not change on testnet/mainnet. `isTestnet` goes into the message side) |
   | domain.verifyingContract | `0x0000000000000000000000000000000000000000` |
   | primaryType | `"Agent"` |
-  | types.Agent | `[ {name: "source", type: "string"}, {name: "connectionId", type: "bytes32"} ]`（130-141 行） |
-  | message.source | `"b"`（testnet）/ `"a"`（mainnet）（144 行） |
-  | message.connectionId | `createL1ActionHash(...)` の戻り値（32 バイト hex） |
+  | types.Agent | `[ {name: "source", type: "string"}, {name: "connectionId", type: "bytes32"} ]` (130-141 lines) |
+  | message.source | "b" (testnet) / "a" (mainnet) (144 lines) |
+  | message.connectionId | The return value of `createL1ActionHash(...)` (32-byte hex) |
 
-  → **`is_agent: true` の fixture でも、署名される構造はこれと同じ**。`is_agent` は署名に使う鍵の役割
-  （master か agent か）を示すだけで、SDK の署名経路は master / agent で差がない。
-  `order_limit_agent.json` の `connection_id_hex`（`0x1de09e5c…`）は、そのまま phantom agent の
-  `message.connectionId` の値である。
+  → Even with a fixture with `is_agent: true`, the structure that gets signed is the same as this one. `is_agent` is the role of the key used for signing.
+  Just indicating whether it is master or agent, the SDK signature path is the same for master / agent.
+  The `connection_id_hex` (`0x1de09e5c...`) in `order_limit_agent.json` is the same as the phantom agent's
+  The value of `message.connectionId`.
 
-- `createL1ActionHash`（24-40 行）が keccak256 に掛けるバイト列:
+- `createL1ActionHash` (24-40 lines) byte sequence passed to keccak256:
 
   ```
   keccak256( msgpack(adjust(action)) ‖ uint64_be(nonce) ‖ vault ‖ expires )
-  vault   = [0x00]                        (vaultAddress なし)
-          = [0x01] ‖ vaultAddress(20 bytes) (vaultAddress あり)
-  expires = (なし)                          (expiresAfter === undefined)
-          = [0x00] ‖ uint64_be(expiresAfter) (expiresAfter あり)
+  vault = [0x00]                        (no vaultAddress)
+          = [0x01] ‖ vaultAddress(20 bytes) (vaultAddress present)
+  expires = (none)                          (expiresAfter === undefined)
+          = [0x00] ‖ uint64_be(expiresAfter) (expiresAfter is present)
   ```
 
-  28-38 行の実装そのまま。注意点:
-  - vault のマーカーは**常に 1 バイト入る**（`0x00` または `0x01`）。
-  - `expiresAfter` が無いときはマーカーすら入らない（`0x00` 1 バイトも入らない）。
-  - 判定は `expiresAfter !== undefined`。`null` を渡すと「有効」と解釈され
-    `[0x00] + uint64_be(0)` が入ってしまうので、未指定は `undefined` にすること。
-  - nonce / expiresAfter は `DataView.setBigUint64` による **8 バイト big-endian**（60-64 行）。
-  - ハッシュは `keccak_256`（`@noble/hashes/sha3.js`）。Ethereum の keccak256 であって SHA3-256 ではない。
+  This follows the implementation at lines 28–38. Notes:
+  - The vault marker **always takes 1 byte** (`0x00` or `0x01`).
+  - If `expiresAfter` is not present, the marker will not even be inserted (no `0x00` byte will be inserted).
+  - The condition is `expiresAfter !== undefined`. If `null` is passed, it is interpreted as "valid".
+    Since `[0x00] + uint64_be(0)` will be inserted, any unspecified value will be set to `undefined`.
+  - nonce / expiresAfter is **8 bytes big-endian** (60-64 lines) by `DataView.setBigUint64`.
+  - The hash is `keccak_256` (`@noble/hashes/sha3.js`). It is keccak256 from Ethereum and not SHA3-256.
 
 ### 2. User-signed action（`approveAgent` / `usdSend`） — `esm/signing/_userSigned.js`
 
-- `signUserSignedAction`（64-78 行）の EIP-712 domain:
+- EIP-712 domain of `signUserSignedAction` (64-78 lines):
 
-  | 項目 | 値 |
+  | an item | cost |
   | --- | --- |
   | domain.name | `"HyperliquidSignTransaction"` |
   | domain.version | `"1"` |
-  | domain.chainId | `parseInt(action.signatureChainId)`（10 進変換。`"0x66eee"` → `421614`） |
+  | domain.chainId | `parseInt(action.signatureChainId)` (base-10 conversion. `"0x66eee"` → `421614`) |
   | domain.verifyingContract | `0x0000000000000000000000000000000000000000` |
   | primaryType | `Object.keys(types)[0]`（`"HyperliquidTransaction:ApproveAgent"` / `"HyperliquidTransaction:UsdSend"`） |
-  | message | `action` オブジェクトそのもの |
+  | message | `action` the object itself |
 
-- types は SDK の公開定数 `ApproveAgentTypes` / `UsdSendTypes`
+- types are the public constants of the SDK `ApproveAgentTypes` / `UsdSendTypes`
   （`esm/api/exchange/_methods/approveAgent.js:53-72`、`usdSend.js:46-65`）:
   - `HyperliquidTransaction:ApproveAgent`: `hyperliquidChain(string), agentAddress(address), agentName(string), nonce(uint64)`
   - `HyperliquidTransaction:UsdSend`: `hyperliquidChain(string), destination(string), amount(string), time(uint64)`
-    注意: `destination` は `address` ではなく **`string`**。`amount` も **`string`**。
-- `executeUserSignedAction`（`esm/api/exchange/_methods/_base/execute.js:84-129`）が
-  `type`, `signatureChainId`, `hyperliquidChain` を先頭に付与し、
-  `"nonce"` フィールドを持つ型（approveAgent）は `nonce`、
-  持たない型（usdSend）は `time` に transport の nonce を入れる。
-- `signatureChainId` は `config.signatureChainId` があればそれを使い、無ければウォレットの
-  chainId（viem のローカルアカウントでは `"0x1"`）にフォールバックする（`execute.js:141-148`）。
-  本ツールは HL の testnet 値 **`"0x66eee"`（Arbitrum Sepolia = 421614）** を明示的に渡している
-  （SDK 自身のサンプルも同じ値: `esm/signing/_userSigned.js:25`）。
-  `signatureChainId` は **action の一部として EIP-712 で署名される**（domain.chainId と
-  message の両方に効く）ので、Rust 側もこの値の扱いに注意。
+    Note: `destination` is not `address` but **`string`**. `amount` is also **`string`**.
+- `executeUserSignedAction` (`esm/api/exchange/_methods/_base/execute.js:84-129`) assigns `type`, `signatureChainId`, and `hyperliquidChain`, then puts the transport nonce in `nonce` for actions such as `approveAgent`, or `time` for actions such as `usdSend`.
+- The SDK uses `config.signatureChainId` when provided, otherwise the wallet chain ID (`"0x1"` for a viem local account; `execute.js:141-148`). This tool explicitly supplies **`"0x66eee"` (Arbitrum Sepolia = 421614)**, also shown in the SDK sample (`esm/signing/_userSigned.js:25`). Rust must use the same value when deriving the signed EIP-712 domain and action context.
 
-### 3. EIP-712 の型解決・digest 計算はウォレット側（viem）
+### 3. Type resolution and digest calculation of EIP-712 are on the wallet side (viem)
 
-`signTypedData` は `types[primaryType]` に無いキーを message から落としてから
-ウォレットに委譲する（`_abstractWallet.js:167-184`）。viem のローカルアカウントでは
+`signTypedData` drops keys that are not in `types[primaryType]` from the message
+Delegate to wallet (`_abstractWallet.js:167-184`). In the local account of viem
 `privateKeyToAccount(...).signTypedData()` → `viem/_esm/utils/signature/hashTypedData.js` →
-`viem/_esm/accounts/utils/sign.js` の順で処理される。つまり
-**EIP-712 の domain separator / struct hash の実装は viem**（`EIP712Domain` 型は viem が
-`getTypesForEIP712Domain` で domain から導出する）。
+Processed in order of `viem/_esm/accounts/utils/sign.js`.in other words
+**The implementation of domain separator / struct hash for EIP-712 is viem** (the `EIP712Domain` type is viem
+`getTypesForEIP712Domain` to derive the domain from the domain).
 
-### 4. action のキー順（canonicalize） — `esm/signing/_canonicalize.js`
+### 4. The order of keys in action (canonicalize) — `esm/signing/_canonicalize.js`
 
-msgpack の map はキー順が結果に影響するため、SDK は送信前に action をスキーマ順へ並べ替える
-（`reorderObject`、75-99 行）。
+Since the order of keys in the map of msgpack affects the result, the SDK reorders the action in schema order before sending.
+(`reorderObject`, lines 75-99).
 
-- キー順は valibot スキーマの定義順（各 `*Request.entries.action.entries`）。
-- スキーマに無いキーがあると `CanonicalizeError`。
-- 必須キーが欠けても `CanonicalizeError`。
-- `optional` なキーは **値が無ければキーごと省略**（`null` は入れない）。
-  例: `cancel` の `f`、`order` の `c` / `builder` は本 fixture の action に存在しない。
-- ネストしたオブジェクト（`t.limit.tif` など）も同じ規則で並ぶ。
+- The key order is defined in the order of the valibot schema (each `*Request.entries.action.entries`).
+- If there is a key that is not in the schema, it will be `CanonicalizeError`.
+- Even if a required key is missing, a `CanonicalizeError` is returned.
+- Optional keys are **omitted for each key if the value is not provided** (do not include `null`).
+  For example, `f` in `cancel` and `c` / `builder` in `order` do not exist in the action of this fixture.
+- Nested objects (like `t.limit.tif`) are also sorted according to the same rules.
 
-生成した `action` は SDK が canonicalize した後のオブジェクトをそのまま記録しているので、
-Rust 側は **JSON のキー順をそのまま msgpack に書けばよい**（並べ替え不要）。
-`order_limit_btc.json` の `action` は `type, orders, grouping` の順、`orders[0]` は
-`a, b, p, s, r, t` の順、`t` は `limit` → `tif` の順で入っている。
+The generated `action` records the object as-is after the SDK canonicalizes it, so
+On the Rust side, simply write the JSON keys in the same order as they appear in msgpack (no need to reorder).
+`order_limit_btc.json`'s `action` is in the order of `type, orders, grouping`, `orders[0]` is
+`a, b, p, s, r, t` in order, `t` is in order of `limit` → `tif`.
 
-### 5. msgpack の整数・文字列の扱い
+### 5. Handling integers and strings in msgpack
 
-- 前処理 `adjust()`（`esm/signing/_l1.js:45-59`）:
-  - `undefined` のプロパティを削除する（エンコーダは `undefined` を扱えず例外になる）。
-  - `Number.isInteger` かつ `value >= 0x100000000` または `value < -0x80000000` の数値を
-    **`BigInt` に変換**する。理由: `@std/msgpack` はその範囲の number を float64 で書いてしまうため。
-- エンコーダ `esm/_deps/jsr.io/@std/msgpack/1.0.3/encode.js` の実際の挙動:
-  - 整数 (`encodeNumber`, 49-106 行): 非整数は **float64 (`0xcb`)**。
-    正の整数は最小表現 — `<= 0x7f` は positive fixint、`< 2^8` は `0xcc`、`< 2^16` は `0xcd`、
-    `< 2^32` は `0xce`。`>= 2^32` は float64 になるが、上記 `adjust()` により
-    BigInt 化されるので実際には `0xcf` (uint64) になる。
-    負の整数は negative fixint / `0xd0` (int8) / `0xd1` (int16) / `0xd2` (int32)、
-    それ未満は float64。
-  - `bigint` (130-149 行): 負は `0xd3` (int64)、非負は `0xcf` (uint64)。64 ビットを超えると例外。
-  - **境界の注意**: 非負の値でも `adjust()` で BigInt 化されたものは **`0xcf` (uint64)** になり、
-    `0xd3` (int64) にはならない（`0xd3` は負の bigint のみ）。
-    また `[2^31, 2^32)` の整数は `number` のままなので最小表現の **`0xce` (uint32)** になる。
-    つまり `2^32` を境に `0xce` → `0xcf` へ切り替わり、いずれも 8 バイト/4 バイトの big-endian。
-    `cancel_large_oid.json`（`o: 4294967297` = 2^32 + 1）はこの `0xcf` 表現を固定するための fixture で、
-    Rust 側が別の表現（`0xce` や `0xd3` や float64）で書くと
-    `connection_id_hex` と署名が一致しなくなる。
-  - `string` (150-177 行): UTF-8。長さ `< 32` は fixstr (`0xa0 | len`)、`< 256` は `0xd9` (str8)、
-    `< 65536` は `0xda` (str16)、それ以上は `0xdb` (str32)。
-  - `null` は `0xc0`、`false` は `0xc2`、`true` は `0xc3`。
-  - 配列・map のヘッダは長さに応じて fixarray/fixmap または `0xdc`/`0xdd`/`0xde`/`0xdf`。
-  - map のキーは `Object.entries` の順（= insertion order）。キー順が変わればバイト列が変わる。
-- したがって、**文字列フィールド（価格 `p` / 数量 `s` / `amount` など）は必ず msgpack の str として
-  エンコードされる**。数値として送ってはいけない。asset ID や oid のような整数は int、
-  nonce は action 内ではなく payload 末尾の uint64 に入る。
-- `leverage: 10` のような整数は fixint (`0x0a`) 1 バイトになる。
+- Preprocessing `adjust()` (esm/signing/_l1.js:45-59):
+  - Remove properties that are `undefined` (encoding will throw an exception if it cannot handle `undefined`).
+  - Numbers that are `Number.isInteger` and `value >= 0x100000000` or `value < -0x80000000`
+    **Convert to `BigInt`**. Reason: `@std/msgpack` will write the number in that range as float64.
+- Actual behavior of the encoder `esm/_deps/jsr.io/@std/msgpack/1.0.3/encode.js`:
+  - Integers (`encodeNumber`, 49-106 lines): Non-integers are **float64 (`0xcb`)**.
+    Positive integers are represented by the smallest expression — `<= 0x7f` is a positive fixint, `< 2^8` is `0xcc`, `< 2^16` is `0xcd`,
+    `< 2^32` is `0xce`. `>= 2^32` becomes float64, but due to the above `adjust()`
+    It will be converted to BigInt, so it will actually become `0xcf` (uint64).
+    Negative integers are negative fixint / `0xd0` (int8) / `0xd1` (int16) / `0xd2` (int32),
+    Anything less than that is float64.
+  - `bigint` (130-149 lines): Negative is `0xd3` (int64), positive is `0xcf` (uint64). Exception if exceeds 64 bits.
+  - **Boundary Note**: Even non-negative values converted to BigInt with `adjust()` will become **`0xcf` (uint64)**,
+    It does not use `0xd3` (int64); `0xd3` is used only for negative bigints.
+    Also, the integer `[2^31, 2^32)` remains as `number`, so it becomes the minimum representation **`0xce` (uint32)**.
+    In other words, at the boundary of `2^32`, it switches from `0xce` to `0xcf`, using 4 and 8 bytes respectively, both big-endian.
+    `cancel_large_oid.json` (`o: 4294967297` = 2^32 + 1) is a fixture to fix this `0xcf` representation,
+    If Rust writes it in a different representation (`0xce`, `0xd3`, or float64)
+    `connection_id_hex` and signature will no longer match.
+  - `string` (150-177 lines): UTF-8. Length `< 32` is fixstr (`0xa0 | len`), `< 256` is `0xd9` (str8),
+    `< 65536` is `0xda` (str16), and above is `0xdb` (str32).
+  - `null` is `0xc0`, `false` is `0xc2`, and `true` is `0xc3`.
+  - The header of arrays/maps is fixarray/fixmap or `0xdc`/`0xdd`/`0xde`/`0xdf` depending on the length.
+  - The keys of the map are in the order of `Object.entries` (= insertion order). If the order of keys changes, the byte array changes.
+- Therefore, **string fields (price `p` / quantity `s` / `amount` etc.) must be msgpack's str type.
+  encoded.** Cannot be sent as a number. Integers such as asset ID or oid are int,
+  nonce is not included in action but in the uint64 at the end of payload.
+- Integers like `leverage: 10` become 1 byte of fixint (`0x0a`).
 
-### 6. 署名の決定性・`v` の値
+### 6. Signature determinism and `v`
 
-- SDK は EIP-712 のハッシュ計算をウォレットに委譲する（前述）。本ツールのウォレットは viem の
-  ローカルアカウントで、`viem/_esm/accounts/utils/sign.js` が
-  `@noble/curves/secp256k1` の `sign()` を `lowS: true` / `extraEntropy: false`（既定値。
-  `setSignEntropy` を呼ばない限り `false`）で呼ぶ。
-  → **RFC 6979 の決定的署名**であり、`s` は low-s に正規化される。
-- `v` は `recovery ? 28 : 27` として **27 / 28 で返る**（同ファイル）。SDK の `parseSignature`
-  （`esm/signing/_abstractWallet.js:14-30`）も受け取った `v` が 0/1 なら +27 して 27/28 に正規化し、
-  それ以外は例外にする。生成した 9 fixture の `signature.v` は 27 が 7 件、28 が 2 件で、
-  0/1 は現れない。
-- 実際に `pnpm generate` を 2 回（別プロセスで）実行し、`signature_hex` を含む出力が
-  **バイト単位で完全一致**することを `diff -r` で確認済み。
-  さらに `generate.mjs` 自身が「1 プロセス内で 2 回生成して全 fixture が一致すること」を
-  assert しているので、`pnpm generate` が成功するだけで決定性が確認される。
+- The SDK delegates EIP-712 hashing to the wallet. This tool uses a viem local account; `viem/_esm/accounts/utils/sign.js` calls `@noble/curves/secp256k1` with `lowS: true` and `extraEntropy: false` by default (unless `setSignEntropy` changes it). The result is a deterministic RFC 6979 signature with low-s normalization.
+- viem returns `v` as **27 or 28** (`recovery ? 28 : 27`). The SDK parser (`esm/signing/_abstractWallet.js:14-30`) converts 0/1 to 27/28 by adding 27 and rejects unsupported values. In the original 9-fixture run, 7 signatures had `v = 27` and 2 had `v = 28`; none had 0/1.
+- Two separate `pnpm generate` runs matched byte for byte, including `signature_hex`, using `diff -r`. `generate.mjs` also generates twice within one process and asserts that every fixture matches, so a successful generation checks determinism.
 
-## 検証（復元アドレス一致）
+## Verification (matching recovery address)
 
-`generate.mjs` は各 fixture について毎回次を検証し、失敗すれば非 0 で終了する。
+`generate.mjs` verifies the next step for each fixture and terminates with non-zero if it fails.
 
-1. SDK の公開関数でもう一度署名し、transport から捕獲した署名と **完全一致**することを確認
-   （L1 は `signL1Action`、user-signed は `signUserSignedAction`）。
-   → 記録した `action` / `nonce` / `vaultAddress` / `expiresAfter` が本当に署名対象だったことの裏取り。
-2. `getWalletAddress()`（SDK 公開関数）が `address` と一致することを確認。
-3. **viem で EIP-712 typed data を再構成**し、`hashTypedData()` → `recoverAddress({hash, signature})`
-   で復元したアドレスが `address` と一致することを確認（下記の表が実測値）。
+1. Sign the SDK's public functions again and verify that the signature captured from transport is **completely consistent** with the signature.
+   (L1 is `signL1Action`, user-signed is `signUserSignedAction`).
+   → Proof that the recorded `action` / `nonce` / `vaultAddress` / `expiresAfter` were indeed signing payloads.
+2. Verify that `getWalletAddress()` (SDK public function) matches `address`.
+3. **Reconstruct EIP-712 typed data with viem**, and `hashTypedData()` → `recoverAddress({hash, signature})`
+   Verify that the recovered address matches `address` (the table below is the actual values).
 
-typed data の再構成は viem の API（`hashTypedData` / `recoverAddress`）で行っており、
-SDK の内部関数の直接 import はしていない。`viem@2.56.8` の `recoverAddress` は **async**（`await` が必要）。
+The reconstruction of typed data is done through the viem API (`hashTypedData` / `recoverAddress`),
+We do not directly import internal SDK functions. `viem@2.56.8`'s `recoverAddress` is **async** (requires `await`).
 
-### 検証結果（2026-09-19 実行、全 11 件一致）
+### Verification results (2026-09-19 execution, all 11 matches)
 
-`digest` 列は **SDK の値ではなく、上記の再構成で viem が計算した値**。fixture の `digest_hex` は
-`null` のまま（前節参照）で、ここには記録としてのみ残す。Rust 側の cross-check 用の参考値。
+The `digest` column is **not the value of the SDK, but the value viem calculated in the above reconstruction**. fixture's `digest_hex` is
+It will be left as `null` (see previous section) for the purpose of recording only here. Reference value for cross-check on the Rust side.
 
-| fixture | 再構成 digest（SDK 値ではない） | 復元アドレス | `address` と一致 |
+| fixture | Reconstructed digest (not SDK value) | Recovery address | Matches `address` |
 | --- | --- | --- | --- |
 | `order_limit_btc.json` | `0x8083f20d41b0bffac1de40d2b1c64135424320907c8e590e118162d909b64cb3` | `0x70997970c51812dc3a010c7d01b50e0d17dc79c8` | ✅ |
 | `order_market_ioc_eth.json` | `0x559680b91caf029d5b6f424b4c32d0be114612e287dad34530660d4ec7174307` | `0x70997970c51812dc3a010c7d01b50e0d17dc79c8` | ✅ |
@@ -315,91 +290,90 @@ SDK の内部関数の直接 import はしていない。`viem@2.56.8` の `reco
 | `usd_send.json` | `0xc83eead0693f221a6a25cbe66acd652c15be17d16c1cc76c4e98e972057a1188` | `0x70997970c51812dc3a010c7d01b50e0d17dc79c8` | ✅ |
 | `order_limit_agent.json` | `0x7d1c7c7445df14e57f56be3747f75a1121d1ed5def4953aae20371a4b58a921c` | `0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc` | ✅ |
 
-`order_limit_agent.json` の復元アドレスは agent のアドレス（`0x3c44…`）で、`address` と一致する。
+The recovery address of `order_limit_agent.json` is the agent's address (`0x3c44...`), which matches `address`.
 
-## `createL1ActionHash` の入力依存性（公開 API で実測）
+## Input dependency of `createL1ActionHash` (measured in the public API)
 
-`order_limit_btc.json` の action を固定し、入力だけ変えて `createL1ActionHash()` を呼んだ結果
-（`generate.mjs` が毎回出力する）。
+Fixed the action in `order_limit_btc.json` and only changed the input, resulting in calling `createL1ActionHash()`
+(`generate.mjs` is outputed each time).
 
-| 条件 | nonce | vaultAddress | expiresAfter | 結果 |
+| Condition | nonce | vaultAddress | expiresAfter | Result |
 | --- | --- | --- | --- | --- |
 | base | 1758000000000 | null | null | `0x3b3f5c5508dc8e8c59185f767bb5ba7ac0bcdf74993d62f2e48658d9d969dcd8` |
 | nonce + 1 | 1758000000001 | null | null | `0x7e072e6400662515658a80a0f013e83fc6738152c62eb7d2fdf63f06bd5258b9` |
-| vaultAddress 付き | 1758000000000 | `0x15d34aaf54267db7d7c367839aaf71a00a2c6a65` | null | `0x49bb8722d79c31186763ca631f5172e39edd352d3126353ed7ddfdb780fa74aa` |
-| expiresAfter 付き | 1758000000000 | null | 1758000600000 | `0x0e39ff686d7a151ceb360c9451a04e75de3cce1285ef1c59db7bb35da534cd42` |
-| 両方 | 1758000000000 | `0x15d34aaf54267db7d7c367839aaf71a00a2c6a65` | 1758000600000 | `0x76f984c0917d42c183f9fed62cfaf81a3e847ffff3f77d725b2e773f0eba5a07` |
-| action のキー順を入れ替え（`orders, grouping, type`） | 1758000000000 | null | null | `0x1b8cde8f870fbd0f838f105f5e6033a6257b92ab9fdd1d311315c5ae336f0662` |
+| with vaultAddress | 1758000000000 | `0x15d34aaf54267db7d7c367839aaf71a00a2c6a65` | null | `0x49bb8722d79c31186763ca631f5172e39edd352d3126353ed7ddfdb780fa74aa` |
+| expiresAfter attached | 1758000000000 | null | 1758000600000 | `0x0e39ff686d7a151ceb360c9451a04e75de3cce1285ef1c59db7bb35da534cd42` |
+| Both | 1758000000000 | `0x15d34aaf54267db7d7c367839aaf71a00a2c6a65` | 1758000600000 | `0x76f984c0917d42c183f9fed62cfaf81a3e847ffff3f77d725b2e773f0eba5a07` |
+| Change the order of keys for action (`orders, grouping, type`) | 1758000000000 | null | null | `0x1b8cde8f870fbd0f838f105f5e6033a6257b92ab9fdd1d311315c5ae336f0662` |
 
-- base の値は `order_limit_btc.json` の `connection_id_hex` と一致する。
-- **nonce / vaultAddress / expiresAfter / action のキー順のいずれを変えてもハッシュは変わる。**
-  特に最後の行は「キー順が違うと同じ action でもハッシュが変わる」ことの実測（canonicalize が必要な理由）。
+- The base value matches the `connection_id_hex` in `order_limit_btc.json`.
+- **Changing nonce, vaultAddress, expiresAfter, or the action key order changes the hash.**
+  In particular, the last line is a real-world observation that "even if the order of keys is different, the hash changes for the same action" (the reason canonicalize is needed).
 
-## perp の asset index は testnet と mainnet で異なる
+## The perp asset index is different on testnet and mainnet.
 
-`action` の `a` / `asset` は perp の asset index。**mainnet と testnet で並びが違う。**
+`a` / `asset` in `action` is the perp's asset index. **The order is different on mainnet and testnet.**
 
-- mainnet: `meta.universe` は `0:BTC, 1:ETH, 2:ATOM, 3:MATIC, 4:DYDX, 5:SOL`
-- **testnet: `0:SOL, 1:APT, 2:ATOM, 3:BTC, 4:ETH, 5:MATIC`** → BTC は `3`、ETH は `4`
+- mainnet: `meta.universe` is `0:BTC, 1:ETH, 2:ATOM, 3:MATIC, 4:DYDX, 5:SOL`
+- **testnet: `0:SOL, 1:APT, 2:ATOM, 3:BTC, 4:ETH, 5:MATIC`** → BTC is `3`, ETH is `4`
 
-SDK の `SymbolConverter`（`@nktkas/hyperliquid/utils`）と `meta`（`@nktkas/hyperliquid/api/info`）で
-実際に確認した値:
+With SDK's `SymbolConverter` ( `@nktkas/hyperliquid/utils`) and `meta` ( `@nktkas/hyperliquid/api/info`)
+The value actually confirmed:
 
 ```
 isTestnet=true  → BTC assetId=3, szDecimals=5 / ETH assetId=4, szDecimals=4
 isTestnet=false → BTC assetId=0, szDecimals=5 / ETH assetId=1, szDecimals=4
 ```
 
-本 fixture は `network: "testnet"` なので **testnet の値（BTC=3, ETH=4）** をそのまま使っている。
-asset index は固定値ではなく **`meta.universe` の並びから解決する必要がある**
-（生成スクリプト側も、決定的な出力にするため解決結果を定数として持っている）。
-mainnet 基準で BTC=0 / ETH=1 と決め打ちすると testnet では誤った index になる。
+This fixture is set to `network: "testnet"` so **it uses the testnet value (BTC=3, ETH=4) directly**.
+The asset index needs to be resolved from the order of **`meta.universe`** rather than a fixed value.
+(The generation script also holds the solution as a constant to make it a definitive output).
+If you set BTC=0 / ETH=1 based on the mainnet standard, it will become the wrong index on the testnet.
 
-## Rust 側への注意: user-signed の 2 fixture は L1 とは別経路
+## Attention on the Rust side: the 2 fixtures with user-signed are on a separate path from L1
 
-`approve_agent.json` と `usd_send.json` は **L1 action ではなく user-signed EIP-712 action** である
-（SDK では `executeUserSignedAction` を通る）。したがって:
+`approve_agent.json` and `usd_send.json` are **user-signed EIP-712 actions**, not L1 actions.
+(The SDK passes `executeUserSignedAction`). Therefore:
 
-- この 2 つには **connectionId が存在しない**ため `connection_id_hex` は `null`。
-  phantom agent の action ハッシュを計算しても、その値は署名に一切使われない（入れると誤誘導になる）。
-- この 2 つは `createL1ActionHash` / phantom agent の digest では検証できない。検証には次の
-  EIP-712 typed data が必要（`esm/signing/_userSigned.js:64-78` と
+- Since these two do not have a **connectionId**, `connection_id_hex` is `null`.
+  Even if you calculate the action hash of phantom agent, that value will not be used at all in signature (if you put it in, it will cause misleading induction).
+- These two cannot be verified by the digest of `createL1ActionHash` / phantom agent. Verification requires the following
+  EIP-712 typed data is required (`esm/signing/_userSigned.js:64-78` and
   `esm/api/exchange/_methods/approveAgent.js:53-72` / `usdSend.js:46-65`）:
 
-  | 項目 | `approve_agent.json` | `usd_send.json` |
+  | an item | `approve_agent.json` | `usd_send.json` |
   | --- | --- | --- |
-  | domain.name | `"HyperliquidSignTransaction"` | 同左 |
-  | domain.version | `"1"` | 同左 |
-  | domain.chainId | `421614`（`action.signatureChainId` = `0x66eee` を 10 進変換） | 同左 |
-  | domain.verifyingContract | `0x0000000000000000000000000000000000000000` | 同左 |
+  | domain.name | `"HyperliquidSignTransaction"` | Same as left |
+  | domain.version | `"1"` | Same as left |
+  | domain.chainId | `421614` (convert `action.signatureChainId` = `0x66eee` to base 10) | Same as left |
+  | domain.verifyingContract | `0x0000000000000000000000000000000000000000` | Same as left |
   | primaryType | `"HyperliquidTransaction:ApproveAgent"` | `"HyperliquidTransaction:UsdSend"` |
-  | フィールド順 | `hyperliquidChain(string), agentAddress(address), agentName(string), nonce(uint64)` | `hyperliquidChain(string), destination(string), amount(string), time(uint64)` |
+  | Field order | `hyperliquidChain(string), agentAddress(address), agentName(string), nonce(uint64)` | `hyperliquidChain(string), destination(string), amount(string), time(uint64)` |
 
-  構造体ハッシュは **上の表のフィールド順**（= SDK の型定義順）で計算する。`action` のキー順
-  （`type` が先頭など）とは異なる点に注意。`destination` は `address` ではなく `string`、
-  `amount` も `string` として扱う。
-- 本 README の「検証」節の再構成 digest は、この 2 件についてもこの typed data で計算した値である。
+  The struct hash is computed in **the field order of the table above** (i.e., the order of type definitions in SDK). This differs from the serialized `action` key order, which begins with `type`. `destination` is not `address` but `string`,
+  `amount` is also treated as a `string`.
+- The reconfigured digest of the “validation” section of this README is also the value computed with this typed data for these two items.
 
-`crates/hl-sign/tests/fixtures.rs` は現状すべての fixture を L1 として扱うため
-（`connection_id_hex` を必須とし `sign_action` で再署名する）、この 2 件では分岐が必要。
+`crates/hl-sign/tests/fixtures.rs` currently treats all fixtures as L1
+(`connection_id_hex` is required and re-signed with `sign_action`), this two cases require branching.
 
-## 未確認・注意点
+## Unconfirmed / Notes
 
-- `digest_hex` / `msgpack_hex` / `payload_hex` は SDK の公開 API から取得できないため全 fixture で
-  `null`。値の正しさは Rust 側が `action` + `nonce` から自分で計算して、`signature_hex` の
-  復元アドレス一致（または README の再構成 digest との一致）で確認する。
-- `signature_hex` の `r ‖ s ‖ v` という並びは本ツールの定義であり、SDK / HL API の仕様ではない。
-  HL API は `{r, s, v}` オブジェクトを送る。
-- README の再構成 digest は viem による計算であり、SDK が返した値ではない。
-  （SDK の署名経路もウォレット = viem に委譲しているため辻褄は合うが、SDK の公開 API の戻り値では
-  ないことに変わりはない。）
-- `approveAgent` / `usdSend` の `signatureChainId` は `"0x66eee"` を明示的に渡している。
-  この値は SDK の既定ではなく（既定はウォレットの chainId）、SDK 自身のサンプルと
-  Hyperliquid の testnet 値に合わせたもの。mainnet では `"0xa4b1"` になる。
-- `agentName` は 16 文字以内というスキーマ制約がある（`esm/api/exchange/_methods/approveAgent.js:19-26`）。
-  本 fixture は `"pp-test-agent"`（13 文字）。
-- cloid は `0x` + 32 hex（34 文字）でなければならない（`esm/api/_schemas.js` の `Cloid`）。
-- `order` の grouping は省略時に既定値 `"na"` が入るため、`action` に必ず現れる。
-- 本ツールは HL API へ一切リクエストを送らない（asset index の確認は別途 1 回だけ行った）。
-- 既定の `pnpm` 設定に `minimumReleaseAge` があるため、依存の追加時は指定バージョンの公開から
-  一定時間が経過している必要がある。現在の固定バージョンは解決済み。
+- `digest_hex` / `msgpack_hex` / `payload_hex` cannot be obtained from the public API of the SDK, so in all fixtures
+  `null`. The correctness of the value is calculated by the Rust side itself from `action` + `nonce`, and the `signature_hex` of
+  Verify with the matching recovery address (or matching the reconfigured digest in README).
+- The `r ‖ s ‖ v` sequence in `signature_hex` is a definition of this tool and is not a specification of the SDK / HL API.
+  HL API sends `{r, s, v}` objects.
+- The re-configuration digest of README is computed by viem and is not returned by the SDK.
+  (Although the signature path of the SDK is also delegated to the wallet = viem, it is consistent, but the return value of the SDK's public API is
+  There is no change.)
+- The `signatureChainId` for `approveAgent` / `usdSend` is explicitly provided as `"0x66eee"`.
+  This value is not the default of the SDK (the default is the wallet's chainId), but the SDK's own sample and
+  It is adjusted to the testnet value of Hyperliquid. On the mainnet it becomes `"0xa4b1"`.
+- `agentName` has a schema constraint of 16 characters or less (`esm/api/exchange/_methods/approveAgent.js:19-26`).
+  This fixture is `"pp-test-agent"` (13 characters).
+- cloid must be `0x` + 32 hex (34 characters) (the `Cloid` in `esm/api/_schemas.js`).
+- The grouping of `order` will always appear in `action` because the default value `"na"` is provided when the grouping is omitted.
+- This tool does not send any requests to the HL API (only one additional check of the asset index was performed).
+- Since the `minimumReleaseAge` is defined in the default `pnpm` settings, when adding dependencies, it will be from the release of the specified version.
+  A certain amount of time must have passed. The current fixed version is resolved.

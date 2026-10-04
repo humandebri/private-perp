@@ -1,93 +1,95 @@
-# Phase 0：実装契約・画面仕様
+# Phase 0: Implementation contracts and UI specifications
 
-- 作成日：2026-09-19
-- 状態：契約を固定。実資金・testnet接続は未着手（Canister実装はPhase 1でローカル範囲まで進行。`docs/phase-1/README.md` と `docs/implementation-status.md` を参照）
-- 基準文書：`Plan.md` v0.9（特に3章・16章）、`Implementation.md` v0.5（特に3章・4章・5章・9章・14章）、`Implementation-Roadmap.md` v1.1（特に4章・10章・12章）
+- Created: 2026-09-19.
+- Status: contracts defined. Real funds and testnet connectivity have not started at this stage. Local canister implementation progressed in Phase 1; see `docs/phase-1/README.md` and `docs/implementation-status.md`.
+- Governing documents: `Plan.md` v0.9 (especially chapters 3 and 16), `Implementation.md` v0.5 (chapters 3, 4, 5, 9, and 14), and `Implementation-Roadmap.md` v1.1 (chapters 4, 10, and 12).
 
-## 1. 目的
+> Historical contract record. Implementation and verification statements below describe this phase; later reports record subsequent work.
 
-Phase 0の完了条件は「別の実装者が見ても、成功・失敗・再試行の責務を判断できること」である（ロードマップ4章）。本ディレクトリは、Phase 1以降の実装前に固定する契約と画面仕様を置く。
+## 1. Purpose
 
-ここに書かれたAPI名は**設計上の名前**であり、デプロイ済みCandidでも実装済みコードでもない。Canister ID、testnet鍵ID、HLの制限値など未確定の値は「未確定」と明示し、推測値を書かない。
+Phase 0 is complete when another implementer can identify responsibility for success, failure, and retries (roadmap chapter 4). This directory holds the contracts and UI specifications fixed before Phase 1 implementation.
 
-## 2. 成果物索引
+API names here are **design names**, not deployed Candid or implemented code. Mark unknown canister IDs, testnet key IDs, and HL limits as unresolved; do not substitute guesses.
 
-| 文書 | 内容 |
+## 2. Deliverables
+
+| Document | Contents |
 |---|---|
-| `authority-matrix.md` | Canister責務、許可caller、保持鍵、署名可能action、禁止事項 |
-| `api-contract.md` | Canister別API、エラー型と再試行分類、HPKE封筒、上限 |
-| `state-machines.md` | action・資金要求・注文の状態遷移、照合規則、UI正準ラベル |
-| `money-and-units.md` | 金額の整数単位、丸め、最大値、nonce、重複イベント、保持期間 |
-| `environments.md` | local/testnet/mainnet の分離、鍵・endpoint・mock issuer |
-| `threat-test-matrix.md` | 脅威と試験の対応、期待結果、証跡、実装Phase |
-| `privacy-evaluation.md` | A/B0/B1比較の入力、攻撃者可視情報、合格基準 |
-| `ui-spec.md` | 画面構成、非正常状態、残高区分、説明文言、チャート方針 |
+| `authority-matrix.md` | Canister responsibilities, allowed callers, retained keys, permitted signed actions, and prohibitions |
+| `api-contract.md` | APIs by canister, error types and retry classes, HPKE envelopes, and limits |
+| `state-machines.md` | Action, fund-request, and order transitions; reconciliation rules; canonical UI labels |
+| `money-and-units.md` | Integer money units, rounding, maxima, nonces, duplicate events, and retention |
+| `environments.md` | Separation of local/testnet/mainnet, keys, endpoints, and mock issuers |
+| `threat-test-matrix.md` | Threats, tests, expected results, evidence, and implementation phases |
+| `privacy-evaluation.md` | A/B0/B1 inputs, attacker-visible information, and acceptance criteria |
+| `ui-spec.md` | Screen layout, abnormal states, balance categories, explanations, and chart policy |
 
-追加成果物（ロードマップ12章-2）：Rust workspace雛形と固定依存（リポジトリ直下の `Cargo.toml`、`rust-toolchain.toml`、`icp.yaml`、`crates/`、`scripts/check-no-await.sh`）。
+Additional deliverables (roadmap chapter 12, item 2): the Rust workspace scaffold and pinned dependencies in root `Cargo.toml`, `rust-toolchain.toml`, `icp.yaml`, `crates/`, and `scripts/check-no-await.sh`.
 
-## 3. ロードマップ4章との対応
+## 3. Mapping to roadmap chapter 4
 
-### 実装前に固定するもの
+### Contracts to define before implementation
 
-| ロードマップ項目 | 対応 |
+| Roadmap item | Coverage |
 |---|---|
-| 各Canisterの責務、許可caller、署名できるactionを表にする | `authority-matrix.md` 2〜4節 |
-| 認証・注文・資金・変更予約のAPIとエラー型を定義する | `api-contract.md` 2〜5節 |
-| 出金予約、移動中資金、unknown、注文取消の状態遷移を固定する | `state-machines.md` 2〜6節 |
-| 金額の整数単位、丸め、最大値、重複イベントの扱いを定義する | `money-and-units.md` 2〜5節 |
-| ローカル・testnet・mainnetのID、鍵、endpoint、mock issuerを分離する | `environments.md` 2〜5節 |
-| 脅威と試験を対応付ける（二重送金、認可迂回、古いcallback、悪意あるupgradeを含む） | `threat-test-matrix.md` 3節 |
-| プライバシー比較の入力、攻撃者に渡す情報、合格基準を固定する | `privacy-evaluation.md` 2〜5節 |
+| Define each canister's responsibilities, callers, and permitted signed actions | `authority-matrix.md` sections 2–4 |
+| Define authentication, order, funds, upgrade-reservation APIs, and errors | `api-contract.md` sections 2–5 |
+| Define withdrawal reservations, in-transit funds, unknown outcomes, and cancellation transitions | `state-machines.md` sections 2–6 |
+| Define integer units, rounding, maxima, and duplicate events | `money-and-units.md` sections 2–5 |
+| Separate IDs, keys, endpoints, and mock issuers by environment | `environments.md` sections 2–5 |
+| Map threats to tests, including duplicate transfers, authorization bypass, stale callbacks, and malicious upgrades | `threat-test-matrix.md` section 3 |
+| Define privacy-comparison inputs, attacker information, and acceptance thresholds | `privacy-evaluation.md` sections 2–5 |
 
-### UI設計
+### UI design
 
-| ロードマップ項目 | 対応 |
+| Roadmap item | Coverage |
 |---|---|
-| デスクトップの取引画面、資金画面、履歴画面の構成を決める | `ui-spec.md` 2〜4節 |
-| 未接続、残高不足、送信中、結果不明、データ遅延、停止中の画面を定義する | `ui-spec.md` 5節 |
-| 「保管残高」「取引口座equity」「出金可能額」を別の値として扱う | `ui-spec.md` 6節 |
-| 機密性の説明、Canister保管、EOA紛失、停止時の回収制約の文言を作る | `ui-spec.md` 7節 |
-| チャートの必要機能と利用条件を確認し、採用候補を絞る | `ui-spec.md` 8節 |
+| Define desktop trading, funds, and history layouts | `ui-spec.md` sections 2–4 |
+| Define disconnected, insufficient funds, sending, unknown, stale, and stopped states | `ui-spec.md` section 5 |
+| Treat custody balance, trading-account equity, and withdrawable amount separately | `ui-spec.md` section 6 |
+| Explain confidentiality, canister custody, EOA loss, and recovery restrictions during stoppage | `ui-spec.md` section 7 |
+| Assess chart requirements and licensing conditions; narrow the candidates | `ui-spec.md` section 8 |
 
-## 4. 完了条件と未達の扱い
+## 4. Completion and unmet conditions
 
-- 完了条件：上記の全項目が本ディレクトリの文書で説明され、APIごとに成功・失敗・再試行・照合の責務が読み取れること。
-- 本ディレクトリの記述は設計契約であり、実装・実機検証の証跡ではない。Phase 1の実測結果と矛盾した場合は、実測を記録した上で契約を更新する。
-- 資金・署名・認証・guardに関わる契約は、正常系の記述だけで完了としない。`threat-test-matrix.md` の失敗試験が未実行である限り、Phase 1のGo/No-Goは未達である。
+- Every item above must be explained, with success, failure, retry, and reconciliation responsibilities identifiable for each API.
+- These documents define contracts; they are not implementation or live-verification evidence. If Phase 1 measurements contradict a contract, record the measurement and update the contract.
+- Funds, signing, authentication, and guard contracts cannot be completed with successful-path descriptions alone. Phase 1 Go/No-Go remains unmet while required failure tests in `threat-test-matrix.md` have not run.
 
-## 5. 対象外
+## 5. Exclusions
 
-- hl-signの本格実装（action構築・msgpack・EIP-712・v復元）、DBスキーマの実テーブルとMigration、HL testnet往復、PocketICの失敗試験基盤、Candid `.did` の固定、frontendの変更、チャート採用の確定。
-- Rust版PocketIC（`pocket-ic` crate）の採用はPhase 1で判断する。docs.rsのビルド対象は `x86_64-unknown-linux-gnu` のみで、Apple Siliconでの動作は未確認である。
-- testnet/mainnetの実値（Canister ID、署名鍵ID、HLの上限・手数料）はPhase 1の実測で確定する。
+- Full hl-sign implementation (action construction, msgpack, EIP-712, and recovery of v), real DB tables and migrations, HL testnet round trips, PocketIC fault-test infrastructure, fixed Candid `.did`, frontend changes, and final chart selection.
+- Selection of Rust PocketIC (`pocket-ic`) belongs to Phase 1. At this stage, docs.rs builds only `x86_64-unknown-linux-gnu`, and Apple Silicon operation is unverified.
+- Confirm actual testnet/mainnet values (canister IDs, signing key IDs, HL limits and fees) through Phase 1 measurements.
 
-## 6. 基準文書との差分
+## 6. Differences from the governing documents
 
-現時点で `Plan.md`・`Implementation.md`・`Implementation-Roadmap.md` を変更する必要はない。実装中に基準文書と矛盾する判断が必要になった場合は、この表へ追記し、基準文書の改訂は別途承認を得る。
+No change to `Plan.md`, `Implementation.md`, or `Implementation-Roadmap.md` is required at this stage. Add conflicting implementation decisions to this table; obtain separate approval for revisions to the governing design.
 
-| 検出日 | 対象 | 差分 | 対応 |
+| Date | Target | Difference | Response |
 |---|---|---|---|
-| 2026-09-19 | Implementation 14.3 | API名は設計上の名前でCandid未固定 | `api-contract.md` に明記。Phase 1で実Candidを固定 |
-| 2026-09-19 | Implementation 3.1 | `Cargo.toml`・`icp.yaml` は未作成だった | Phase 0で雛形を追加 |
-| 2026-09-19 | ロードマップ4章 | 成果物は文書だが、12章-2のworkspace準備も本Phaseで実施 | 本README 2節に追記 |
-| 2026-09-19 | Implementation 14.3 | Agent世代作成と履歴参照のAPI名が未定義（7章のフローと画面要件に必須） | `api-contract.md` 5.1に追加一覧（権限を拡大しない操作のみ） |
-| 2026-09-19 | Implementation 3.1・14.3 | `policy_registry` のAPIが未定義 | `api-contract.md` 5節に4メソッドを設計名として定義 |
-| 2026-09-19 | ロードマップ10.5 | チャートはLightweight Chartsを継続。Advanced Chartsは未評価のopen item | `ui-spec.md` 8節に必要機能と未評価理由を記録 |
+| 2026-09-19 | Implementation 14.3 | API names are design names; Candid is not fixed | Explain in `api-contract.md`; fix actual Candid in Phase 1 |
+| 2026-09-19 | Implementation 3.1 | `Cargo.toml` and `icp.yaml` did not exist | Add scaffolds in Phase 0 |
+| 2026-09-19 | Roadmap chapter 4 | Deliverables are documents, but workspace preparation from chapter 12, item 2 also occurs here | Record in section 2 |
+| 2026-09-19 | Implementation 14.3 | Agent-generation creation and history APIs were undefined, though required by chapter 7 and the UI | Add the list in `api-contract.md` 5.1, without expanding authority |
+| 2026-09-19 | Implementation 3.1 and 14.3 | `policy_registry` APIs were undefined | Define 4 design methods in `api-contract.md` section 5 |
+| 2026-09-19 | Roadmap 10.5 | Retain Lightweight Charts; Advanced Charts remains unevaluated | Record requirements and reasons in `ui-spec.md` section 8 |
 
-## 7. 未決事項台帳
+## 7. Open items
 
-Phase 0の完了条件ではないが、並行して追跡する（ロードマップ4章）。
+Track these in parallel (roadmap chapter 4); they are outside Phase 0 completion criteria.
 
-| ID | 項目 | 現状 | 影響 |
+| ID | Item | Status | Effect |
 |---|---|---|---|
-| O-1 | 運営主体、対象国、規約適合性 | 未調査 | 実顧客の募集・受付を許可しない |
-| O-2 | SNSトークン配分・販売条件 | 未確定 | 本番開始条件 |
-| O-3 | Advanced Chartsの提供条件・統合費用 | 未評価 | 初期必須機能に高度描画が必要になった場合のみ再判断（`ui-spec.md` 8節） |
-| O-4 | testnet/mainnet Canister ID、署名鍵ID | 未確定 | `environments.md` に記録先のみ定義 |
-| O-5 | ローカルネットワーク起動可否（icp launcher） | Phase 0で実測 | 実測結果を `../implementation-status.md` に記録 |
+| O-1 | Operator, target countries, and terms compliance | Not investigated | No recruitment or admission of real customers |
+| O-2 | SNS token allocation and sale conditions | Unresolved | Production prerequisite |
+| O-3 | Advanced Charts availability and integration cost | Unevaluated | Reconsider only if initial requirements need advanced drawing (`ui-spec.md` section 8) |
+| O-4 | Testnet/mainnet canister IDs and signing key IDs | Unresolved | `environments.md` defines only where to record them |
+| O-5 | Local-network startup (icp launcher) | Measured in Phase 0 | Results in `../implementation-status.md` |
 
-## 8. 明示しておく制限
+## 8. Explicit limits
 
-- Canisterコード、Candid、testnet Canister IDはまだ存在しない。本ディレクトリの契約は実装の代替ではない。
-- UIデモ（`frontend/`）は合成データ専用である。本ディレクトリの画面仕様は実装指示であり、現行デモが仕様を満たしている証明ではない。
-- 機密性・相関耐性・資金安全性は、どの文書を書いても成立しない。Phase 1の実測と独立監査を要する。
+- At this stage, canister code, Candid, and testnet canister IDs do not yet exist. Contracts cannot replace implementation.
+- The UI demo (`frontend/`) uses synthetic data. These UI specifications are implementation instructions, not evidence that the demo satisfies them.
+- Documentation cannot establish confidentiality, correlation resistance, or fund safety. Phase 1 measurements and independent audit are required.

@@ -1,154 +1,156 @@
-# 脅威と試験の対応表
+# Threat-to-test matrix
 
-- 根拠：`Implementation.md` 9.2〜9.4、14.4、`Plan.md` 3.2、16章、ロードマップ4章・6章
-- 状態：設計契約。**一部実行済み**。実行済みの試験は実施日と証跡を付し、11節に実行済み・未実行の一覧を置く（2026-09-19〜21に認証・資金・outbox・guardのローカル分を実行）。未実行のものは未実行のまま
+> Historical Phase 0 test plan. Execution status below records the dates stated here; later phase reports contain subsequent results.
 
-## 1. 読み方
+- Basis: `Implementation.md` 9.2–9.4, 14.4, `Plan.md` 3.2, Chapter 16, Roadmap Chapters 4 and 6
+- Status: Design contract. **Partially executed**. The executed tests should be labeled with the execution date and proof, and a list of executed and unexecuted tests should be placed in Section 11 (executed and unexecuted local versions of authentication, funds, outbox, and guard executed from 2026-09-19 to 21). Unexecuted tests should remain unexecuted.
 
-- 「層」は試験の実施手段: `unit`（純粋関数・ホスト）、`PocketIC`（Canister統合）、`testnet`（HL実接続）、`Playwright`（UI）、`手動`（環境・運用）、`レビュー`（コード・設定の静的確認）。
-- 「証跡」は合格時に残す記録。資金・署名・認証に関わる証跡は保護し、平文のintent・署名・対応表を残さない。
-- 実装Phaseは、その試験をどのPhaseで実行可能になるかを示す。Phase 0では契約のみを固定する。
+## 1. How to read
 
-## 2. 必須の検証（ロードマップ5章・6章）との対応
+- "Layers" are the execution methods for the test: `unit` (pure function/host), `PocketIC` (Canister integration), `testnet` (HL connection), `Playwright` (UI), `manual` (environment/operation), `review` (static code/configuration verification).
+- "Evidence" is a record left at the time of passing the test. Protect evidence related to funds, signature, and authentication, and do not leave plain text intent, signature, or identity-to-account mapping.
+- The Implementation Phase shows which Phase the test can be executed in. Phase 0 only fixes the contract.
 
-| ロードマップ項目 | 対応する試験 |
+## 2. Response to mandatory verification (Chapters 5 and 6 of the roadmap)
+
+| Roadmap items | Corresponding test |
 |---|---|
-| 入金を一度だけ計上し、未確定の送金を確定残高へ含めない | T-201、T-202、T-204 |
-| 出金の本人署名、宛先、金額、期限、nonceを検証する | T-102、T-104、T-203 |
-| 送金成功後の応答喪失でも自動再送で二重払出ししない | T-205、T-206 |
-| trading_coreからmaster署名や任意出金を要求できない | T-301、T-302 |
-| ブラウザからHLへユーザー別取引口座の照会が出ない | T-601、T-602 |
-| 署名・照合の遅延、outcall/署名/保存コストを記録する | T-801（計測。合否は`Implementation.md` 2.4） |
-| Confidential Subnetの利用可否と未検証の信頼仮定を記録する | T-802 |
+| Only record the deposit once, and do not include the undecided transfer in the final balance. | T-201, T-202, T-204 |
+| Verify the person's signature, recipient, amount, deadline, and nonce for withdrawal | T-102, T-104, T-203 |
+| Even if the response loss occurs after a transfer is successful, double payment will not be automatically resended. | T-205, T-206 |
+| Cannot request master-key signing or optional withdrawal from trading_core | T-301, T-302 |
+| Do not query per-user trading accounts directly from the browser to HL. | T-601, T-602 |
+| Record delays in signature/reconciliation, outcall/signature/storage costs | T-801 (Measurement. Results are in `Implementation.md` 2.4) |
+| Record whether Confidential Subnet is available and the unverified trust assumption | T-802 |
 
-## 3. 認証・セッション
+## 3. authentication/session
 
-| ID | 脅威・失敗条件 | 対策（契約） | 層 | 期待結果 | 証跡 | Phase |
+| ID | Threat and failure conditions | Measures (contract) | Layer | Expected results | Evidence | Phase |
 |---|---|---|---|---|---|---|
-| T-101 | 偽のEOAでchallengeを解く | EIP-712 `typed_data` にorigin/network/canister/用途/nonce/期限を束縛 | unit, PocketIC | 拒否（`BadRequest.InvalidSignature`） | 試験ログ | 1 |
-| T-102 | 別Principalでセッションを開く | challengeの`principal`と署名EOAを束縛 | PocketIC | 拒否 | 試験ログ | 1 |
-| T-103 | 期限切れchallengeの再利用 | 5分期限、一回性nonce | unit, PocketIC | 拒否（`ChallengeExpired`） | 試験ログ | 1 |
-| T-104 | challenge再使用（二重`open_session`） | nonce一回性をDBの一意制約で保証 | PocketIC | 2回目を拒否（`ChallengeReused`） | 試験ログ | 1 |
-| T-105 | 別origin・別networkからの要求 | `aad`とchallengeの束縛 | unit, PocketIC | 拒否（`OriginMismatch`／`NetworkMismatch`） | 試験ログ | 1 |
-| T-106 | `purpose = withdrawal` のchallengeでセッション確立 | 用途分離 | PocketIC | 拒否 | 試験ログ | 1 |
-| T-107 | ログアウト後も旧セッションが有効 | `revoke_session`で失効世代を更新 | PocketIC | 失効（`SessionRevoked`）。資金要求・新規リスク受付を拒否 | 試験ログ | 2 |
-| T-108 | 失効伝達前に`trading_core`を呼ぶ | 未確認セッションを受理しない | PocketIC | 拒否（`SessionIssuedByUnregisteredVault`等） | 試験ログ | 2 |
-| T-109 | セッション鍵・本人キャッシュのブラウザ永続化 | 永続化しない設計 | Playwright, レビュー | 保存領域に残らない | 画面記録 | 2 |
+| T-101 | Solve challenges with fake EOA | EIP-712 `typed_data` binds origin/network/canister/purpose/nonce/expiration | unit, PocketIC | Reject (`BadRequest.InvalidSignature`) | Test log | 1 |
+| T-102 | Open a session with a different Principal | Bind the challenge to the principal and signing EOA | PocketIC | refusal | Test log | 1 |
+| T-103 | Reusing expired challenge | 5-minute expiration, one-time nonce | unit, PocketIC | Reject (`ChallengeExpired`) | Test log | 1 |
+| T-104 | Reuse challenge (double `open_session`) | Nonce uniqueness is guaranteed by the uniqueness constraint of the database. | PocketIC | Reject the second time (`ChallengeReused`) | Test log | 1 |
+| T-105 | Requests from different origins and different networks | `aad` and challenge binding | unit, PocketIC | Reject (`OriginMismatch` / `NetworkMismatch`) | Test log | 1 |
+| T-106 | Establish a session with the `purpose = withdrawal` challenge | Function separation | PocketIC | refusal | Test log | 1 |
+| T-107 | The old session is still active after logging out | Update revocation generation with `revoke_session` | PocketIC | Expiration (`SessionRevoked`). Refused fund request and new risk acceptance. | Test log | 2 |
+| T-108 | Call `trading_core` before the expiration notification | Do not accept unconfirmed sessions | PocketIC | Reject (`SessionIssuedByUnregisteredVault` etc.) | Test log | 2 |
+| T-109 | Session key and personal cache browser persistence | Do not persist these data | Playwright, review | Not saved in the storage area | Screen recording | 2 |
 
-実行済み（2026-09-19〜21、`crates/pocket-ic-tests/tests/vault_auth.rs`・7件）: T-101（別鍵の署名を拒否）、T-102（challengeを発行時のprincipalへ束縛し、別principalでの引換えを拒否。`a_challenge_bound_to_a_principal_cannot_be_redeemed_by_another`と`a_challenge_principal_must_match_the_caller`）、T-103（期限切れを拒否）、T-104（challenge再使用を拒否）、T-105（別origin/networkの署名を拒否）。T-106〜T-109は未実行。
+Executed (2026-09-19~21, 7 items in `crates/pocket-ic-tests/tests/vault_auth.rs`): T-101 (rejects signatures from a different key), T-102 (binds the challenge to the caller when issued and rejects redemption with a different principal. `a_challenge_bound_to_a_principal_cannot_be_redeemed_by_another` and `a_challenge_principal_must_match_the_caller`), T-103 (rejects expired), T-104 (rejects reuse of a challenge), T-105 (rejects signatures from a different origin/network). T-106~T-109 are not executed yet.
 
-実行済み（2026-09-19、`crates/pocket-ic-tests/tests/vault_outbox.rs`）: T-205（送金成功後の応答喪失で自動再送しない）。T-206（時間経過で不明を解放・再送しない）も実行済み（10分経過後も保持を確認）。
+Executed (2026-09-19, `crates/pocket-ic-tests/tests/vault_outbox.rs`): T-205 (does not automatically resend due to response loss after transfer success). T-206 (does not release or resend unknown information over time) is also executed (confirmed to retain after 10 minutes).
 
-実行済み（2026-09-19、`crates/pocket-ic-tests/tests/guard_upgrade.rs`）: T-501（非SNSの予約拒否）、T-502（早期実行拒否）、T-503/T-504（内容不一致拒否）、T-506（取消＋新規予約で新しい猶予）。一致する予約の実行（`install_code`）も極小wasmで検証済み。
+Executed (2026-09-19, `crates/pocket-ic-tests/tests/guard_upgrade.rs`): T-501 (non-SNS reservation rejection), T-502 (early execution rejection), T-503/T-504 (content mismatch rejection), T-506 (cancellation + new reservation with new allowance). Execution of matching reservations (`install_code`) is also verified with minimal Wasm.
 
-実行済み（その他、証跡 `docs/phase-1/evidence/P1-010.md` の対応表）: T-201・T-202〜T-204・T-207・T-211・T-212の一部・T-307、T-407とT-705のローカル部分（`vault_deposits.rs`・`vault_reconcile.rs`・`vault_funds.rs`・`vault_upgrade.rs`）。T-212は同一`client_request_id`の二重受付拒否まで。
+Executed (Other, evidence table `docs/phase-1/evidence/P1-010.md`): T-201, T-202 through T-204, T-207, T-211, T-212, some parts of T-307, T-407 and T-705 (local parts of `vault_deposits.rs`, `vault_reconcile.rs`, `vault_funds.rs`, `vault_upgrade.rs`). T-212 is up to double rejection of the same `client_request_id`.
 
-## 4. 資金・台帳・出金
+## 4. Funds, ledger, withdrawal
 
-| ID | 脅威・失敗条件 | 対策 | 層 | 期待結果 | 証跡 | Phase |
+| ID | Threat and failure conditions | Countermeasure | Layer | Expected results | Evidence | Phase |
 |---|---|---|---|---|---|---|
-| T-201 | 入金イベントの重複計上 | 外部安定IDの一意制約 | PocketIC | 2件目を拒否。残高不変 | 試験ログ | 1 |
-| T-202 | 仕訳不均衡（借方≠貸方） | journal単位の検査 | unit | 拒否して書き込まない | 試験ログ | 1 |
-| T-203 | 宛先差替え・別networkの出金intent | intent署名の束縛（金額・宛先・network・nonce・期限） | unit, PocketIC | 拒否（`DestinationNotAllowed`／`NetworkMismatch`） | 試験ログ | 1 |
-| T-204 | 未確定の入金・未実現PnLを出金可能額へ算入 | 勘定分離と与信規則 | unit, PocketIC | `withdrawable`に含まれない | 試験ログ | 1 |
-| T-205 | 送金成功後に応答を喪失し、自動再送で二重払出し | `dispatching`永続化後にのみ送信、`unknown`は自動再送しない | PocketIC | 二重送金なし。`unknown`を保持 | 試験ログ | 1 |
-| T-206 | `unknown`を期限経過で解放し再送 | 時間経過で解放しない | PocketIC | 予約保持。再送なし | 試験ログ | 1 |
-| T-207 | 並行出金で残高を超えて払出す | 予約の原子的確保、口座単位ロック | PocketIC | 合計が残高を超えない | 試験ログ | 1 |
-| T-208 | 回収中の発注で移動中の証拠金を利用可能と数える | 資金移動ロック・世代で調整 | PocketIC | 新規リスク増加を拒否 | 試験ログ | 3 |
-| T-209 | 他人の残高へ損失を付け替える | ユーザー別勘定 | PocketIC | 他ユーザーの残高不変 | 試験ログ | 3 |
-| T-210 | master nonce・outboxの巻戻し後の自動再署名 | 復元時は送信停止から照合 | PocketIC | 自動再署名しない | 試験ログ | 3 |
-| T-211 | 入金の成功表示だけで計上する | 安定イベントIDの検証必須 | PocketIC, testnet | 計上しない | 試験ログ | 1 |
-| T-212 | 二重ingress（同一`client_request_id`の同時送信） | `UNIQUE(user_id, client_request_id)` | PocketIC | 1件のみ受付。敗者は`DuplicateIgnored` | 試験ログ | 2 |
+| T-201 | Duplicate recording of deposit events | Uniqueness constraints on external stable IDs | PocketIC | Rejected the second item. Balance unchanged. | Test log | 1 |
+| T-202 | Imbalance (debit ≠ credit) | examination in journal units | unit | Reject without writing | Test log | 1 |
+| T-203 | Change of recipient address/withdrawal intent to a different network | Intent-signature binding (amount, recipient, network, nonce, expiration date) | unit, PocketIC | Denied (`DestinationNotAllowed` / `NetworkMismatch`) | Test log | 1 |
+| T-204 | Uncertain deposit and unrealized PnL are included in the withdrawable amount. | Account separation and credit rules | unit, PocketIC | Not included in `withdrawable` | Test log | 1 |
+| T-205 | After the transfer is successful, the response is lost, and double payment is automatically resended. | `dispatching` only sends after persistence, `unknown` does not automatically resend | PocketIC | No duplicate transfer. Keep `unknown` | Test log | 1 |
+| T-206 | Release `unknown` after the expiration date and resend | Do not release it over time | PocketIC | Reservation retention. No resend. | Test log | 1 |
+| T-207 | Withdrawal in parallel to pay beyond the balance | Atomic reservation guarantee, account-level lock | PocketIC | The total does not exceed the balance | Test log | 1 |
+| T-208 | Count the orders in recovery that can use the in transit margin. | Adjust with the funds transfer lock/generation | PocketIC | Refuse the increase of new risks | Test log | 3 |
+| T-209 | Transfer losses to other people's balance | Account by user | PocketIC | Other users' balance remains unchanged | Test log | 3 |
+| T-210 | Automatic re-signature after rolling back the master nonce and outbox | When restoring, from sending stop to reconciliation | PocketIC | Do not automatically re-signature | Test log | 3 |
+| T-211 | Only add it to the total when the deposit is successfully displayed. | Verification of stable event ID is mandatory | PocketIC, testnet | Do not credit it | Test log | 1 |
+| T-212 | Double ingress (concurrent transmission of the same `client_request_id`) | `UNIQUE(user_id, client_request_id)` | PocketIC | Only one case is accepted. The loser is `DuplicateIgnored`. | Test log | 2 |
 
-## 5. 権限・署名分離
+## 5. Permission/signature separation
 
-| ID | 脅威・失敗条件 | 対策 | 層 | 期待結果 | 証跡 | Phase |
+| ID | Threat and failure conditions | Countermeasure | Layer | Expected results | Evidence | Phase |
 |---|---|---|---|---|---|---|
-| T-301 | `trading_core`からmaster署名を要求 | `funds_vault`に任意digest署名APIを設けない | レビュー, PocketIC | 該当APIが存在しない | レビュー記録 | 1 |
-| T-302 | `trading_core`から任意出金を要求 | 呼出元・目的・金額・宛先・本人認可・残高の検証 | PocketIC | 拒否 | 試験ログ | 1 |
-| T-303 | master鍵とAgent鍵の取り違え | 鍵の保持主体を分離し、用途を限定 | レビュー, PocketIC | 取り違え経路なし | レビュー記録 | 1 |
-| T-304 | 失効世代のcallbackで状態を書き換える | `worker_epoch`と世代のCAS | PocketIC | 更新0件。結果を破棄 | 試験ログ | 2 |
-| T-305 | 任意Agentアドレスの承認依頼 | 口座・世代・導出公開鍵の照合 | PocketIC | 拒否 | 試験ログ | 2 |
-| T-306 | 運営権限による任意送金・出金先変更 | 該当APIを設けない | レビュー | APIが存在しない | レビュー記録 | 1 |
-| T-307 | ユーザー入力の`caller`値を信用 | ICメッセージのcallerのみで認可 | unit, PocketIC | なりすまし不可 | 試験ログ | 1 |
+| T-301 | Request master-key signing from `trading_core` | Do not set any digest-signing API to `funds_vault` | Review, PocketIC | The corresponding API does not exist | Review records | 1 |
+| T-302 | Request arbitrary withdrawal from `trading_core` | Verification of caller, purpose, amount, recipient, owner authorization, and balance | PocketIC | refusal | Test log | 1 |
+| T-303 | Mistake in taking master key and agent key | Separate the entity that holds the key and limit the usage | Review, PocketIC | No reverse path | Review records | 1 |
+| T-304 | Change the state using the callback of revocation generation | CAS for `worker_epoch` and generation | PocketIC | No updates. Discard the result | Test log | 2 |
+| T-305 | Request for approval of arbitrary Agent address | Account, generation, and public key extraction reconciliation | PocketIC | refusal | Test log | 2 |
+| T-306 | Arbitrary transfer/withdrawal destination change due to operational authority | Do not set up the corresponding API | review | There is no API | Review records | 1 |
+| T-307 | Trust the `caller` value from user input | Authorization only with the caller of IC messages | unit, PocketIC | Cannot impersonate | Test log | 1 |
 
-## 6. 冪等性・注文状態
+## 6. idempotency and order state
 
-| ID | 脅威・失敗条件 | 対策 | 層 | 期待結果 | 証跡 | Phase |
+| ID | Threat and failure conditions | Countermeasure | Layer | Expected results | Evidence | Phase |
 |---|---|---|---|---|---|---|
-| T-401 | 同一`request_id`・異なる本文 | 本文fingerprint比較 | unit, PocketIC | 拒否（`IdempotencyConflict`） | 試験ログ | 2 |
-| T-402 | 同一`request_id`・同一本文の再送 | 受理済み結果を返す | PocketIC | 二重注文なし、同一応答 | 試験ログ | 2 |
-| T-403 | `dispatching`以降の自動再注文 | 自動再送を禁止 | PocketIC | 新cloid・新nonceが発行されない | 試験ログ | 2 |
-| T-404 | HTTP成功内の注文拒否を成功として扱う | 応答内statusを注文ごとに分類 | PocketIC | inner errorが`rejected`になり予約を解放 | `core_pipeline.rs` | 2 |
-| T-405 | 部分約定後の取消を`cancelled`と表示 | `cancel_requested`と累積約定量の分離 | unit, PocketIC | `partially_filled`を維持 | 試験ログ | 2 |
-| T-406 | `orderStatus`不在を未実行と断定 | 保持期間・可視化遅延を考慮し`unknown`維持 | PocketIC | `rejected`にしない | 試験ログ | 2 |
-| T-407 | `dispatching`中のupgrade | 照合workerで再開 | PocketIC | `unknown`から照合できる | 試験ログ | 2 |
-| T-408 | 署名中のkill-switch・取消 | 未送信actionのepoch無効化 | PocketIC | `aborted`。送信済みはcancel action | 試験ログ | 2 |
-| T-409 | 送信ボタン連打 | 冪等性キー＋ローカルpending表示 | Playwright | 二重注文なし | 画面記録 | 2 |
-| T-410 | 結果不明時に再発注を促す表示 | 表示規約 | Playwright, レビュー | 再発注導線を出さない | 画面記録 | 2 |
+| T-401 | Same `request_id` and different content | Text fingerprint comparison | unit, PocketIC | Reject (`IdempotencyConflict`) | Test log | 2 |
+| T-402 | Resend with the same `request_id` and the same text | Return the processed result | PocketIC | No double orders, same response | Test log | 2 |
+| T-403 | Automatic re-order after `dispatching` | Ban automatic resend | PocketIC | New cloid and new nonce will not be issued. | Test log | 2 |
+| T-404 | Treat order refusal within HTTP success as a success | Classify the status within the response by order | PocketIC | The inner error becomes `rejected` and the reservation is released. | `core_pipeline.rs` | 2 |
+| T-405 | Display cancellation after partial fill as `cancelled` | Separation of `cancel_requested` and cumulative fill amount | unit, PocketIC | Maintain `partially_filled` | Test log | 2 |
+| T-406 | `orderStatus` not present is determined to be not executed | Maintain `unknown` considering the retention period and visualization delay | PocketIC | Don't leave it as `rejected` | Test log | 2 |
+| T-407 | upgrade in `dispatching` | Restart with reconciliation worker | PocketIC | Can be reconciled from `unknown` | Test log | 2 |
+| T-408 | kill-switch and cancellation in the signature | Invalidation of the epoch of unsubmitted action | PocketIC | `aborted`. Sent is cancel action | Test log | 2 |
+| T-409 | Pressing the send button repeatedly | idempotency key + local pending display | Playwright | No double orders | Screen recording | 2 |
+| T-410 | Display that encourages re-ordering when the unknown outcome is detected. | Display terms and conditions | Playwright, review | Do not offer controls encouraging resubmission | Screen recording | 2 |
 
-## 7. guard・変更権限
+## 7. guard/change rights
 
-| ID | 脅威・失敗条件 | 対策 | 層 | 期待結果 | 証跡 | Phase |
+| ID | Threat and failure conditions | Countermeasure | Layer | Expected results | Evidence | Phase |
 |---|---|---|---|---|---|---|
-| T-501 | 非SNS principalからの予約 | caller検証 | PocketIC | 拒否 | 試験ログ | 1 |
-| T-502 | 7日未満での実行 | `executable_at`検査 | PocketIC | 拒否（`UpgradeTooEarly`） | 試験ログ | 1 |
-| T-503 | 予約WASM hashの差替え | `wasm_hash`照合 | PocketIC | 拒否（`UpgradeContentMismatch`） | 試験ログ | 1 |
-| T-504 | 引数hashの差替え | `arg_hash`照合 | PocketIC | 拒否 | 試験ログ | 1 |
-| T-505 | controller追加・reinstall・stop・deleteによる迂回 | 該当APIを設けない。guard自身のcontrollersを空にする | PocketIC, 手動 | 迂回不可 | 試験ログ | 1, 4 |
-| T-506 | 予約内容変更で猶予を実質短縮 | 変更は取消＋新規予約（新しい7日） | PocketIC | 新しい猶予が開始される | 試験ログ | 1 |
-| T-507 | SNS自体のupgrade後の悪意ある呼出し | guard側の7日猶予を省略しない | PocketIC | 猶予なしの実行を拒否 | 試験ログ | 4 |
-| T-508 | 緊急停止の解除・制限緩和を即時実行 | 解除は記録したSNS経路 | PocketIC, 手動 | 即時緩和不可 | 試験ログ | 4 |
-| T-509 | 公開proposal・公開ログへの機密情報混入 | 公開するのは対象ID・hash・時刻・状態のみ | レビュー, 手動 | 顧客情報が出ない | レビュー記録 | 4 |
+| T-501 | Reservation from non-SNS principal | caller verification | PocketIC | refusal | Test log | 1 |
+| T-502 | Execution within less than 7 days | `executable_at` inspection | PocketIC | Reject (`UpgradeTooEarly`) | Test log | 1 |
+| T-503 | Changing the reservation WASM hash | `wasm_hash`reconciliation | PocketIC | Reject (`UpgradeContentMismatch`) | Test log | 1 |
+| T-504 | Replacing the argument hash | `arg_hash`reconciliation | PocketIC | refusal | Test log | 1 |
+| T-505 | Route bypass by adding controller, reinstalling, stopping, and deleting | Do not set up the relevant API. Empty guard's own controllers. | PocketIC, Manual | Cannot be bypassed | Test log | 1, 4 |
+| T-506 | The delay is practically shortened due to changes in reservation details. | Changes are cancellation + new reservation (new 7 days) | PocketIC | A new allowance will be started | Test log | 1 |
+| T-507 | Intentionally misleading calls after the SNS itself is upgraded | Do not omit the 7-day grace period on the guard side | PocketIC | Refuse execution without any delay | Test log | 4 |
+| T-508 | Immediately execute the revocation of emergency suspension and the relaxation of restrictions. | The path on SNS recorded for the cancellation | PocketIC, Manual | Immediate relaxation is not possible | Test log | 4 |
+| T-509 | Confidential information infiltration into public proposals and public logs | Only the target ID, hash, time, and status are published. | Review, manual | Customer information is not available | Review records | 4 |
 
-## 8. データ保護・プライバシー
+## 8. Data protection and privacy
 
-| ID | 脅威・失敗条件 | 対策 | 層 | 期待結果 | 証跡 | Phase |
+| ID | Threat and failure conditions | Countermeasure | Layer | Expected results | Evidence | Phase |
 |---|---|---|---|---|---|---|
-| T-601 | ブラウザからHLへユーザー別取引口座の照会・購読 | 公開市況のみ直結 | Playwright（network記録）, レビュー | 取引口座アドレスの送信なし | network記録 | 2 |
-| T-602 | ユーザー系WSチャネルの購読 | 初期実装しない | レビュー | 該当チャネルなし | レビュー記録 | 2 |
-| T-603 | 平文の注文・署名・対応表のログ出力 | ログ規約 | unit, レビュー | 平文が出ない | 検査記録 | 2 |
-| T-604 | 他人のqueryで残高・注文を取得 | 本人認可をqueryでも要求 | PocketIC | 拒否 | 試験ログ | 1 |
-| T-605 | HPKE鍵更新中の受付・照合 | 鍵ID・期限の検証と旧鍵の扱い | PocketIC | 新規受付は新鍵のみ。照合データを期限だけで破棄しない | 試験ログ | 1 |
-| T-606 | 公開市況WSから約定を推測して確定表示 | 本人状態はCanister照合値のみ | Playwright, レビュー | 推測で確定しない | 画面記録 | 2 |
-| T-607 | 署名対象・送信payloadのアクセス制御漏れ | 機密データとして制御 | レビュー | 制御外から読めない | レビュー記録 | 2 |
-| T-608 | 配信権限者によるJS改変（guard猶予の対象外） | 依存固定・配信権限分離・CSP・リリースレビュー | 手動, レビュー | 未実施であることを明示 | 運用記録 | 4 |
+| T-601 | Check and subscribe to per-user trading account from the browser to HL | Direct connection only to public market conditions | Playwright (network recording), review | No sending of trading account address | Network record | 2 |
+| T-602 | Subscription to user-oriented WS channels | Do not implement initially | review | No corresponding channel | Review records | 2 |
+| T-603 | Output of log for plain text orders, signatures, and identity-to-account mappings | Log rules | unit, review | No plaintext is exposed | Inspection record | 2 |
+| T-604 | Get balance and orders from other people's queries | Request owner authorization even in queries | PocketIC | refusal | Test log | 1 |
+| T-605 | Reception and reconciliation while updating HPKE key | Verification of key ID and expiration date and handling of old keys | PocketIC | New registrations are only accepted with new keys. Reconciliation data will not be discarded only after the expiration date. | Test log | 1 |
+| T-606 | Confirm with the public market status WS by guessing fill | The actual state is only the canister reconciliation value. | Playwright, review | Cannot be confirmed by inference | Screen recording | 2 |
+| T-607 | Access control failure for signing payload and transmission payload | Controlled as confidential data | review | Cannot be read outside control | Review records | 2 |
+| T-608 | JS modification by the distribution authority (not exempt from guard allowance) | Dependency fixed/distribution permission separation/CSP/release review | Manual, review | Explicitly stating that it is not performed | Operational records | 4 |
 
-## 9. 環境・障害・復旧
+## 9. Environment, failure, recovery
 
-| ID | 脅威・失敗条件 | 対策 | 層 | 期待結果 | 証跡 | Phase |
+| ID | Threat and failure conditions | Countermeasure | Layer | Expected results | Evidence | Phase |
 |---|---|---|---|---|---|---|
-| T-701 | mock tokenが本番設定で通る | `environments.md` E-1 | 手動 | 拒否 | 試験記録 | 1 |
-| T-702 | 署名キュー溢れ | 有界バックオフ、失敗を注文の失敗にしない | PocketIC | 再試行に回る | 試験ログ | 1 |
-| T-703 | HL停止中の新規注文 | cancel-onlyモード、新規リスク増加停止 | PocketIC, testnet | 新規停止、取消は成功 | 試験ログ | 2 |
-| T-704 | cycles不足 | 段階的な受付停止（30日目標/7日通知/3日停止） | PocketIC, 手動 | 新規預入・新規リスク受付を停止 | 試験記録 | 3 |
-| T-705 | 古いDBバックアップからの復元 | 送信停止→照合→解除判断 | PocketIC | 自動再開しない | 試験ログ | 3 |
-| T-706 | Canister upgrade（各状態） | init/post_upgradeで`Db::init`→`migrate`、epoch fencing | PocketIC | 状態が回復し、二重実行しない | 試験ログ | 2 |
-| T-707 | 安定メモリ成長失敗・`ZeroExtentLimitExceeded` | 容量インシデントとして扱う | PocketIC | panicせず回復可能エラー | 試験ログ | 3 |
-| T-708 | データ鮮度超過（10秒超） | 新規リスク増加を停止し理由を表示 | unit, Playwright | 受付拒否。時刻を表示 | 試験ログ | 2 |
-| T-709 | 再接続・更新順序の逆転で古い状態を最新として上書き | `revision`・`observed_at`の比較 | Playwright, unit | 上書きしない | 画面記録 | 3 |
-| T-710 | 公開市況WSの切断・スナップショット | 再接続時に`isSnapshot`で置換、ping送信 | Playwright, unit | 差分として誤適用しない | 画面記録 | 2 |
+| T-701 | The mock token passes the real-world settings | `environments.md` E-1 | Manual | refusal | Test records | 1 |
+| T-702 | Signature queue overflow | Bounded backoff, do not make failures part of order failures | PocketIC | Return to retry | Test log | 1 |
+| T-703 | New orders during HL suspension | cancel-only mode, new risk increase stop | PocketIC, testnet | Stop new orders; allow cancellation | Test log | 2 |
+| T-704 | Insufficient cycles | Gradual withdrawal of acceptance (30-day target/7-day notice/3-day withdrawal) | PocketIC, Manual | Stop new deposits and new risk acceptance | Test records | 3 |
+| T-705 | Recovery from an old DB backup | Stop sending → reconciliation → judgment of cancellation | PocketIC | Do not automatically restart | Test log | 3 |
+| T-706 | Canister upgrade (each state) | `Db::init`→`migrate` with `init/post_upgrade`, epoch fencing | PocketIC | The state recovers and does not run in duplicate | Test log | 2 |
+| T-707 | Stable memory growth failure - `ZeroExtentLimitExceeded` | Treat as a capacity incident | PocketIC | Error that can be recovered without panic | Test log | 3 |
+| T-708 | Stale data (more than 10 seconds) | Stop new risk increase and show reason | unit, Playwright | Rejected. Show time | Test log | 2 |
+| T-709 | An older response overwrites newer state after reconnection or updates arrive out of order. | Comparison of `revision` and `observed_at` | Playwright, unit | Do not overwrite | Screen recording | 3 |
+| T-710 | Cut-off and snapshot of public market status WS | Replace with `isSnapshot` when reconnecting, send ping | Playwright, unit | Do not apply incorrectly as a difference | Screen recording | 2 |
 
-## 10. 計測（合否はPhase 1のGo/No-Go）
+## 10. Measurement (whether it passes or fails is Phase 1 Go/No-Go)
 
-| ID | 項目 | 出力 | Phase |
+| ID | Item | output | Phase |
 |---|---|---|---|
-| T-801 | `sign_with_ecdsa` p50/p95、受付→HL受理p50/p95、キュー溢れ率、outcall所要、REST weight帰属、署名/outcall/保存コスト | 計測レポート | 1 |
-| T-802 | Confidential Subnetの利用可否、outcall・upgrade・復旧の動作、未検証の信頼仮定 | 記録（信頼仮定を明示） | 1 |
-| T-803 | A/B0/B1相関評価（`privacy-evaluation.md`） | 評価レポート | 1 |
+| T-801 | `sign_with_ecdsa` p50/p95, reception→HL reception p50/p95, queue overflow rate, outcall required, REST weight attribution, signature/outcall/storage cost | Measurement report | 1 |
+| T-802 | Confidential Subnet availability, outcall, upgrade, recovery operation, unverified trust assumptions | Record (explicitly stating the assumption of reliability) | 1 |
+| T-803 | A/B0/B1 correlation evaluation (`privacy-evaluation.md`) | Evaluation report | 1 |
 
-## 11. 実行済み・未実行の一覧
+## 11. List of executed and unexecuted
 
-実行済み（ローカル、PocketIC。証跡は `docs/phase-1/evidence/`）:
+Executed (local, PocketIC. Evidence is in `docs/phase-1/evidence/`):
 
-- T-101・T-102・T-103・T-104・T-105（`vault_auth.rs`・7件）
-- T-201（重複計上の拒否）・T-211（安定イベントIDの検証）（`vault_deposits.rs`・2件、`vault_reconcile.rs`・1件）
-- T-202〜T-204・T-207・T-307（`vault_funds.rs`・6件）
-- T-205・T-206（`vault_outbox.rs`・9件。T-212の一部を含む）
-- T-407・T-705のローカル部分（`vault_upgrade.rs`・1件）
-- T-501・T-502・T-503・T-504・T-506（`guard_upgrade.rs`・5件）
+- T-101, T-102, T-103, T-104, T-105 (`vault_auth.rs` - 7 items)
+- T-201 (Reject duplicate counting), T-211 (Verify stable event ID) (`vault_deposits.rs` - 2 entries, `vault_reconcile.rs` - 1 entry)
+- T-202~T-204, T-207, T-307 (`vault_funds.rs` 6 items)
+- T-205, T-206 (`vault_outbox.rs` and 9 entries. Includes some of T-212)
+- Local parts of T-407 and T-705 (1 file: `vault_upgrade.rs`)
+- T-501, T-502, T-503, T-504, T-506 (`guard_upgrade.rs` - 5 items)
 
-未実行: 上記以外（T-106〜T-109、T-208〜T-210、T-301〜T-306、T-401〜T-406・T-408〜T-410、T-505、T-507〜T-509、T-601〜T-608、T-701、T-702、T-703〜T-710、T-801〜T-803）。testnet・Playwright・手動・レビュー層の試験は未実施。
+Not performed: other than the above (T-106~T-109, T-208~T-210, T-301~T-306, T-401~T-406, T-408~T-410, T-505, T-507~T-509, T-601~T-608, T-701, T-702, T-703~T-710, T-801~T-803). Testnet, Playwright, Manual, and Review layers are not performed.
 
-- UIデモの成功、ユニットテストの成功、ビルド成功を、本表の試験合格として扱わない。
-- 資金・署名・認証・guardに関わる変更は、正常系の成功だけでは完了としない。
+- Do not treat the success of UI demo, unit test, and build as test success in this table.
+- Changes related to funds, signature, authentication, and guard cannot be completed by successful path alone.

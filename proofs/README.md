@@ -5,6 +5,19 @@ manually from this repository's canister implementation. It does **not** verify
 the compiled Rust/Wasm or the complete application. Lean is used because the
 targets are state transitions, arithmetic invariants, and arbitrary finite traces.
 
+## Composition scope
+
+The source snapshot includes the single-canister role-scoped composition. The SQL
+transition models still cover the same checked arithmetic and atomic state changes.
+`Guard` describes the standalone control-guard module; the unified application does
+not export that upgrade-governance module. `SendPermit` assumes its state remains
+monotonic: restoring the whole unified canister to an older snapshot also restores
+the journal and is outside that proof. Separate SQLite scopes in one canister do
+not provide an independent backup trust boundary. The ledger model includes gross-to-net allocation fee postings. It does not
+prove that venue receipt evidence is complete or that live balances match.
+Spot conversion preparation, receipt matching, and journal encoding compatibility
+are outside these mathematical models and require separate regression tests.
+
 ## Reproduce
 
 With Python 3 and Lean's `elan`/`lake` available, run from the repository root:
@@ -26,7 +39,7 @@ about the Internet Computer. There are no `sorry`, `admit`, custom axioms, or
 native-evaluation proof shortcuts in the models. Boundary examples use kernel
 checked `decide` or ordinary tactics.
 
-Verified locally: **42 named theorems**, all boundary examples, no warnings,
+Verified locally: **44 named theorems**, all boundary examples, no warnings,
 and matching source hashes. To check just the mathematical project independently
 of source drift, run `lake build` from this directory. Source hash equality only
 detects changes; it is not a refinement proof.
@@ -55,6 +68,7 @@ Rust paths are relative to the repository root.
 | `Ledger.accepted_balanced` | An accepted journal's posting amounts sum to zero. | `post_journal` nonempty, nonzero and total checks |
 | `Ledger.every_committed_history_balanced` | Any finite history of accepted, atomically appended journals has zero total. | Successful `post_journal` calls inside `db::tx::update` |
 | `Ledger.posting_templates_balanced`, `positive_templates_accepted` | All ten modeled posting templates balance; amounts from 1 through i64::MAX pass the arithmetic checks, including every intermediate sum. | Ten posting constructors listed below |
+| `Ledger.fee_allocation_balanced`, `fee_allocation_accepted` | Gross transit settles while net receipt becomes trading equity; the postings balance and pass all checked sums for valid fees. | `allocation_confirm_with_fee` |
 | `Ledger.withdrawable_partition` | A successful reserve-minus-allocation-holds calculation gives available + holds = reserve and available ≤ reserve. | `user_balances`; `crates/db/src/repo/funds.rs`: `held_allocation_total` |
 | `Outbox.stale_cas_rejected`, `successful_cas_matches`, `successful_cas_step` | The executable CAS model rejects a mismatched worker epoch; successful matching lifecycle CAS operations correspond to modeled steps. | `crates/db/src/repo/actions.rs`: `mark_signed`, `cas_transition` |
 | `Outbox.step_epoch_monotone`, `trace_epoch_monotone`, `stale_after_reclaim` | Epochs never decrease. After reclaim, the old epoch fails every later modeled lifecycle CAS, regardless of intervening steps. | `claim_action` increments epoch; callbacks retain their original `action.worker_epoch` |
@@ -187,6 +201,8 @@ they are not silently introduced as Lean axioms.
    reservation release and migration correctness are manually reviewed/tested,
    not proved. A lost authorization reply can leave an authorized but unsent
    action; the protocol deliberately does not infer that it is safe to cancel.
+
+Spot receipt matching, conversion settlement and automatic ownership claims are tested in PocketIC, not proved by this suite.
 
 Trading order execution, the full send journal, authentication/HPKE, signature
 correctness, liveness, and real-money safety remain outside this proof suite.

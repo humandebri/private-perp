@@ -1,0 +1,31 @@
+name: Bug report
+description: Report a reproducible problem in local development or testnet.
+body:
+  - type: markdown
+    attributes:
+      value: "For vulnerabilities, follow SECURITY.md and use a private reporting channel. Do not include keys, seeds, or personal data."
+  - type: input
+    id: version
+    attributes:
+      label: Commit and environment
+      description: Include the commit, OS, toolchain versions, and local or testnet mode.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide minimal steps and sanitized configuration.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs and checks
+      description: Include relevant sanitized logs and verification commands.
