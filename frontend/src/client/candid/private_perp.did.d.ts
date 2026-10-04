@@ -852,10 +852,6 @@ export interface _SERVICE {
     [vault_SessionHandle, Uint8Array | number[]],
     vault_Result_1
   >
-  claim_unmatched_deposit: ActorMethod<
-    [Uint8Array | number[], Uint8Array | number[]],
-    vault_Result_1
-  >
   clear_emergency_stop: ActorMethod<[], policy_Result>
   clear_recovery_pause: ActorMethod<[], policy_Result>
   commit_recovery: ActorMethod<[core_RecoveryFenceToken], core_Result>
@@ -915,6 +911,7 @@ export interface _SERVICE {
   policy_configure_rest_budget: ActorMethod<[policy_RestBudgetConfig], policy_Result>
   policy_version: ActorMethod<[], string>
   prepare_recovery: ActorMethod<[core_PrepareRecovery], core_Result_10>
+  queue_recovery_migration: ActorMethod<[], vault_Result_1>
   reconcile_deposits: ActorMethod<[Uint8Array | number[]], vault_Result_20>
   records: ActorMethod<[bigint, number], journal_Result_3>
   recovery_event: ActorMethod<[Uint8Array | number[]], journal_Result_4>
@@ -922,6 +919,7 @@ export interface _SERVICE {
   recovery_head: ActorMethod<[], journal_Result>
   recovery_migration_locked: ActorMethod<[], core_Result_11>
   refresh_market: ActorMethod<[], core_Result>
+  refresh_trading_balance: ActorMethod<[vault_SessionHandle], vault_Result_1>
   resolve_unknown_action: ActorMethod<[Uint8Array | number[], boolean, string], vault_Result_1>
   resolve_unknown_order_preflight: ActorMethod<
     [Uint8Array | number[], core_PreflightResolution],

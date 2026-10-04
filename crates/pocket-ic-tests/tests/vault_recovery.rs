@@ -1102,6 +1102,10 @@ fn lost_recovery_response_keeps_reservation_and_fence_without_resending(
     );
 
     // 履歴照会が失敗してもカーソルは進まず、次のsweepで送金POSTを再送しない。
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &session, false, "fund"),
+        1
+    );
     let (next, calls): (Result<u32, ErrorCode>, _) =
         call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |_call| {
             Err((4, "ledger unavailable".to_string()))
@@ -1123,6 +1127,11 @@ fn lost_recovery_response_keeps_reservation_and_fence_without_resending(
     pic.advance_time(std::time::Duration::from_secs(
         2 * 24 * 60 * 60 + 2 * 60 * 60,
     ));
+    let renewed = open_session(&pic, vault, caller, &secret(162));
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &renewed, false, "fund"),
+        1
+    );
     let (checked, calls): (Result<u32, ErrorCode>, _) =
         call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |call| {
             let request: serde_json::Value =
@@ -1141,7 +1150,7 @@ fn lost_recovery_response_keeps_reservation_and_fence_without_resending(
         .expect("capped page call");
     assert_eq!(checked.expect("capped page sweep"), 0);
     assert_eq!(calls.len(), 1);
-    let renewed = open_session(&pic, vault, caller, &secret(162));
+
     let status: Result<FundStatus, ErrorCode> =
         update(&pic, vault, caller, "get_fund_status", renewed.clone()).expect("status call");
     let status = status.expect("status");
@@ -1157,6 +1166,10 @@ fn lost_recovery_response_keeps_reservation_and_fence_without_resending(
         "delta": {"type": "internalTransfer", "user": format!("0x{}", hex::encode(trading.as_ref())),
             "destination": format!("0x{}", hex::encode(reserve.as_ref())), "usdc": 0.0000001}
     }]);
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &renewed, false, "fund"),
+        1
+    );
     let (unchanged, calls): (Result<u32, ErrorCode>, _) =
         call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |_call| {
             Ok((200, invalid.to_string().into_bytes()))
@@ -1184,6 +1197,15 @@ fn lost_recovery_response_keeps_reservation_and_fence_without_resending(
         second["hash"] = serde_json::json!(format!("0x{}", hex::encode([84u8; 32])));
         events.push(second);
     }
+    // The invalid page stops the task; elapsed time alone must not restart it.
+    let (deferred, calls): (Result<u32, ErrorCode>, _) =
+        call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |_| {
+            panic!("reconciliation requires a new manual permission")
+        })
+        .expect("deferred sweep");
+    assert_eq!(deferred.unwrap(), 0);
+    assert!(calls.is_empty());
+    pic.advance_time(std::time::Duration::from_secs(10));
     let before_history = if ambiguous {
         None
     } else {
@@ -1192,6 +1214,10 @@ fn lost_recovery_response_keeps_reservation_and_fence_without_resending(
                 .expect("snapshot before history resolution"),
         )
     };
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &renewed, false, "fund"),
+        1
+    );
     let (reconciled, calls): (Result<u32, ErrorCode>, _) =
         call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |_call| {
             Ok((200, serde_json::to_vec(&events).expect("events")))
@@ -1210,6 +1236,22 @@ fn lost_recovery_response_keeps_reservation_and_fence_without_resending(
             .expect("recovery events");
     let records = records.expect("private recovery events");
     if ambiguous {
+        pocket_ic_tests::assert_manual_work_blocked(
+            &pic,
+            vault,
+            caller,
+            &renewed,
+            false,
+            ("fund", None),
+            "証跡が曖昧",
+        );
+        let (stopped, calls): (Result<u32, ErrorCode>, _) =
+            call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |_| {
+                panic!("blocked recovery must not perform HTTP")
+            })
+            .expect("stopped sweep");
+        assert_eq!(stopped.unwrap(), 0);
+        assert!(calls.is_empty());
         assert_eq!(
             records
                 .iter()
@@ -1427,6 +1469,10 @@ fn absent_transfer_is_released_only_after_full_history_and_nonce_window() {
         if index % 5 == 0 {
             pic.advance_time(std::time::Duration::from_secs(61));
         }
+        assert_eq!(
+            pocket_ic_tests::resume_manual_work(&pic, vault, caller, &renewed, false, "fund"),
+            1
+        );
         let (swept, calls): (Result<u32, ErrorCode>, _) =
             call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |call| {
                 let request: serde_json::Value =
@@ -1634,6 +1680,10 @@ fn lost_allocation_reply_is_reconciled_without_resending() {
     let destination = q["action"]["destination"].as_str().unwrap();
     let history=serde_json::json!([{"time":nonce,"hash":format!("0x{}",hex::encode([91;32])),"delta":{"type":"internalTransfer","user":reserve,"destination":destination,"usdc":"0.4","fee":"0"}}]).to_string().into_bytes();
     pic.advance_time(std::time::Duration::from_secs(61));
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &session, false, "fund"),
+        1
+    );
     let (result, calls): (Result<u32, ErrorCode>, _) =
         call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |call| {
             assert!(call.url.ends_with("/info"), "no second transfer POST");

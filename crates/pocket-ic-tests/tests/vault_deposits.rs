@@ -6,7 +6,6 @@ use api_types::auth::{
 };
 use api_types::error::ErrorCode;
 use api_types::fund::{FundStatus, FundingInstructions};
-use api_types::journal::{RecoveryPayload, RecoveryRecord};
 use api_types::{Blob, Network};
 use candid::Principal;
 use hl_sign::private_perp;
@@ -318,19 +317,9 @@ fn shared_reserve_attributes_equal_deposits_by_sender_and_excludes_recoveries() 
     assert_eq!(balance(bob, &bob_session), 1_000_000);
 }
 
-/// イベントID（`keccak256("deposit" ‖ tx_hash)`）をテスト側で独立に計算する。
-fn deposit_event_id(tx_hash: &[u8; 32]) -> [u8; 32] {
-    let mut input = b"deposit".to_vec();
-    input.extend_from_slice(tx_hash);
-    hl_sign::keccak256(&input)
-}
-
-/// 未知宛先の入金はsuspenseへ計上し、controllerが後から本人へ振り替えられる。
-///
-/// 以前はイベント行だけを残して台帳へ何も書かなかったため、同じイベントは以後
-/// 重複扱いになり、修復用の `credit_venue_deposit` でも計上できなかった。
+/// 未知宛先の入金は未帰属のまま保持し、controllerも手動で割り当てられない。
 #[test]
-fn an_unmatched_deposit_can_be_claimed_by_the_controller() {
+fn an_unmatched_deposit_cannot_be_assigned_by_the_controller() {
     let pic = pic();
     let controller = principal(180);
     let vault = deploy(
@@ -368,149 +357,21 @@ fn an_unmatched_deposit_can_be_claimed_by_the_controller() {
         "未知宛先の入金を本人へ与信しない（suspenseに留める）"
     );
 
-    let guard: Result<Option<Principal>, ErrorCode> =
-        query(&pic, vault, controller, "get_journal_guard", ()).unwrap();
-    let guard = guard.unwrap().expect("configured recovery guard");
-    let hidden: Result<Option<Principal>, ErrorCode> =
-        query(&pic, vault, caller, "get_journal_guard", ()).unwrap();
-    assert!(matches!(hidden, Err(ErrorCode::Unauthenticated { .. })));
-    let before_claim_snapshot = pic
-        .take_canister_snapshot(vault, Some(controller), None)
-        .expect("snapshot before claim");
-
-    // controllerが本人へ振り替える。
-    let event_id = deposit_event_id(&tx_hash);
-    let missing_user: Result<(), ErrorCode> = update_args(
-        &pic,
-        vault,
-        controller,
-        "claim_unmatched_deposit",
-        (blob(&event_id), blob(&[99u8; 32])),
-    )
-    .expect("call");
-    assert!(missing_user.is_err(), "claim needs a registered user");
-    let claimed: Result<(), ErrorCode> = update_args(
-        &pic,
-        vault,
-        controller,
-        "claim_unmatched_deposit",
-        (blob(&event_id), user_id.clone()),
-    )
-    .expect("call");
-    claimed.expect("claimed");
-    let journal: Result<Option<Principal>, ErrorCode> =
-        query(&pic, vault, controller, "get_send_journal", ()).expect("journal query");
-    let journal = journal.expect("journal configured").expect("journal id");
-    let evidence: Result<Vec<RecoveryRecord>, ErrorCode> =
-        update_args(&pic, journal, vault, "recovery_events", (0u64, 10u32))
-            .expect("recovery events");
-    assert!(
-        evidence
-            .expect("private evidence")
-            .iter()
-            .any(|record| matches!(
-                &record.event.payload,
-                RecoveryPayload::DepositClaim {
-                    amount_micros: 500_000,
-                    ..
-                }
-            ))
-    );
-
-    let status: Result<FundStatus, ErrorCode> =
-        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
-    assert_eq!(
-        status.expect("status").reserve_unallocated,
-        500_000,
-        "振替で本人の未配分残高へ入る"
-    );
-
-    // 同じイベントの二重請求は拒否する。
-    let again: Result<(), ErrorCode> = update_args(
-        &pic,
-        vault,
-        controller,
-        "claim_unmatched_deposit",
-        (blob(&event_id), user_id.clone()),
-    )
-    .expect("call");
-    assert!(again.is_err(), "二重請求は拒否する: {again:?}");
-
-    // 本人へ直接計上済みのイベントは請求できない（suspenseに無い）。
-    let provisioned: Result<Vec<u8>, ErrorCode> = update(
-        &pic,
-        vault,
-        caller,
-        "provision_reserve_account",
-        session.clone(),
-    )
-    .expect("call");
-    let address = provisioned.expect("provisioned");
-    let direct_tx = [22u8; 32];
-    let direct = credit(
-        &pic,
-        vault,
-        controller,
-        &direct_tx,
-        100_000,
-        &blob(&address),
-        Some(blob(&address_from_secret(&secret(230)).unwrap())),
-    );
-    assert!(direct.expect("credited"));
-    let direct_claim: Result<(), ErrorCode> = update_args(
-        &pic,
-        vault,
-        controller,
-        "claim_unmatched_deposit",
-        (blob(&deposit_event_id(&direct_tx)), user_id.clone()),
-    )
-    .expect("call");
-    assert!(
-        direct_claim.is_err(),
-        "本人へ計上済みのイベントは請求できない: {direct_claim:?}"
-    );
-
-    let blocked_tx = [23u8; 32];
-    assert!(
-        credit(
+    let mut input = b"deposit".to_vec();
+    input.extend_from_slice(&tx_hash);
+    let event_id = hl_sign::keccak256(&input);
+    for sender in [controller, caller] {
+        let result: Result<Result<(), ErrorCode>, String> = update_args(
             &pic,
             vault,
-            controller,
-            &blocked_tx,
-            700_000,
-            &unknown_address,
-            None
-        )
-        .expect("second unmatched")
-    );
-    pic.stop_canister(journal, Some(controller))
-        .expect("stop journal");
-    let blocked: Result<(), ErrorCode> = update_args(
-        &pic,
-        vault,
-        controller,
-        "claim_unmatched_deposit",
-        (blob(&deposit_event_id(&blocked_tx)), user_id),
-    )
-    .expect("blocked claim call");
-    assert!(blocked.is_err(), "journal outage must block claim");
+            sender,
+            "claim_unmatched_deposit",
+            (blob(&event_id), user_id.clone()),
+        );
+        let error = result.expect_err("manual assignment endpoint must not exist");
+        assert!(error.contains("has no update method"), "{error}");
+    }
     let status: Result<FundStatus, ErrorCode> =
-        update(&pic, vault, caller, "get_fund_status", session.clone()).expect("call");
-    assert_eq!(status.expect("status").reserve_unallocated, 600_000);
-    pic.start_canister(journal, Some(controller))
-        .expect("restart journal");
-    pic.load_canister_snapshot(vault, Some(controller), before_claim_snapshot.id)
-        .expect("restore vault before claim");
-    let replay: Result<(), ErrorCode> =
-        update(&pic, guard, principal(239), "resume_journal", vault).unwrap();
-    assert!(
-        replay.is_err(),
-        "replayed claim still needs external validation"
-    );
-    let restored: Result<FundStatus, ErrorCode> =
-        update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
-    assert_eq!(restored.unwrap().reserve_unallocated, 500_000);
-    let pending: Result<bool, ErrorCode> =
-        query(&pic, vault, controller, "recovery_replay_pending", ()).unwrap();
-    assert!(pending.unwrap());
+        update(&pic, vault, caller, "get_fund_status", session).expect("call");
+    assert_eq!(status.expect("status").reserve_unallocated, 0);
 }

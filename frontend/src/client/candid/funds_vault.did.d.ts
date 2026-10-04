@@ -414,13 +414,6 @@ export interface _SERVICE {
    * Core-only admission check. Core must separately bind the session principal to its caller.
    */
   check_eligibility_for_core: ActorMethod<[SessionHandle, Uint8Array | number[]], Result_1>
-  /**
-   * 宛先が未解決だった入金を、後から判明した利用者へ振り替える（controllerのみ）。
-   *
-   * `credit` がsuspenseへ計上したイベントだけを対象にする（既に本人へ計上済みの
-   * イベントを再計上しない）。同一イベントの二重請求は仕訳の要求IDで拒否する。
-   */
-  claim_unmatched_deposit: ActorMethod<[Uint8Array | number[], Uint8Array | number[]], Result_1>
   configure_cycles: ActorMethod<[bigint, bigint], Result_1>
   configure_eligibility: ActorMethod<[bigint, Uint8Array | number[], boolean], Result_1>
   eligibility_status: ActorMethod<[SessionHandle], Result_2>
@@ -471,7 +464,7 @@ export interface _SERVICE {
    * 取引所の入金（ledger update）を記録する（controllerのみ）。
    *
    * 正規化したイベントID（`keccak256("deposit" ‖ tx_hash)`）で**二重計上を防ぐ**。
-   * 本番ではreplicatedな`/info`照合がこの経路を呼ぶ。ユーザーへの紐付け（宛先アドレス→
+   * 本番では非replicatedな`/info`照合がこの経路を呼ぶ。ユーザーへの紐付け（宛先アドレス→
    * 利用者）と`deposit_confirmed`の起票は次段階（アドレス写像の実装後）に行う。
    */
   ingest_venue_deposit: ActorMethod<[Uint8Array | number[], bigint, string], Result_13>
@@ -493,13 +486,21 @@ export interface _SERVICE {
    */
   private_call: ActorMethod<[HpkeRequest], Result_19>
   /**
+   * Core-only wakeup for upgrade migration; this does not resume user work.
+   */
+  queue_recovery_migration: ActorMethod<[], Result_1>
+  /**
    * 取引所の入金を取得して取り込む（controllerのみ）。
    *
-   * 取得はreplicated outcall（変換関数で決定論化）、取り込みは検証済みの`deposits::credit`。
+   * 取得はreplicated outcall（変換関数で検証・正規化）、取り込みは検証済みの`deposits::credit`。
    */
   reconcile_deposits: ActorMethod<[Uint8Array | number[]], Result_20>
   recovery_replay_pending: ActorMethod<[], Result_13>
   recovery_stage_status: ActorMethod<[], Result_21>
+  /**
+   * Only the authenticated core flow may request a venue equity observation.
+   */
+  refresh_trading_balance: ActorMethod<[SessionHandle], Result_1>
   /**
    * 不明なactionを「未実行」として解消する（controllerのみ）。
    *

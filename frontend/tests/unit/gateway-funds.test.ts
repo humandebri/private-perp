@@ -20,19 +20,21 @@ function fixture(before: FundStatus, after: FundStatus) {
   const read = vi.fn().mockResolvedValueOnce({ Ok: before }).mockResolvedValue({ Ok: after })
   Reflect.set(gateway, 'active', { session: {}, clients: { vault: { get_fund_status: read } } })
   const seed = vi.spyOn(gateway, 'seedDeposit').mockResolvedValue(undefined)
+  const confirm = vi.spyOn(gateway, 'confirmDeposit').mockResolvedValue(undefined)
   const allocate = vi.spyOn(gateway, 'allocate').mockResolvedValue({
     request_id: new Uint8Array(32),
     fund_action_id: [],
     state: { Accepted: null },
     accepted_at: 1n,
   })
-  return { gateway, seed, allocate }
+  return { gateway, seed, confirm, allocate }
 }
 
 it('deposit completes with a held reserve and never allocates automatically', async () => {
-  const { gateway, seed, allocate } = fixture(balance(0n), balance(100_000_000n))
+  const { gateway, seed, confirm, allocate } = fixture(balance(0n), balance(100_000_000n))
   await gateway.depositToReserve('100', 100_000_000n)
   expect(seed).toHaveBeenCalledExactlyOnceWith('100')
+  expect(confirm).toHaveBeenCalledTimes(1)
   expect(allocate).not.toHaveBeenCalled()
 })
 
@@ -44,4 +46,15 @@ it('later use allocates only the chosen amount without another deposit', async (
   await gateway.allocateFromReserve(20_000_000n)
   expect(seed).not.toHaveBeenCalled()
   expect(allocate).toHaveBeenCalledExactlyOnceWith(20_000_000n)
+})
+
+it('a failed deposit confirmation is not automatically retried', async () => {
+  const { gateway, seed, confirm, allocate } = fixture(balance(0n), balance(0n))
+  confirm.mockRejectedValue(new Error('confirmation unavailable'))
+  await expect(gateway.depositToReserve('100', 100_000_000n)).rejects.toThrow(
+    'confirmation unavailable',
+  )
+  expect(seed).toHaveBeenCalledTimes(1)
+  expect(confirm).toHaveBeenCalledTimes(1)
+  expect(allocate).not.toHaveBeenCalled()
 })

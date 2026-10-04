@@ -1030,7 +1030,6 @@ export const idlFactory = ({ IDL }) => {
       [vault_Result_1],
       [],
     ),
-    claim_unmatched_deposit: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)], [vault_Result_1], []),
     clear_emergency_stop: IDL.Func([], [policy_Result], []),
     clear_recovery_pause: IDL.Func([], [policy_Result], []),
     commit_recovery: IDL.Func([core_RecoveryFenceToken], [core_Result], []),
@@ -1091,6 +1090,7 @@ export const idlFactory = ({ IDL }) => {
     policy_configure_rest_budget: IDL.Func([policy_RestBudgetConfig], [policy_Result], []),
     policy_version: IDL.Func([], [IDL.Text], ['query']),
     prepare_recovery: IDL.Func([core_PrepareRecovery], [core_Result_10], []),
+    queue_recovery_migration: IDL.Func([], [vault_Result_1], []),
     reconcile_deposits: IDL.Func([IDL.Vec(IDL.Nat8)], [vault_Result_20], []),
     records: IDL.Func([IDL.Nat64, IDL.Nat32], [journal_Result_3], []),
     recovery_event: IDL.Func([IDL.Vec(IDL.Nat8)], [journal_Result_4], []),
@@ -1098,6 +1098,7 @@ export const idlFactory = ({ IDL }) => {
     recovery_head: IDL.Func([], [journal_Result], []),
     recovery_migration_locked: IDL.Func([], [core_Result_11], ['query']),
     refresh_market: IDL.Func([], [core_Result], []),
+    refresh_trading_balance: IDL.Func([vault_SessionHandle], [vault_Result_1], []),
     resolve_unknown_action: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Bool, IDL.Text], [vault_Result_1], []),
     resolve_unknown_order_preflight: IDL.Func(
       [IDL.Vec(IDL.Nat8), core_PreflightResolution],

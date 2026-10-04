@@ -5,6 +5,7 @@ use api_types::journal::{RecoveryEvent, RecoveryPayload};
 use api_types::recovery::{PrepareRecovery, RecoveryFenceToken};
 use candid::Principal;
 use db::repo::actions::RecoveryCheck;
+use db::worker_permissions;
 use ic_cdk::call::Call;
 
 const NONCE_ACCEPT_MS: u64 = 2 * 24 * 60 * 60 * 1_000;
@@ -66,9 +67,14 @@ fn matching_hash(
 
 /// 1回のsweepにつき1ページを確認する。履歴の欠落や曖昧さは永続unknownに残す。
 pub async fn reconcile_recoveries(now: u64) -> Result<(), ErrorCode> {
-    let rows = db::tx::query(|connection| db::repo::actions::recovery_checks(connection, 1))
+    let rows = db::tx::query(|connection| db::repo::actions::recovery_checks(connection, 1, now))
         .map_err(map_db)?;
     for row in rows {
+        let Some(attempt) =
+            worker_permissions::begin("fund", &row.action_id, &row.user_id).map_err(map_db)?
+        else {
+            continue;
+        };
         let action_id = row.action_id;
         let epoch = row.worker_epoch;
         if reconcile_one(row, now).await.is_err() {
@@ -76,6 +82,8 @@ pub async fn reconcile_recoveries(now: u64) -> Result<(), ErrorCode> {
                 db::repo::actions::defer_recovery_check(connection, &action_id, epoch, now)
             })
             .map_err(map_db)?;
+        } else if db::tx::query(|c| db::repo::actions::finished(c, &action_id)).map_err(map_db)? {
+            attempt.completed().map_err(map_db)?;
         }
     }
     Ok(())
@@ -223,6 +231,9 @@ async fn reconcile_one(row: RecoveryCheck, now: u64) -> Result<(), ErrorCode> {
         )
     })
     .map_err(map_db)?;
+    if found.is_none() && page_end >= now.saturating_sub(1_000) {
+        defer(&row, now)?;
+    }
     if !ambiguous
         && page_end == early_end
         && let Some(hash) = found
@@ -477,6 +488,11 @@ pub async fn release_finished(now: u64) -> Result<(), ErrorCode> {
         db::tx::query(|connection| db::repo::actions::recovery_release_candidates(connection, 4))
             .map_err(|error| crate::auth::map_db(error, None))?;
     for row in rows {
+        let Some(attempt) =
+            worker_permissions::begin("release", &row.action_id, &row.user_id).map_err(map_db)?
+        else {
+            continue;
+        };
         let token = token(
             row.account_id,
             row.user_id,
@@ -493,6 +509,7 @@ pub async fn release_finished(now: u64) -> Result<(), ErrorCode> {
                 )
             })
             .map_err(|error| crate::auth::map_db(error, None))?;
+            attempt.completed().map_err(map_db)?;
         }
     }
     Ok(())
@@ -503,13 +520,29 @@ pub async fn sync_legacy(now: u64) -> Result<(), ErrorCode> {
     let legacy = db::tx::query(|connection| db::repo::actions::legacy_recoveries(connection, 4))
         .map_err(map_db)?;
     if legacy.is_empty() {
-        if let Ok(core) = core_principal()
-            && let Ok(response) = Call::bounded_wait(core, "finish_recovery_migration")
-                .with_arg(())
-                .await
-        {
-            let _ = response.candid::<Result<(), ErrorCode>>();
-        }
+        let pending = db::tx::query(|c| {
+            c.query_scalar::<i64>(
+                "SELECT pending FROM recovery_migration_pending WHERE id=1",
+                ic_sqlite_vfs::params![],
+            )
+            .map_err(|e| db::error::Error::Sql(e.to_string()))
+        })
+        .map_err(map_db)?
+            != 0;
+        // Unconfigured fresh installs have no migration to acknowledge.
+        let core = match core_principal() {
+            Ok(core) => core,
+            Err(error) if pending => return Err(error),
+            Err(_) => return Ok(()),
+        };
+        let response = Call::bounded_wait(core, "finish_recovery_migration")
+            .with_arg(())
+            .await
+            .map_err(|_| call_error())?;
+        response
+            .candid::<Result<(), ErrorCode>>()
+            .map_err(|_| call_error())??;
+        db::tx::update(|c| db::repo::actions::set_migration_pending(c, false)).map_err(map_db)?;
         return Ok(());
     }
     let core = core_principal()?;
@@ -561,6 +594,7 @@ pub async fn sync_legacy(now: u64) -> Result<(), ErrorCode> {
         response
             .candid::<Result<(), ErrorCode>>()
             .map_err(|_| call_error())??;
+        db::tx::update(|c| db::repo::actions::set_migration_pending(c, false)).map_err(map_db)?;
     }
     Ok(())
 }

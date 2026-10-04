@@ -563,12 +563,6 @@ fn private_recovery_stream_is_idempotent_and_isolated() {
             fee_micros: 0,
             observed_at_ms: 1,
         },
-        RecoveryPayload::DepositClaim {
-            event_id: vec![5; 32].into(),
-            user_id: vec![6; 32].into(),
-            amount_micros: 1,
-            claimed_at_ms: 1,
-        },
         RecoveryPayload::FillObserved {
             tid: 1,
             hl_oid: 777,

@@ -14,6 +14,7 @@ use api_types::operations::BudgetClass;
 use db::repo::actions::FundActionRow;
 use db::repo::funds::fund_request;
 use db::repo::ledger::NewCustodyAccount;
+use db::worker_permissions;
 
 /// 1回のsweepで処理するaction数の上限。
 const MAX_ACTIONS_PER_SWEEP: u32 = 4;
@@ -32,7 +33,11 @@ fn internal(message: String) -> ErrorCode {
 
 // A POST may have reached HL even when journaling its response fails. Keep the
 // reservation and make the action visible to the normal reconciliation path.
-fn mark_post_unknown(action: &FundActionRow, request_id: &[u8], now: u64) -> Result<(), ErrorCode> {
+pub(crate) fn mark_post_unknown(
+    action: &FundActionRow,
+    request_id: &[u8],
+    now: u64,
+) -> Result<(), ErrorCode> {
     db::tx::update(|connection| {
         db::repo::actions::mark_unknown(
             connection,
@@ -134,7 +139,34 @@ pub async fn sweep(now: u64) -> Result<u32, ErrorCode> {
     crate::recovery::sync_legacy(now).await?;
     crate::recovery::release_finished(now).await?;
     crate::recovery::reconcile_recoveries(now).await?;
+    #[cfg(not(feature = "test-venue"))]
+    for (action_id, epoch, address) in
+        db::tx::query(|c| db::repo::actions::allocation_arrivals(c, now))
+            .map_err(|e| map_db(e, None))?
+    {
+        let action = db::tx::query(|c| db::repo::actions::action_row(c, &action_id))
+            .map_err(|e| map_db(e, None))?
+            .ok_or(ErrorCode::PolicyUnavailable)?;
+        let Some(attempt) = worker_permissions::begin("fund", &action_id, &action.user_id)
+            .map_err(|e| map_db(e, None))?
+        else {
+            continue;
+        };
+        // One observation only; an unconfirmed arrival requires the owner to check again.
+        let result = crate::deposits::reconcile_address(&address).await;
+        db::tx::update(|c| db::repo::actions::defer_recovery_check(c, &action_id, epoch, now))
+            .map_err(|e| map_db(e, None))?;
+        if let Err(error) = result {
+            ic_cdk::println!("allocation arrival pending: {error:?}");
+        } else if db::tx::query(|c| db::repo::actions::finished(c, &action_id))
+            .map_err(|e| map_db(e, None))?
+        {
+            attempt.completed().map_err(|e| map_db(e, None))?;
+        }
+    }
+
     let mut processed = 0;
+    let mut first_error = None;
     for _ in 0..MAX_ACTIONS_PER_SWEEP {
         let claimed = db::tx::update(|connection| {
             db::repo::actions::claim_action(connection, now, ACTION_LEASE_MS)
@@ -143,10 +175,35 @@ pub async fn sweep(now: u64) -> Result<u32, ErrorCode> {
         let Some(action) = claimed else {
             break;
         };
-        dispatch(&action, now).await?;
+        let Some(attempt) = worker_permissions::begin("fund", &action.action_id, &action.user_id)
+            .map_err(|e| map_db(e, None))?
+        else {
+            continue;
+        };
+        let result = dispatch(&action, now).await;
+        let state = db::tx::query(|c| db::repo::actions::action_state(c, &action.action_id))
+            .map_err(|e| map_db(e, None))?;
+        if result.is_ok()
+            && matches!(
+                state,
+                Some(
+                    api_types::fund::ActionState::Reconciled
+                        | api_types::fund::ActionState::Aborted
+                )
+            )
+        {
+            attempt.completed().map_err(|e| map_db(e, None))?;
+        }
+        if let Err(error) = result {
+            ic_cdk::println!("fund action stopped: {error:?}");
+            first_error.get_or_insert(error);
+        }
         processed += 1;
     }
     crate::recovery::release_finished(now).await?;
+    if let Some(error) = first_error {
+        return Err(error);
+    }
     Ok(processed)
 }
 
@@ -971,6 +1028,21 @@ pub async fn retry_transfer_results() -> Result<(), ErrorCode> {
     for encoded in pending {
         let event: RecoveryEvent =
             candid::decode_one(&encoded).map_err(|_| ErrorCode::PolicyUnavailable)?;
+        let RecoveryPayload::FundTransferResult { action_id, .. } = &event.payload else {
+            return Err(ErrorCode::PolicyUnavailable);
+        };
+        let id: [u8; 32] = action_id
+            .as_ref()
+            .try_into()
+            .map_err(|_| ErrorCode::PolicyUnavailable)?;
+        let action = db::tx::query(|c| db::repo::actions::action_row(c, &id))
+            .map_err(|e| map_db(e, None))?
+            .ok_or(ErrorCode::PolicyUnavailable)?;
+        let Some(attempt) = worker_permissions::begin("result", &id, &action.user_id)
+            .map_err(|e| map_db(e, None))?
+        else {
+            continue;
+        };
         let ack = match journal_client::append_recovery_event("vault", event.clone()).await {
             Ok(ack) => ack,
             Err(ErrorCode::JournalWriterBusy) => return Ok(()),
@@ -988,6 +1060,7 @@ pub async fn retry_transfer_results() -> Result<(), ErrorCode> {
             journal_client::lock()?;
             return Err(map_db(error, None));
         }
+        attempt.completed().map_err(|e| map_db(e, None))?;
     }
     Ok(())
 }

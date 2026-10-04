@@ -88,3 +88,7 @@ history review, and release preparation.
 ## License
 
 [MIT](LICENSE). Third-party dependencies retain their own licenses.
+
+## Manual recovery and market admission
+
+Failed backend work stays stopped until its owner grants a single retry or result check. Unknown sends are never retransmitted. Healthy position monitoring continues with on-demand workers; deposit and trading observations have explicit refresh controls. BTC/ETH admission validates metadata, volume, spread, depth, and timestamp bounds through replicated reads. See [manual recovery](docs/phase-3/manual-retry-plan.md) and [market admission](docs/phase-3/market-consensus.md).

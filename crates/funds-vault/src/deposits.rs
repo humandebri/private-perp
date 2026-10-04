@@ -1,10 +1,9 @@
-//! 取引所の入金の取得（replicatedな`/info`）と取り込み。
+//! 取引所の入金の取得（非replicatedな`/info`）と取り込み。
 //!
-//! 取得はreplicated outcall＋変換関数で行い、取り込みは正規化した
+//! 取得はHTTP v2の非replicated outcall＋変換関数で行い、取り込みは正規化した
 //! イベントIDで二重計上を防ぐ。共通保管口座への入金はHLの送金元と認証EOAを
 //! 照合して本人へ計上する。送金元の証跡がない入金は未帰属勘定に保持する。
 
-use crate::clock;
 use api_types::error::ErrorCode;
 use api_types::journal::{RecoveryEvent, RecoveryPayload};
 use api_types::operations::BudgetClass;
@@ -69,7 +68,7 @@ fn transform_info(
     }
 }
 
-/// 入金（non-funding ledger updates）をreplicated outcallで取得する。
+/// 入金（non-funding ledger updates）を非replicated outcallで取得する。
 pub async fn fetch_ledger_updates_range(
     user: &str,
     start_time: u64,
@@ -293,83 +292,7 @@ pub async fn credit_journaled(
     }
 }
 
-/// 現在時刻（ミリ秒）。
-pub fn now_ms() -> u64 {
-    clock::now_ms()
-}
-
-/// 有界な定期照合。カーソルの位置から `limit` 件のcustody口座を確認して計上する。
-///
-/// 先頭N件固定では3人目以降が永久に対象外になるため、`(created_at, master_address)` の
-/// キーセットで巡回し、末尾まで到達したら次回は先頭から始める。1件の取得失敗や
-/// 解釈できないイベントで巡回全体を止めない（次のheartbeatで再試行される）。
-/// reserveへの入金とtradingへのallocation着金を巡回して取り込む
-/// （自動sweep専用。試験は`reconcile_deposits`を使う）。
-#[cfg(not(feature = "test-venue"))]
-pub async fn reconcile_all(limit: u32) -> Result<u32, ErrorCode> {
-    let internal = |error: DbError| ErrorCode::Internal {
-        code: format!("{error:?}"),
-    };
-    let cursor = db::tx::query(db::repo::ledger::reconcile_cursor).map_err(internal)?;
-    let addresses = db::tx::query(|connection| {
-        db::repo::ledger::custody_addresses_after(connection, limit, cursor)
-    })
-    .map_err(internal)?;
-
-    let mut credited = 0;
-    let mut last = None;
-    for (address, created_at) in addresses {
-        last = Some((created_at, address));
-        match reconcile_address(&address).await {
-            Ok(count) => {
-                credited += count;
-                if let Some(owner) =
-                    db::tx::query(|c| db::repo::ledger::custody_account_by_address(c, &address))
-                        .map_err(internal)?
-                    && owner.kind == "trading"
-                    && let Some(user) = owner.user_id
-                {
-                    // Pending transfers intentionally defer observations; keep rotating accounts.
-                    let _ = crate::balance::refresh(&user).await;
-                }
-            }
-            Err(error) => {
-                ic_cdk::println!("deposit page reconciliation failed: {error:?}");
-                // Continue rotating addresses; this address retains its page cursor.
-                db::tx::update(|connection| {
-                    db::repo::events::insert_audit(
-                        connection,
-                        "system",
-                        "reconcile_fetch_failed",
-                        None,
-                        Some("deposit_page_incomplete"),
-                        now_ms(),
-                    )
-                })
-                .map_err(internal)?;
-            }
-        }
-    }
-
-    let now = now_ms();
-    match last {
-        Some((created_at, address)) => {
-            db::tx::update(|connection| {
-                db::repo::ledger::set_reconcile_cursor(connection, created_at, &address, now)
-            })
-            .map_err(internal)?;
-        }
-        None => {
-            // 末尾まで到達した（または対象が無い）。次回は先頭から巡回する。
-            db::tx::update(|connection| db::repo::ledger::reset_reconcile_cursor(connection, now))
-                .map_err(internal)?;
-        }
-    }
-    Ok(credited)
-}
-
-/// Fetch one bounded page per address/turn. The inclusive boundary is intentional:
-/// advancing by one millisecond can drop transfers sharing the last timestamp.
+/// Fetch one bounded page on explicit deposit confirmation. Persist the cursor.
 pub async fn reconcile_address(address: &[u8; 20]) -> Result<u32, ErrorCode> {
     let internal = |error: DbError| ErrorCode::Internal {
         code: format!("{error:?}"),

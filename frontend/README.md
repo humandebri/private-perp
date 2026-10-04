@@ -2,7 +2,7 @@
 
 A TanStack Start and React development UI connecting to a local ICP replica and
 Hyperliquid mock. It includes public market data, positions, stop-loss/take-profit,
-closing and cancelling orders, and a minimal fallback client.
+closing and cancelling orders, and owner-controlled recovery of stopped work.
 
 The [public HL testnet UI](https://private-perp-ui-testnet.hude.workers.dev) connects
 to the unified IC canister `xis3j-paaaa-aaaai-axumq-cai`. Signed login and encrypted
@@ -101,9 +101,7 @@ Mainnet fund acceptance is outside the current scope.
   and SL/TP are shown. On mobile the chart comes first and a fixed Trade button
   opens the same order form. Deposits, allocations, and orders require explicit
   user actions.
-- `/fallback` supports authentication, cancellation, and withdrawal to the user's
-  EOA without depending on the main trading view or market connection. It cannot
-  bypass a stopped canister.
+
 - Personal data is not passed to SSR/server functions. Keys and sessions are not
   stored in localStorage, sessionStorage, or cookies.
 - Unknown outcomes remain visible and are not retried automatically. Stale
@@ -120,3 +118,7 @@ Mainnet fund acceptance is outside the current scope.
   reloading is not a reconciliation mechanism.
 - Mock seed operations are labeled `LOCAL MOCK` in both the UI and responses.
   They are test tools rather than normal user or production API features.
+
+## Explicit refresh and recovery
+
+Use **Confirm deposit** to reconcile one shared-reserve history page and **Refresh trading information** to request fresh account and market observations. Ordinary display polling does not resume failed work. The **Stopped work and manual checks** panel lists owner-specific stopped operations and grants one retry or observation, using the displayed generation. Unknown sends are checked without retransmission. See the [manual recovery contract](../docs/phase-3/manual-retry-plan.md). The minimal fallback route and administrator assignment of unmatched deposits have been removed. Historical journal decoding and evidence-bound Spot ownership claims remain supported.

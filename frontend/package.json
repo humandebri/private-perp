@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.54.11",
-    "@mizchi/vlmkit": "0.22.0",
+    "@mizchi/vlmkit": "0.23.2",
     "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "4.3.3",
     "@types/node": "26.6.1",

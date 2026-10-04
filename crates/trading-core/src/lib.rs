@@ -43,6 +43,28 @@ const MAX_PENDING_ORDERS: u64 = 50;
 /// 決済（反対売買のIOC指値）で価格を導出するときのスリッページ許容幅（bps）。
 const DEFAULT_SLIPPAGE_BPS: u32 = 50;
 
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
+fn migrate_recovery(
+    request: api_types::recovery::PrepareRecovery,
+) -> Result<api_types::recovery::RecoveryFenceToken, ErrorCode> {
+    recovery::migrate(request)
+}
+
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
+fn finish_recovery_migration() -> Result<(), ErrorCode> {
+    recovery::finish_migration()
+}
+
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
+fn begin_recovery_migration() -> Result<(), ErrorCode> {
+    recovery::begin_migration()
+}
+
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
+fn recovery_migration_locked() -> Result<bool, ErrorCode> {
+    db::tx::query(db::repo::recovery_fences::migration_locked).map_err(map_db)
+}
+
 /// HPKE封筒の用途分離ラベル（vaultと同じ封筒実装を使う）。
 const ENVELOPE_INFO: &[u8] = b"private-perp/envelope/v1";
 
@@ -209,28 +231,6 @@ fn abort_recovery(token: api_types::recovery::RecoveryFenceToken) -> Result<(), 
 #[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn finish_recovery(token: api_types::recovery::RecoveryFenceToken) -> Result<(), ErrorCode> {
     recovery::finish(token)
-}
-
-#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
-fn migrate_recovery(
-    request: api_types::recovery::PrepareRecovery,
-) -> Result<api_types::recovery::RecoveryFenceToken, ErrorCode> {
-    recovery::migrate(request)
-}
-
-#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
-fn finish_recovery_migration() -> Result<(), ErrorCode> {
-    recovery::finish_migration()
-}
-
-#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
-fn begin_recovery_migration() -> Result<(), ErrorCode> {
-    recovery::begin_migration()
-}
-
-#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
-fn recovery_migration_locked() -> Result<bool, ErrorCode> {
-    db::tx::query(db::repo::recovery_fences::migration_locked).map_err(map_db)
 }
 
 /// HPKEの鍵世代を更新する（controllerのみ）。
@@ -677,6 +677,10 @@ async fn submit_order(
     args: api_types::order::SubmitOrderArgs,
 ) -> Result<api_types::order::SubmitOrderResult, ErrorCode> {
     let user_id = authorize(&session).await?;
+    #[cfg(not(feature = "test-venue"))]
+    if !args.reduce_only {
+        refresh_trading(&session).await?;
+    }
     submit_inner(&session, user_id, args).await
 }
 
@@ -1618,7 +1622,14 @@ async fn private_call(
     let method = envelope.method.clone();
     if !matches!(
         method.as_str(),
-        "submit_order" | "close_position" | "close_all" | "request_agent_generation" | "cancel_all"
+        "submit_order"
+            | "close_position"
+            | "close_all"
+            | "request_agent_generation"
+            | "cancel_all"
+            | "refresh_trading"
+            | "get_manual_work"
+            | "resume_manual_work"
     ) {
         return Err(bad(
             BadRequestCode::MalformedPayload,
@@ -1630,6 +1641,49 @@ async fn private_call(
         open_envelope::<api_types::Blob>(&envelope, &method).await?;
     let malformed = || bad(BadRequestCode::MalformedPayload, "invalid private payload");
     match method.as_str() {
+        "get_manual_work" => {
+            let session = candid::decode_one::<SessionHandle>(&payload).map_err(|_| malformed())?;
+            let result = match authorize(&session).await {
+                Ok(user) => {
+                    db::tx::query(|c| db::worker_permissions::list(c, &user, false)).map_err(map_db)
+                }
+                Err(error) => Err(error),
+            };
+            seal_envelope(&envelope, &method, &request_id, caller, &result).await
+        }
+        "resume_manual_work" => {
+            let (session, kind, id, generation) =
+                candid::decode_args::<(SessionHandle, String, api_types::Blob, u64)>(&payload)
+                    .map_err(|_| malformed())?;
+            let result = match authorize(&session).await {
+                Ok(user) => {
+                    let id: [u8; 32] = id.as_ref().try_into().map_err(|_| malformed())?;
+                    if !matches!(kind.as_str(), "order" | "cancel" | "monitor") {
+                        return Err(malformed());
+                    }
+                    db::worker_permissions::resume(
+                        &kind,
+                        &id,
+                        &user,
+                        generation,
+                        ic_cdk::api::time() / 1_000_000,
+                    )
+                    .map_err(|error| match error {
+                        db::worker_permissions::ResumeError::Database(error) => map_db(error),
+                        db::worker_permissions::ResumeError::Blocked(reason) => {
+                            bad(BadRequestCode::MalformedPayload, reason)
+                        }
+                    })
+                }
+                Err(error) => Err(error),
+            };
+            seal_envelope(&envelope, &method, &request_id, caller, &result).await
+        }
+        "refresh_trading" => {
+            let session = candid::decode_one::<SessionHandle>(&payload).map_err(|_| malformed())?;
+            let result = refresh_trading(&session).await;
+            seal_envelope(&envelope, &method, &request_id, caller, &result).await
+        }
         "submit_order" => {
             let (session, args) = candid::decode_args::<(
                 SessionHandle,
@@ -1738,6 +1792,43 @@ async fn get_account_snapshot(
         &snapshot,
     )
     .await
+}
+
+async fn refresh_trading(session: &SessionHandle) -> Result<(), ErrorCode> {
+    let user_id = authorize(session).await?;
+    let account_id = trading_account(session).await?;
+    cache_trading_address(session, &account_id, &user_id).await?;
+    #[cfg(not(feature = "test-venue"))]
+    {
+        let response = Call::bounded_wait(vault_principal()?, "refresh_trading_balance")
+            .with_arg(session.clone())
+            .await
+            .map_err(|_| ErrorCode::PolicyUnavailable)?;
+        response
+            .candid::<Result<(), ErrorCode>>()
+            .map_err(|_| ErrorCode::PolicyUnavailable)??;
+    }
+    if cycles::require_new().is_ok() {
+        market::poll_if_due(ic_cdk::api::time() / 1_000_000).await?;
+    }
+    let now = ic_cdk::api::time() / 1_000_000;
+    let observed =
+        db::tx::query(|c| db::repo::positions::latest_observed(c, &account_id)).map_err(map_db)?;
+    if observed.is_none_or(|at| now.saturating_sub(at) > STALE_DATA_MS / 2) {
+        let master_address = db::tx::query(|c| db::repo::accounts::master_address(c, &account_id))
+            .map_err(map_db)?
+            .ok_or(ErrorCode::PolicyUnavailable)?;
+        pipeline::reconcile_account(
+            &db::repo::accounts::AccountRow {
+                account_id,
+                user_id,
+                master_address,
+            },
+            now,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn account_snapshot(
@@ -2309,16 +2400,17 @@ async fn sweep() -> Result<api_types::order::SweepOutcome, ErrorCode> {
     pipeline::sweep_once(ic_cdk::api::time() / 1_000_000).await
 }
 
-/// sweepの起動を予約する（本番のみ・5秒間隔）。
-///
-/// **heartbeatではなくグローバルtimer**を使う（heartbeatはメッセージが無くても
-/// 毎ラウンド呼ばれ、アイドル時もコストが乗る）。timerはアップグレードで失われる
-/// ため`init`と`post_upgrade`の両方で予約する。正しさは永続状態（`queued`／
-/// `dispatching`）と手動`sweep`が担保し、timerの継続には依存しない
-/// （`state-machines.md` 5節）。
+/// Transactions wake the worker; the serial timer exists only while durable
+/// work remains. Keeping the timer until completion also recovers callback traps.
 #[cfg(not(feature = "test-venue"))]
 fn schedule_sweep() {
     if SWEEP_TIMER.with(|timer| timer.borrow().is_some()) {
+        return;
+    }
+    // Status sampling and session/envelope writes must not wake an idle worker.
+    // This callback runs after the transaction releases its connection, so the
+    // committed work predicate is safe to read. On storage errors keep retrying.
+    if !db::tx::query(db::repo::accounts::has_monitor_work).unwrap_or(true) {
         return;
     }
     let timer_id = ic_cdk_timers::set_timer_interval_serial(
@@ -2327,10 +2419,12 @@ fn schedule_sweep() {
             db::tx::with_optional_scope_future(
                 cfg!(feature = "embedded").then_some(db::DbScope::Core),
                 async {
-                    // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
-                    let now = ic_cdk::api::time() / 1_000_000;
-                    if let Err(error) = pipeline::sweep_once(now).await {
-                        ic_cdk::println!("trading sweep failed: {error:?}");
+                    if !stop_idle_worker() {
+                        let now = ic_cdk::api::time() / 1_000_000;
+                        if let Err(error) = pipeline::sweep_once(now).await {
+                            ic_cdk::println!("trading-core sweep failed: {error:?}");
+                        }
+                        stop_idle_worker();
                     }
                 },
             )
@@ -2338,6 +2432,41 @@ fn schedule_sweep() {
         },
     );
     SWEEP_TIMER.with(|timer| *timer.borrow_mut() = Some(timer_id));
+}
+
+#[cfg(not(feature = "test-venue"))]
+fn stop_idle_worker() -> bool {
+    // A storage failure must never silently abandon pending work.
+    if db::tx::query(db::repo::accounts::has_monitor_work).unwrap_or(true) {
+        return false;
+    }
+    // CDK 1.0 serial callbacks restore their slot after returning. Clearing that
+    // slot inside the callback traps, so cancel in a separate message and
+    // recheck durable work to avoid losing a concurrent request's wake-up.
+    if SWEEP_TIMER.with(|timer| timer.borrow().is_some()) {
+        ic_cdk_timers::set_timer(core::time::Duration::ZERO, async {
+            db::tx::with_optional_scope_future(
+                cfg!(feature = "embedded").then_some(db::DbScope::Core),
+                async {
+                    if !db::tx::query(db::repo::accounts::has_monitor_work).unwrap_or(true)
+                        && let Some(timer) = SWEEP_TIMER.with(|timer| timer.borrow_mut().take())
+                    {
+                        ic_cdk_timers::clear_timer(timer);
+                    }
+                },
+            )
+            .await;
+        });
+    }
+    true
+}
+
+#[cfg(not(feature = "test-venue"))]
+fn init_worker() {
+    db::tx::on_update(schedule_sweep);
+    if !stop_idle_worker() {
+        schedule_sweep();
+    }
 }
 
 /// テスト専用：`/info`の`userFills`相当を取り込む（`test-venue`のみ）。
@@ -2401,7 +2530,7 @@ fn init_db() {
 fn init() {
     init_db();
     #[cfg(not(feature = "test-venue"))]
-    schedule_sweep();
+    init_worker();
 }
 
 #[cfg_attr(not(feature = "embedded"), ic_cdk::post_upgrade)]
@@ -2415,9 +2544,24 @@ fn post_upgrade() {
     {
         ic_cdk::trap(format!("recovery migration lock failed: {error}"));
     }
+    #[cfg(not(feature = "test-venue"))]
+    ic_cdk_timers::set_timer(core::time::Duration::ZERO, async {
+        db::tx::with_optional_scope_future(
+            cfg!(feature = "embedded").then_some(db::DbScope::Core),
+            async {
+                if let Ok(vault) = vault_principal() {
+                    // Existing vaults may not expose this wakeup; they retain their periodic worker.
+                    let _ = Call::bounded_wait(vault, "queue_recovery_migration")
+                        .with_arg(())
+                        .await;
+                }
+            },
+        )
+        .await;
+    });
     // グローバルtimerはアップグレードで失われるため予約し直す。
     #[cfg(not(feature = "test-venue"))]
-    schedule_sweep();
+    init_worker();
 }
 
 #[cfg(feature = "embedded")]

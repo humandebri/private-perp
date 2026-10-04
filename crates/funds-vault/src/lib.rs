@@ -42,8 +42,6 @@ use candid::Principal;
 const MEMORY_ID: u8 = db::memory_id::FUNDS_VAULT_MAIN;
 
 thread_local! {
-    /// 直近の入金照合時刻（timerの起動間隔より長い周期で回すためのゲート）。
-    static LAST_DEPOSIT_RECONCILE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SWEEP_TIMER: std::cell::RefCell<Option<ic_cdk_timers::TimerId>> = const {
         std::cell::RefCell::new(None)
     };
@@ -102,7 +100,7 @@ async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
 /// 取引所の入金（ledger update）を記録する（controllerのみ）。
 ///
 /// 正規化したイベントID（`keccak256("deposit" ‖ tx_hash)`）で**二重計上を防ぐ**。
-/// 本番ではreplicatedな`/info`照合がこの経路を呼ぶ。ユーザーへの紐付け（宛先アドレス→
+/// 本番では非replicatedな`/info`照合がこの経路を呼ぶ。ユーザーへの紐付け（宛先アドレス→
 /// 利用者）と`deposit_confirmed`の起票は次段階（アドレス写像の実装後）に行う。
 #[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn ingest_venue_deposit(
@@ -458,6 +456,35 @@ fn get_balances(session: SessionHandle) -> Result<(u64, u64), ErrorCode> {
     Ok((status.trading_equity, status.withdrawable))
 }
 
+/// Only the authenticated core flow may request a venue equity observation.
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
+async fn refresh_trading_balance(session: SessionHandle) -> Result<(), ErrorCode> {
+    if get_core_principal() != Some(ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only trading core may refresh balances".into(),
+        });
+    }
+    let status = auth::session_status(&session)?;
+    let user: [u8; 32] = status
+        .user_id
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    balance::refresh(&user).await
+}
+
+/// Core-only wakeup for upgrade migration; this does not resume user work.
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
+fn queue_recovery_migration() -> Result<(), ErrorCode> {
+    if get_core_principal() != Some(ic_cdk::api::msg_caller()) {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "only trading core may queue migration".into(),
+        });
+    }
+    db::tx::update(|c| db::repo::actions::set_migration_pending(c, true))
+        .map_err(|e| auth::map_db(e, None))
+}
+
 /// 本人の取引口座ID（`trading_core` が所有権の確認に使う）。
 #[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_trading_account(session: SessionHandle) -> Result<Option<api_types::Blob>, ErrorCode> {
@@ -740,16 +767,17 @@ fn test_credit_deposit(
     fund::test_credit_deposit(&verified, amount, &event_id)
 }
 
-/// 定期sweepの起動を予約する（本番のみ・5秒間隔）。
-///
-/// **heartbeatではなくグローバルtimer**を使う（heartbeatはメッセージが無くても
-/// 毎ラウンド呼ばれ、アイドル時もコストが乗る）。timerはアップグレードで失われる
-/// ため`init`と`post_upgrade`の両方で予約する。正しさは永続状態（actionの
-/// `queued`／`dispatching`と仕訳）が担保し、timerの継続には依存しない
-/// （`Implementation.md` 6.3、`state-machines.md` 5節）。
+/// Transactions wake the worker; the serial timer exists only while durable
+/// work remains. Keeping the timer until completion also recovers callback traps.
 #[cfg(not(feature = "test-venue"))]
 fn schedule_sweep() {
     if SWEEP_TIMER.with(|timer| timer.borrow().is_some()) {
+        return;
+    }
+    // Status sampling and session/envelope writes must not wake an idle worker.
+    // This callback runs after the transaction releases its connection, so the
+    // committed work predicate is safe to read. On storage errors keep retrying.
+    if !db::tx::query(db::repo::actions::has_unfinished_work).unwrap_or(true) {
         return;
     }
     let timer_id = ic_cdk_timers::set_timer_interval_serial(
@@ -758,30 +786,12 @@ fn schedule_sweep() {
             db::tx::with_optional_scope_future(
                 cfg!(feature = "embedded").then_some(db::DbScope::Vault),
                 async {
-                    let now = clock::now_ms();
-                    // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
-                    if let Err(error) = outbox::sweep(now).await {
-                        ic_cdk::println!("fund outbox sweep failed: {error:?}");
-                    }
-
-                    // ローカル実接続はE2Eの待ち時間を抑えるため5秒、それ以外は60秒。
-                    // いずれも1回あたり2件までとしてoutcall数を制限する。
-                    let deposit_interval =
-                        if environment::network_name().ok().as_deref() == Some("local") {
-                            5_000
-                        } else {
-                            60_000
-                        };
-                    let due_deposits = LAST_DEPOSIT_RECONCILE.with(|cell| {
-                        if now.saturating_sub(cell.get()) < deposit_interval {
-                            false
-                        } else {
-                            cell.set(now);
-                            true
+                    if !stop_idle_worker() {
+                        let now = ic_cdk::api::time() / 1_000_000;
+                        if let Err(error) = outbox::sweep(now).await {
+                            ic_cdk::println!("funds-vault sweep failed: {error:?}");
                         }
-                    });
-                    if due_deposits && let Err(error) = deposits::reconcile_all(2).await {
-                        ic_cdk::println!("deposit reconciliation failed: {error:?}");
+                        stop_idle_worker();
                     }
                 },
             )
@@ -789,6 +799,41 @@ fn schedule_sweep() {
         },
     );
     SWEEP_TIMER.with(|timer| *timer.borrow_mut() = Some(timer_id));
+}
+
+#[cfg(not(feature = "test-venue"))]
+fn stop_idle_worker() -> bool {
+    // A storage failure must never silently abandon pending work.
+    if db::tx::query(db::repo::actions::has_unfinished_work).unwrap_or(true) {
+        return false;
+    }
+    // CDK 1.0 serial callbacks restore their slot after returning. Clearing that
+    // slot inside the callback traps, so cancel in a separate message and
+    // recheck durable work to avoid losing a concurrent request's wake-up.
+    if SWEEP_TIMER.with(|timer| timer.borrow().is_some()) {
+        ic_cdk_timers::set_timer(core::time::Duration::ZERO, async {
+            db::tx::with_optional_scope_future(
+                cfg!(feature = "embedded").then_some(db::DbScope::Vault),
+                async {
+                    if !db::tx::query(db::repo::actions::has_unfinished_work).unwrap_or(true)
+                        && let Some(timer) = SWEEP_TIMER.with(|timer| timer.borrow_mut().take())
+                    {
+                        ic_cdk_timers::clear_timer(timer);
+                    }
+                },
+            )
+            .await;
+        });
+    }
+    true
+}
+
+#[cfg(not(feature = "test-venue"))]
+fn init_worker() {
+    db::tx::on_update(schedule_sweep);
+    if !stop_idle_worker() {
+        schedule_sweep();
+    }
 }
 
 /// テスト専用のsweep（`test-venue` featureでのみ存在）。
@@ -841,7 +886,7 @@ fn credit_venue_deposit(
                 .map_err(|_| ErrorCode::PolicyUnavailable)
         })
         .transpose()?;
-    let now = deposits::now_ms();
+    let now = clock::now_ms();
     let network = environment::network_name()?;
     if asset != "usdc" {
         return Err(ErrorCode::PolicyUnavailable);
@@ -861,108 +906,6 @@ fn credit_venue_deposit(
     .map_err(|error| auth::map_db(error, None))
 }
 
-/// 宛先が未解決だった入金を、後から判明した利用者へ振り替える（controllerのみ）。
-///
-/// `credit` がsuspenseへ計上したイベントだけを対象にする（既に本人へ計上済みの
-/// イベントを再計上しない）。同一イベントの二重請求は仕訳の要求IDで拒否する。
-#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
-async fn claim_unmatched_deposit(
-    event_id: api_types::Blob,
-    user_id: api_types::Blob,
-) -> Result<(), ErrorCode> {
-    let caller = ic_cdk::api::msg_caller();
-    if !ic_cdk::api::is_controller(&caller) {
-        return Err(ErrorCode::Unauthenticated {
-            reason: "only a controller can claim unmatched deposits".to_string(),
-        });
-    }
-    let event_id: [u8; 32] = event_id
-        .as_ref()
-        .try_into()
-        .map_err(|_| ErrorCode::BadRequest {
-            code: api_types::error::BadRequestCode::MalformedPayload,
-            detail: "event_id must be 32 bytes".to_string(),
-        })?;
-    let user_id: [u8; 32] = user_id
-        .as_ref()
-        .try_into()
-        .map_err(|_| ErrorCode::BadRequest {
-            code: api_types::error::BadRequestCode::MalformedPayload,
-            detail: "user_id must be 32 bytes".to_string(),
-        })?;
-    let now = clock::now_ms();
-    let network = environment::network_name()?;
-    let amount = db::tx::query(|connection| {
-        if db::repo::auth::identity_by_user(connection, &user_id)?.is_none() {
-            return Err(db::error::Error::NotFound);
-        }
-        let event = db::repo::events::find_external_event(connection, &network, &event_id)?
-            .ok_or(db::error::Error::NotFound)?;
-        let kind = db::repo::ledger::journal_kind_by_external_event(connection, &event_id)?
-            .ok_or(db::error::Error::Invariant("event was not credited"))?;
-        if kind != "deposit_unmatched"
-            || db::repo::ledger::unmatched_deposit_claimed(connection, &event_id)?
-        {
-            return Err(db::error::Error::Invariant(
-                "event is not an unmatched deposit",
-            ));
-        }
-        Ok(event.amount)
-    })
-    .map_err(|error| auth::map_db(error, None))?;
-    let mut logical_id = b"deposit_claim".to_vec();
-    logical_id.extend_from_slice(&event_id);
-    let recovery_event = api_types::journal::RecoveryEvent {
-        version: 1,
-        logical_id: hl_sign::keccak256(&logical_id).to_vec().into(),
-        payload: api_types::journal::RecoveryPayload::DepositClaim {
-            event_id: event_id.to_vec().into(),
-            user_id: user_id.to_vec().into(),
-            amount_micros: amount,
-            claimed_at_ms: now,
-        },
-    };
-    let ack = journal_client::append_recovery_event("vault", recovery_event.clone()).await?;
-    let result = db::tx::update(|connection| {
-        if db::repo::auth::identity_by_user(connection, &user_id)?.is_none() {
-            return Err(db::error::Error::NotFound);
-        }
-        let event = db::repo::events::find_external_event(connection, &network, &event_id)?
-            .ok_or(db::error::Error::NotFound)?;
-        let kind = db::repo::ledger::journal_kind_by_external_event(connection, &event_id)?
-            .ok_or(db::error::Error::Invariant("event was not credited"))?;
-        if kind != "deposit_unmatched"
-            || event.amount != amount
-            || db::repo::ledger::unmatched_deposit_claimed(connection, &event_id)?
-        {
-            return Err(db::error::Error::Conflict);
-        }
-        journal_client::record_recovery_event(connection, &recovery_event, &ack)?;
-        db::repo::ledger::claim_unmatched_deposit(
-            connection,
-            &user_id,
-            event.amount,
-            now,
-            &event_id,
-        )?;
-        db::repo::events::insert_audit(
-            connection,
-            "controller",
-            "claim_unmatched_deposit",
-            None,
-            Some("matched_user"),
-            now,
-        )
-    });
-    match result {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            journal_client::lock()?;
-            Err(auth::map_db(error, None))
-        }
-    }
-}
-
 /// 入金先（準備口座）を用意する。`get_funding_instructions` の前提を作る。
 async fn provision_reserve_account(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
     let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
@@ -971,9 +914,23 @@ async fn provision_reserve_account(session: SessionHandle) -> Result<api_types::
     Ok(address.to_vec().into())
 }
 
+/// Authenticated, bounded confirmation of the shared reserve. Ownership and
+/// deduplication still come exclusively from the venue's transfer evidence.
+async fn confirm_deposit(session: SessionHandle) -> Result<(), ErrorCode> {
+    let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
+    let instructions = fund::funding_instructions(&verified)?;
+    let address: [u8; 20] = instructions
+        .hl_account_address
+        .as_ref()
+        .try_into()
+        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    deposits::reconcile_address(&address).await?;
+    Ok(())
+}
+
 /// 取引所の入金を取得して取り込む（controllerのみ）。
 ///
-/// 取得はreplicated outcall（変換関数で決定論化）、取り込みは検証済みの`deposits::credit`。
+/// 取得はreplicated outcall（変換関数で検証・正規化）、取り込みは検証済みの`deposits::credit`。
 #[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
@@ -1035,6 +992,9 @@ async fn private_call(
             | "approve_agent_generation"
             | "request_allocation"
             | "request_withdrawal"
+            | "confirm_deposit"
+            | "get_manual_work"
+            | "resume_manual_work"
             | "provision_reserve_account"
             | "prepare_trading_account"
             | "eligibility_signing_claims"
@@ -1054,6 +1014,63 @@ async fn private_call(
         detail: "cannot decode private payload".into(),
     };
     match envelope.method.as_str() {
+        "get_manual_work" => {
+            let session =
+                candid::decode_one::<SessionHandle>(&plaintext).map_err(|_| bad_payload())?;
+            let result = auth::verify_session(&session, caller).and_then(|verified| {
+                db::tx::query(|c| db::worker_permissions::list(c, &verified.user_id, true))
+                    .map_err(|e| auth::map_db(e, None))
+            });
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "resume_manual_work" => {
+            let (session, kind, id, generation) =
+                candid::decode_args::<(SessionHandle, String, api_types::Blob, u64)>(&plaintext)
+                    .map_err(|_| bad_payload())?;
+            let result = (|| {
+                let verified = auth::verify_session(&session, caller)?;
+                let id: [u8; 32] = id.as_ref().try_into().map_err(|_| bad_payload())?;
+                if !matches!(kind.as_str(), "fund" | "result" | "release") {
+                    return Err(bad_payload());
+                }
+                // Only execution permission changes; unknown/dispatching is never queued again.
+                db::worker_permissions::resume(
+                    &kind,
+                    &id,
+                    &verified.user_id,
+                    generation,
+                    clock::now_ms(),
+                )
+                .map_err(|error| match error {
+                    db::worker_permissions::ResumeError::Database(error) => {
+                        auth::map_db(error, None)
+                    }
+                    db::worker_permissions::ResumeError::Blocked(reason) => ErrorCode::BadRequest {
+                        code: BadRequestCode::MalformedPayload,
+                        detail: reason.into(),
+                    },
+                })?;
+                if kind == "fund" {
+                    // A lost callback may leave the existing send in dispatching.
+                    // Forward it to unknown for observation only, never queued.
+                    let action = db::tx::query(|c| db::repo::actions::action_row(c, &id))
+                        .map_err(|e| auth::map_db(e, None))?
+                        .ok_or_else(bad_payload)?;
+                    if action.user_id != verified.user_id {
+                        return Err(bad_payload());
+                    }
+                    if action.dispatch_state == api_types::fund::ActionState::Dispatching {
+                        let request_id = action
+                            .client_request_id
+                            .as_deref()
+                            .ok_or_else(bad_payload)?;
+                        outbox::mark_post_unknown(&action, request_id, clock::now_ms())?;
+                    }
+                }
+                Ok(())
+            })();
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
         "revoke_session" => {
             let session =
                 candid::decode_one::<SessionHandle>(&plaintext).map_err(|_| bad_payload())?;
@@ -1077,6 +1094,12 @@ async fn private_call(
             let request = candid::decode_one::<api_types::fund::WithdrawalRequest>(&plaintext)
                 .map_err(|_| bad_payload())?;
             let result = request_withdrawal(request).await;
+            private_api::seal(&envelope, &request_id, caller, &result).await
+        }
+        "confirm_deposit" => {
+            let session =
+                candid::decode_one::<SessionHandle>(&plaintext).map_err(|_| bad_payload())?;
+            let result = confirm_deposit(session).await;
             private_api::seal(&envelope, &request_id, caller, &result).await
         }
         "provision_reserve_account" => {
@@ -1147,7 +1170,7 @@ fn init_db() {
 fn init() {
     init_db();
     #[cfg(not(feature = "test-venue"))]
-    schedule_sweep();
+    init_worker();
 }
 
 #[cfg_attr(not(feature = "embedded"), ic_cdk::post_upgrade)]
@@ -1156,9 +1179,15 @@ fn post_upgrade() {
     if let Err(error) = journal_client::lock() {
         ic_cdk::trap(format!("send journal lock failed: {error:?}"));
     }
+    let migration_pending = get_core_principal().is_some();
+    if let Err(error) =
+        db::tx::update(|c| db::repo::actions::set_migration_pending(c, migration_pending))
+    {
+        ic_cdk::trap(format!("migration maintenance failed: {error}"));
+    }
     // グローバルtimerはアップグレードで失われるため予約し直す。
     #[cfg(not(feature = "test-venue"))]
-    schedule_sweep();
+    init_worker();
 }
 
 #[cfg(feature = "embedded")]
