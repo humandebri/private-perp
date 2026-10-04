@@ -19,6 +19,7 @@ pub enum TypedKind {
     String,
     Address,
     Uint64,
+    Bool,
     /// 可変長バイト列（ICのPrincipalなど）。
     Bytes,
     /// 32バイト固定値（user_id・nonceなど）。
@@ -31,6 +32,7 @@ impl TypedKind {
             Self::String => "string",
             Self::Address => "address",
             Self::Uint64 => "uint64",
+            Self::Bool => "bool",
             Self::Bytes => "bytes",
             Self::Bytes32 => "bytes32",
         }
@@ -50,6 +52,7 @@ pub enum TypedValue {
     String(String),
     Address([u8; 20]),
     Uint64(u64),
+    Bool(bool),
     Bytes(Vec<u8>),
     Bytes32([u8; 32]),
 }
@@ -85,6 +88,7 @@ pub fn struct_hash(
             (TypedKind::String, TypedValue::String(text)) => keccak256(text.as_bytes()),
             (TypedKind::Address, TypedValue::Address(address)) => address_word(*address),
             (TypedKind::Uint64, TypedValue::Uint64(value)) => u64_word(*value),
+            (TypedKind::Bool, TypedValue::Bool(value)) => u64_word(u64::from(*value)),
             (TypedKind::Bytes, TypedValue::Bytes(bytes)) => keccak256(bytes),
             (TypedKind::Bytes32, TypedValue::Bytes32(bytes)) => *bytes,
             _ => return Err(SignError::TypedDataMismatch),

@@ -10,13 +10,23 @@ use api_types::journal::{RecoveryEvent, RecoveryPayload};
 use api_types::operations::BudgetClass;
 use db::error::Error as DbError;
 use ic_cdk_management_canister::{HttpMethod, HttpRequest, transform_context_from_query};
+#[cfg(feature = "test-venue")]
 use ic_sqlite_vfs::db::UpdateConnection;
 
 /// 変換関数：必要な要素だけを決定論的に残す（順序・付随フィールドの揺れを除く）。
-#[ic_cdk::query]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::query)]
+#[cfg_attr(feature = "embedded", ic_cdk::query(name = "vault_transform_info"))]
 fn transform_info(
     args: ic_cdk_management_canister::TransformArgs,
 ) -> ic_cdk_management_canister::HttpRequestResult {
+    if args.context == b"spot" {
+        let body=serde_json::from_slice::<serde_json::Value>(&args.response.body).ok().map(|v|serde_json::json!({"balances":v["balances"].as_array().map(|balances|balances.iter().filter(|b|b["coin"]=="USDC" && b["token"]==0).map(|b|serde_json::json!({"total":b["total"],"hold":b["hold"]})).collect::<Vec<_>>())}).to_string().into_bytes()).unwrap_or_default();
+        return ic_cdk_management_canister::HttpRequestResult {
+            status: args.response.status,
+            headers: Vec::new(),
+            body,
+        };
+    }
     let canonical = serde_json::from_slice::<serde_json::Value>(&args.response.body)
         .ok()
         .and_then(|value| value.as_array().cloned())
@@ -37,6 +47,12 @@ fn transform_info(
                             "user": entry.get("delta").and_then(|delta| delta.get("user")).cloned().unwrap_or(serde_json::Value::Null),
                             "destination": entry.get("delta").and_then(|delta| delta.get("destination")).cloned().unwrap_or(serde_json::Value::Null),
                             "usdc": entry.get("delta").and_then(|delta| delta.get("usdc")).cloned().unwrap_or(serde_json::Value::Null),
+                            "fee": entry.get("delta").and_then(|delta| delta.get("fee")).cloned().unwrap_or(serde_json::Value::Null),
+                            "amount": entry["delta"]["amount"],
+                            "token": entry["delta"]["token"],
+                            "sourceDex": entry["delta"]["sourceDex"],
+                            "destinationDex": entry["delta"]["destinationDex"],
+                            "toPerp": entry["delta"]["toPerp"],
                         },
                     })
                 })
@@ -81,7 +97,11 @@ pub async fn fetch_ledger_updates_range(
         .with_body(body.into_bytes())
         .with_max_response_bytes(512 * 1024)
         .with_transform(transform_context_from_query(
-            "transform_info".to_string(),
+            if cfg!(feature = "embedded") {
+                "vault_transform_info".to_string()
+            } else {
+                "transform_info".to_string()
+            },
             Vec::new(),
         ))
         .send()
@@ -168,8 +188,9 @@ pub fn transfer_sender(entry: &serde_json::Value) -> Option<[u8; 20]> {
 ///
 /// 宛先が未知の入金も資金は既に動いているため、suspense勘定へ計上して記録に残す
 /// （イベント行を先に入れるため、後から `credit` を呼び直して計上することはできない。
-/// 写像が判明した時点で controller が `claim_unmatched_deposit` で本人へ振り替える）。
+/// 送金元がwallet署名で認証した時点で本人の残高へ振り替える）。
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "test-venue")]
 pub fn credit(
     connection: &mut UpdateConnection<'_>,
     network: &str,
@@ -195,6 +216,7 @@ pub async fn credit_journaled(
     network: &str,
     tx_hash: &[u8],
     amount: u64,
+    fee: u64,
     address: &[u8; 20],
     at: u64,
     sender: Option<[u8; 20]>,
@@ -202,7 +224,12 @@ pub async fn credit_journaled(
     let internal = |error: DbError| ErrorCode::Internal {
         code: format!("{error:?}"),
     };
-    if tx_hash.is_empty() || tx_hash.len() > 64 || amount == 0 || amount > i64::MAX as u64 {
+    if tx_hash.is_empty()
+        || tx_hash.len() > 64
+        || amount == 0
+        || amount > i64::MAX as u64
+        || fee >= amount
+    {
         return Err(ErrorCode::PolicyUnavailable);
     }
     let mut input = b"deposit".to_vec();
@@ -222,12 +249,13 @@ pub async fn credit_journaled(
     let event = RecoveryEvent {
         version: 1,
         logical_id: hl_sign::keccak256(&logical).to_vec().into(),
-        payload: RecoveryPayload::DepositCredit {
+        payload: RecoveryPayload::DepositCreditWithFee {
             sender: sender.map(|address| address.to_vec().into()),
             tx_hash: tx_hash.to_vec().into(),
             network: network.to_string(),
             address: address.to_vec().into(),
             amount_micros: amount,
+            fee_micros: fee,
             observed_at_ms: at,
         },
     };
@@ -240,11 +268,13 @@ pub async fn credit_journaled(
     };
     let result = db::tx::update(|c| {
         journal_client::record_recovery_event(c, &event, &ack)?;
-        if !credit(
+        if !db::repo::deposits::credit_external_deposit_with_fee(
             c,
+            &event_id,
             network,
             tx_hash,
             amount,
+            fee,
             address,
             "usdc",
             at,
@@ -347,6 +377,14 @@ pub async fn reconcile_address(address: &[u8; 20]) -> Result<u32, ErrorCode> {
     let network = crate::environment::network_name()?;
     let start = db::tx::query(|c| db::repo::ledger::deposit_history_start(c, &network, address))
         .map_err(&internal)?;
+    let reserve = db::tx::query(|c| db::repo::ledger::custody_account_by_address(c, address))
+        .map_err(&internal)?
+        .is_some_and(|a| a.kind == "reserve");
+    let start = if reserve {
+        start.min(crate::spot_deposits::history_start(&network, address)?)
+    } else {
+        start
+    };
     let body =
         fetch_ledger_updates_range(&format!("0x{}", hex::encode(address)), start, None).await?;
     let entries: Vec<serde_json::Value> =
@@ -376,12 +414,49 @@ pub async fn reconcile_address(address: &[u8; 20]) -> Result<u32, ErrorCode> {
     }
     let mut credited = 0;
     for entry in entries {
+        if reserve
+            && let Some((sender, amount, spot)) = crate::spot_deposits::receipt(&entry, address)?
+        {
+            if db::tx::query(|c| db::repo::ledger::custody_account_by_address(c, &sender))
+                .map_err(&internal)?
+                .is_some()
+            {
+                // Managed-account recovery has its own settlement, never a new user deposit.
+                continue;
+            }
+            if spot && !crate::spot_deposits::convert(&entry, address, amount).await? {
+                continue;
+            }
+            let tx_hash = entry["hash"]
+                .as_str()
+                .and_then(|h| hex::decode(h.trim_start_matches("0x")).ok())
+                .filter(|h| h.len() == 32)
+                .ok_or(ErrorCode::PolicyUnavailable)?;
+            if credit_journaled(
+                &network,
+                &tx_hash,
+                amount,
+                0,
+                address,
+                entry["time"].as_u64().expect("validated timestamp"),
+                Some(sender),
+            )
+            .await?
+            {
+                credited += 1;
+            }
+            if spot {
+                crate::spot_deposits::settle(&entry)?;
+            }
+            continue;
+        }
         if !creditable_entry(&entry, address).map_err(&internal)? {
             continue;
         }
         let Some(amount) = entry.get("usdc").and_then(deposit_amount_micros) else {
             continue;
         };
+        let fee = incoming_fee_micros(&entry, amount)?;
         let tx_hash = entry
             .get("hash")
             .and_then(|v| v.as_str())
@@ -396,6 +471,7 @@ pub async fn reconcile_address(address: &[u8; 20]) -> Result<u32, ErrorCode> {
             &network,
             &tx_hash,
             amount,
+            fee,
             address,
             at,
             transfer_sender(&entry),
@@ -405,7 +481,56 @@ pub async fn reconcile_address(address: &[u8; 20]) -> Result<u32, ErrorCode> {
             credited += 1;
         }
     }
+    if reserve {
+        crate::spot_deposits::advance(&network, address, last)?;
+    }
     db::tx::update(|c| db::repo::ledger::advance_deposit_history(c, &network, address, last))
         .map_err(internal)?;
     Ok(credited)
+}
+
+/// Missing or malformed transfer fees must not become invented recipient funds.
+fn incoming_fee_micros(entry: &serde_json::Value, gross: u64) -> Result<u64, ErrorCode> {
+    if entry["delta"]["type"] != "internalTransfer" {
+        return Ok(0);
+    }
+    let fee = crate::amount::parse(&entry["delta"]["fee"])
+        .filter(|fee| !fee.negative && fee.micros < gross)
+        .ok_or_else(|| ErrorCode::UpstreamRejected {
+            code: "invalid or missing inbound transfer fee".into(),
+            retryable: false,
+        })?;
+    Ok(fee.micros)
+}
+
+pub(crate) async fn spot_available(address: &[u8; 20]) -> Result<u64, ErrorCode> {
+    let permit = crate::rest_budget::acquire(BudgetClass::Reconcile, 2).await?;
+    if !permit.valid_now() {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    let response=HttpRequest::new(&crate::environment::resolved()?.info_url).with_method(HttpMethod::POST).with_header("Content-Type","application/json")
+        .with_body(serde_json::json!({"type":"spotClearinghouseState","user":format!("0x{}",hex::encode(address))}).to_string().into_bytes()).with_max_response_bytes(64*1024)
+        .with_transform(transform_context_from_query(if cfg!(feature="embedded"){"vault_transform_info".into()}else{"transform_info".into()},b"spot".to_vec())).send().await.map_err(|_|ErrorCode::PolicyUnavailable)?;
+    if response.status.to_string() != "200" {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.body).map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let balances = value["balances"]
+        .as_array()
+        .filter(|a| a.len() <= 1)
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    let Some(balance) = balances.first() else {
+        return Ok(0);
+    };
+    let total = crate::amount::parse(&balance["total"])
+        .filter(|n| !n.negative)
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    let hold = crate::amount::parse(&balance["hold"])
+        .filter(|n| !n.negative)
+        .ok_or(ErrorCode::PolicyUnavailable)?;
+    total
+        .micros
+        .checked_sub(hold.micros)
+        .ok_or(ErrorCode::PolicyUnavailable)
 }

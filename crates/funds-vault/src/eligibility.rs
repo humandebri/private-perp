@@ -28,14 +28,7 @@ pub fn configure(
     issuer_address: api_types::Blob,
     mock_issuer: bool,
 ) -> Result<(), ErrorCode> {
-    let guard = db::tx::query(db::repo::send_journal_client::guard_principal)
-        .map_err(|e| crate::auth::map_db(e, None))?
-        .ok_or(ErrorCode::PolicyUnavailable)?;
-    if ic_cdk::api::msg_caller().as_slice() != guard.as_slice() {
-        return Err(ErrorCode::Unauthenticated {
-            reason: "SNS guard required".into(),
-        });
-    }
+    journal_client::require_management()?;
     let issuer: [u8; 20] = issuer_address
         .as_ref()
         .try_into()

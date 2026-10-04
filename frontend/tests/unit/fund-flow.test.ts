@@ -50,7 +50,7 @@ describe('automatic withdrawal recovery', () => {
   it('does not resend when a submitted recovery stays unresolved', async () => {
     const recover = vi.fn().mockResolvedValue(undefined)
     await expect(prepareWithdrawal(10n, async () => funds(0n), recover, pause)).rejects.toThrow(
-      '確認待ち',
+      'Waiting for transfer confirmation',
     )
     expect(recover).toHaveBeenCalledExactlyOnceWith(10n)
   })
@@ -68,7 +68,7 @@ describe('automatic withdrawal recovery', () => {
       ],
     })
     await expect(prepareWithdrawal(10n, async () => status, recover, pause)).rejects.toThrow(
-      '照合中',
+      'Reconciling',
     )
     expect(recover).not.toHaveBeenCalled()
   })

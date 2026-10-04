@@ -31,12 +31,13 @@ pub async fn acquire(class: BudgetClass, weight: u32) -> Result<Permit, ErrorCod
         next.set(value.wrapping_add(1));
         value
     });
-    let mut entropy = Vec::with_capacity(64);
-    entropy.extend_from_slice(ic_cdk::api::canister_self().as_slice());
-    entropy.extend_from_slice(&ic_cdk::api::time().to_be_bytes());
-    entropy.extend_from_slice(&attempt.to_be_bytes());
-    let mut request_id = hl_sign::keccak256(&entropy);
-    request_id[..8].copy_from_slice(&expires_at.to_be_bytes());
+    let request_id = hl_sign::rest_budget::request_id(
+        hl_sign::rest_budget::Worker::Vault,
+        ic_cdk::api::canister_self().as_slice(),
+        ic_cdk::api::time(),
+        attempt,
+        expires_at,
+    );
     let request = RestBudgetRequest {
         request_id: request_id.to_vec().into(),
         class,

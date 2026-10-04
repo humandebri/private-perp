@@ -101,7 +101,7 @@ export class EnvelopeClient {
 
   /** 応答の封筒（`enc || ciphertext`）を開ける。 */
   async open(aad: Uint8Array, envelope: Uint8Array): Promise<Uint8Array> {
-    if (envelope.length <= 32) throw new Error('封筒が短すぎます')
+    if (envelope.length <= 32) throw new Error('Encrypted envelope is too short')
     const enc = envelope.slice(0, 32)
     const ciphertext = envelope.slice(32)
     const recipient = await suite.createRecipientContext({

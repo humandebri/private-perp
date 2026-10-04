@@ -278,6 +278,7 @@ const ErrorCode = IDL.Variant({
   SessionRevoked: IDL.Null,
   BadRequest: IDL.Record({ code: BadRequestCode, detail: IDL.Text }),
   PolicyUnavailable: IDL.Null,
+  JournalWriterBusy: IDL.Null,
   SessionExpired: IDL.Null,
   InsufficientFunds: IDL.Record({ requested: IDL.Nat64, available: IDL.Nat64 }),
   Unauthenticated: IDL.Record({ reason: IDL.Text }),

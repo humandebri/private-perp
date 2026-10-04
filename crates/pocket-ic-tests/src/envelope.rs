@@ -70,8 +70,27 @@ impl EnvelopeClient {
         method: &str,
         plaintext: &[u8],
     ) -> Result<(HpkeRequest, Vec<u8>), String> {
+        self.prepare_encoded_for_role(pic, canister, caller, method, plaintext, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_encoded_for_role(
+        &self,
+        pic: &PocketIc,
+        canister: Principal,
+        caller: Principal,
+        method: &str,
+        plaintext: &[u8],
+        role: Option<&str>,
+    ) -> Result<(HpkeRequest, Vec<u8>), String> {
+        let key_method = role
+            .map(|r| format!("{r}_get_hpke_public_key"))
+            .unwrap_or_else(|| "get_hpke_public_key".into());
+        let rotate_method = role
+            .map(|r| format!("{r}_rotate_hpke_key"))
+            .unwrap_or_else(|| "rotate_hpke_key".into());
         let public: Result<api_types::Blob, ErrorCode> =
-            crate::query(pic, canister, caller, "get_hpke_public_key", ())?;
+            crate::query(pic, canister, caller, &key_method, ())?;
         let public = match public {
             Ok(public) => public,
             Err(ErrorCode::PolicyUnavailable) => {
@@ -81,7 +100,7 @@ impl EnvelopeClient {
                     .next()
                     .ok_or("missing controller for test key rotation")?;
                 let rotated: Result<api_types::Blob, ErrorCode> =
-                    crate::update(pic, canister, controller, "rotate_hpke_key", ())?;
+                    crate::update(pic, canister, controller, &rotate_method, ())?;
                 rotated.map_err(|e| format!("rotate_hpke_key: {e:?}"))?
             }
             Err(error) => return Err(format!("get_hpke_public_key: {error:?}")),

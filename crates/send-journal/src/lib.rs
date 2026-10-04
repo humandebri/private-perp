@@ -42,7 +42,8 @@ fn valid_event(event: &RecoveryEvent) -> bool {
     }
     let id = |id: &api_types::Blob| id.len() == 32;
     let state = |s: &str| s.len() <= 32 && s.is_ascii();
-    match &event.payload {
+    let payload = event.payload.clone().into_fee_aware();
+    match &payload {
         RecoveryPayload::Baseline { state_digest } => id(state_digest),
         RecoveryPayload::IdentityRegistration {
             user_id,
@@ -183,12 +184,14 @@ fn valid_event(event: &RecoveryEvent) -> bool {
                 && *accepted_at_ms > 0
                 && event.logical_id.as_ref() == expected
         }
-        RecoveryPayload::DepositCredit {
+        RecoveryPayload::DepositCredit { .. } => false,
+        RecoveryPayload::DepositCreditWithFee {
             sender,
             tx_hash,
             network,
             address,
             amount_micros,
+            fee_micros,
             observed_at_ms,
         } => {
             let mut input = b"deposit".to_vec();
@@ -204,6 +207,7 @@ fn valid_event(event: &RecoveryEvent) -> bool {
                 && tx_hash.len() <= 64
                 && matches!(network.as_str(), "local" | "testnet")
                 && address.len() == 20
+                && *fee_micros < *amount_micros
                 && *amount_micros > 0
                 && *amount_micros <= i64::MAX as u64
                 && *observed_at_ms > 0
@@ -480,6 +484,7 @@ fn recovery_record(
             code: "invalid stored recovery payload".into(),
         })?;
     Ok(RecoveryRecord {
+        encoded_payload: Some(row.payload.into()),
         sequence: row.sequence,
         previous_hash: row.previous_hash.to_vec().into(),
         hash: row.hash.to_vec().into(),
@@ -508,18 +513,146 @@ fn journal_record(record: db::repo::send_journal::StoredRecord) -> JournalRecord
 
 fn require_worker() -> Result<Vec<u8>, ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
-    if caller == Principal::anonymous()
-        || !db::tx::query(|c| db::repo::send_journal::authorized(c, caller.as_slice()))
-            .map_err(map_db)?
+    #[cfg(feature = "embedded")]
     {
-        return Err(ErrorCode::Unauthenticated {
-            reason: "registered journal worker required".into(),
-        });
+        let role = ACTIVE_JOURNAL_ROLE.with(|active| active.get());
+        if caller == ic_cdk::api::canister_self()
+            && let Some(role) = role
+        {
+            Ok(role.as_bytes().to_vec())
+        } else {
+            Err(ErrorCode::Unauthenticated {
+                reason: "journal role requires a self-call".into(),
+            })
+        }
     }
-    Ok(caller.as_slice().to_vec())
+    #[cfg(not(feature = "embedded"))]
+    {
+        if caller == Principal::anonymous()
+            || !db::tx::query(|c| db::repo::send_journal::authorized(c, caller.as_slice()))
+                .map_err(map_db)?
+        {
+            return Err(ErrorCode::Unauthenticated {
+                reason: "registered journal worker required".into(),
+            });
+        }
+        Ok(caller.as_slice().to_vec())
+    }
 }
 
+#[cfg(feature = "embedded")]
+thread_local! {
+    static ACTIVE_JOURNAL_ROLE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(feature = "embedded")]
+fn with_journal_role<T>(
+    role: String,
+    f: impl FnOnce() -> Result<T, ErrorCode>,
+) -> Result<T, ErrorCode> {
+    if ic_cdk::api::msg_caller() != ic_cdk::api::canister_self() {
+        return Err(ErrorCode::Unauthenticated {
+            reason: "journal role requires a self-call".into(),
+        });
+    }
+    let role = match role.as_str() {
+        "vault" => "vault",
+        "core" => "core",
+        _ => return Err(invalid_event()),
+    };
+    struct Reset(Option<&'static str>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ACTIVE_JOURNAL_ROLE.with(|active| active.set(self.0));
+        }
+    }
+    let previous = ACTIVE_JOURNAL_ROLE.with(|active| active.replace(Some(role)));
+    let _reset = Reset(previous);
+    f()
+}
+
+#[cfg(feature = "embedded")]
 #[ic_cdk::update]
+fn role_head(role: String) -> Result<JournalHead, ErrorCode> {
+    with_journal_role(role, head)
+}
+
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_records(role: String, after: u64, limit: u32) -> Result<Vec<JournalRecord>, ErrorCode> {
+    with_journal_role(role, || records(after, limit))
+}
+
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_intent_record(
+    role: String,
+    kind: String,
+    request_id: api_types::Blob,
+) -> Result<Option<JournalRecord>, ErrorCode> {
+    with_journal_role(role, || intent_record(kind, request_id))
+}
+
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_append(role: String, intent: SendIntent) -> Result<JournalHead, ErrorCode> {
+    with_journal_role(role, || append(intent))
+}
+
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_append_prepared(role: String, intent: SendIntent) -> Result<JournalHead, ErrorCode> {
+    with_journal_role(role, || append_prepared(intent))
+}
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_authorize_send(role: String, kind: String, request_id: Vec<u8>) -> Result<bool, ErrorCode> {
+    with_journal_role(role, || authorize_send(kind, request_id))
+}
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_cancel_prepared_send(
+    role: String,
+    kind: String,
+    request_id: Vec<u8>,
+) -> Result<bool, ErrorCode> {
+    with_journal_role(role, || cancel_prepared_send(kind, request_id))
+}
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_recovery_head(role: String) -> Result<JournalHead, ErrorCode> {
+    with_journal_role(role, recovery_head)
+}
+
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_recovery_events(
+    role: String,
+    after: u64,
+    limit: u32,
+) -> Result<Vec<RecoveryRecord>, ErrorCode> {
+    with_journal_role(role, || recovery_events(after, limit))
+}
+
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_recovery_event(
+    role: String,
+    logical_id: api_types::Blob,
+) -> Result<Option<RecoveryRecord>, ErrorCode> {
+    with_journal_role(role, || recovery_event(logical_id))
+}
+
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_append_recovery_event(
+    role: String,
+    event: RecoveryEvent,
+) -> Result<JournalHead, ErrorCode> {
+    with_journal_role(role, || append_recovery_event(event))
+}
+
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn register_worker(role: String, worker: Principal) -> Result<(), ErrorCode> {
     if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
         return Err(ErrorCode::Unauthenticated {
@@ -539,7 +672,7 @@ fn register_worker(role: String, worker: Principal) -> Result<(), ErrorCode> {
         .map_err(map_db)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn head() -> Result<JournalHead, ErrorCode> {
     let worker = require_worker()?;
     let (sequence, hash) =
@@ -551,7 +684,7 @@ fn head() -> Result<JournalHead, ErrorCode> {
 }
 
 /// 復元照合用の範囲取得。呼出元自身の記録だけを返す。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn records(after: u64, limit: u32) -> Result<Vec<JournalRecord>, ErrorCode> {
     let worker = require_worker()?;
     if !(1..=100).contains(&limit) {
@@ -566,7 +699,7 @@ fn records(after: u64, limit: u32) -> Result<Vec<JournalRecord>, ErrorCode> {
 }
 
 /// Idempotency lookup for a response lost after the append committed.
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn intent_record(
     kind: String,
     request_id: api_types::Blob,
@@ -575,7 +708,14 @@ fn intent_record(
     let request_id = fixed32(&request_id)?;
     if !matches!(
         kind.as_str(),
-        "allocation" | "withdrawal" | "recovery" | "order" | "cancel" | "leverage" | "agent"
+        "allocation"
+            | "withdrawal"
+            | "recovery"
+            | "order"
+            | "cancel"
+            | "leverage"
+            | "agent"
+            | "spot_conversion"
     ) {
         return Err(ErrorCode::BadRequest {
             code: BadRequestCode::MalformedPayload,
@@ -600,23 +740,23 @@ fn intent_record(
     .map_err(map_db)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn append(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
     append_impl(intent, false)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn append_prepared(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
     if !matches!(
         intent.kind.as_str(),
-        "allocation" | "withdrawal" | "recovery"
+        "allocation" | "withdrawal" | "recovery" | "spot_conversion"
     ) {
         return Err(ErrorCode::PolicyUnavailable);
     }
     append_impl(intent, true)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn authorize_send(kind: String, request_id: Vec<u8>) -> Result<bool, ErrorCode> {
     let worker = require_worker()?;
     let id = fixed32(&request_id)?;
@@ -624,7 +764,7 @@ fn authorize_send(kind: String, request_id: Vec<u8>) -> Result<bool, ErrorCode> 
         .map_err(map_db)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn cancel_prepared_send(kind: String, request_id: Vec<u8>) -> Result<bool, ErrorCode> {
     let worker = require_worker()?;
     let id = fixed32(&request_id)?;
@@ -635,7 +775,14 @@ fn append_impl(intent: SendIntent, prepared: bool) -> Result<JournalHead, ErrorC
     let worker = require_worker()?;
     if !matches!(
         intent.kind.as_str(),
-        "allocation" | "withdrawal" | "recovery" | "order" | "cancel" | "leverage" | "agent"
+        "allocation"
+            | "withdrawal"
+            | "recovery"
+            | "order"
+            | "cancel"
+            | "leverage"
+            | "agent"
+            | "spot_conversion"
     ) {
         return Err(ErrorCode::BadRequest {
             code: BadRequestCode::MalformedPayload,
@@ -709,7 +856,7 @@ fn append_impl(intent: SendIntent, prepared: bool) -> Result<JournalHead, ErrorC
     .map_err(map_db)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn recovery_head() -> Result<JournalHead, ErrorCode> {
     let worker = require_worker()?;
     let (sequence, hash) =
@@ -721,7 +868,7 @@ fn recovery_head() -> Result<JournalHead, ErrorCode> {
 }
 
 /// Only the registered worker can read its own private recovery events.
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn recovery_events(after: u64, limit: u32) -> Result<Vec<RecoveryRecord>, ErrorCode> {
     let worker = require_worker()?;
     if !(1..=100).contains(&limit) {
@@ -734,7 +881,7 @@ fn recovery_events(after: u64, limit: u32) -> Result<Vec<RecoveryRecord>, ErrorC
         .collect()
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn recovery_event(logical_id: api_types::Blob) -> Result<Option<RecoveryRecord>, ErrorCode> {
     let worker = require_worker()?;
     let logical_id = fixed32(&logical_id)?;
@@ -744,7 +891,7 @@ fn recovery_event(logical_id: api_types::Blob) -> Result<Option<RecoveryRecord>,
         .transpose()
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn append_recovery_event(event: RecoveryEvent) -> Result<JournalHead, ErrorCode> {
     let worker = require_worker()?;
     if !valid_event(&event) {
@@ -796,25 +943,40 @@ fn append_recovery_event(event: RecoveryEvent) -> Result<JournalHead, ErrorCode>
     .map_err(map_db)
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Journal, prefix = "journal_")]
 fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
 fn init_db() {
-    if let Err(error) = db::init(MEMORY_ID, db::schema::send_journal::MIGRATIONS) {
+    if let Err(error) = if cfg!(feature = "embedded") {
+        db::init_scoped(db::DbScope::Journal, db::schema::send_journal::MIGRATIONS)
+    } else {
+        db::init(MEMORY_ID, db::schema::send_journal::MIGRATIONS)
+    } {
         ic_cdk::trap(format!("journal init failed: {error}"));
     }
 }
 
-#[ic_cdk::init]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::init)]
 fn init() {
     init_db();
 }
 
-#[ic_cdk::post_upgrade]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::post_upgrade)]
 fn post_upgrade() {
     init_db();
 }
 
+#[cfg(feature = "embedded")]
+pub fn embedded_init() {
+    db::tx::with_scope(db::DbScope::Journal, init);
+}
+
+#[cfg(feature = "embedded")]
+pub fn embedded_post_upgrade() {
+    db::tx::with_scope(db::DbScope::Journal, post_upgrade);
+}
+
+#[cfg(not(feature = "embedded"))]
 ic_cdk::export_candid!();

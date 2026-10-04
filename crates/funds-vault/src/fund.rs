@@ -48,7 +48,13 @@ pub fn fund_status(session: &VerifiedSession) -> Result<FundStatus, ErrorCode> {
     let now = clock::now_ms();
     let (balances, unknowns, recovery_fence) = db::tx::query(|connection| {
         let balances = db::repo::ledger::user_balances(connection, &session.user_id)?;
-        let unknowns = db::repo::actions::unresolved_actions(connection, &session.user_id)?;
+        let mut unknowns = db::repo::actions::unresolved_actions(connection, &session.user_id)?;
+        let identity = db::repo::auth::identity_by_user(connection, &session.user_id)?
+            .ok_or(DbError::NotFound)?;
+        unknowns.extend(db::repo::spot_deposits::unresolved(
+            connection,
+            &identity.eoa_address,
+        )?);
         let recovery_fence =
             db::repo::actions::recovery_fence_status(connection, &session.user_id)?;
         Ok((balances, unknowns, recovery_fence))
@@ -1004,7 +1010,7 @@ pub async fn approve_agent_generation(
 
     let payload = crate::venue::ApproveAgent {
         agent: agent_address,
-        name: format!("private-perp gen {generation}"),
+        name: "private-perp".to_string(),
         time: now,
     };
     let digest = payload.digest()?;

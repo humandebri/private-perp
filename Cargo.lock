@@ -337,6 +337,7 @@ dependencies = [
  "db",
  "ic-cdk",
  "ic-cdk-management-canister",
+ "scoped-entrypoint",
  "sha2 0.11.0",
 ]
 
@@ -744,6 +745,7 @@ dependencies = [
  "ic-cdk-timers",
  "ic-sqlite-vfs",
  "journal-client",
+ "scoped-entrypoint",
  "serde",
  "serde_json",
 ]
@@ -1760,6 +1762,7 @@ dependencies = [
  "candid",
  "db",
  "ic-cdk",
+ "scoped-entrypoint",
 ]
 
 [[package]]
@@ -1821,6 +1824,19 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "wnaf",
+]
+
+[[package]]
+name = "private-perp"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "db",
+ "funds-vault",
+ "ic-cdk",
+ "policy",
+ "send-journal",
+ "trading-core",
 ]
 
 [[package]]
@@ -2185,6 +2201,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scoped-entrypoint"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2247,6 +2272,7 @@ dependencies = [
  "hex",
  "ic-cdk",
  "ic-sqlite-vfs",
+ "scoped-entrypoint",
  "sha2 0.11.0",
  "sha3",
 ]
@@ -2885,6 +2911,7 @@ dependencies = [
  "ic-cdk-timers",
  "ic-sqlite-vfs",
  "journal-client",
+ "scoped-entrypoint",
  "serde",
  "serde_json",
 ]

@@ -75,72 +75,50 @@ call_read() {
 }
 
 echo "bootstrap-local: policy_registry を設定する"
-controller_principal="$(icp identity principal)"
-guard_principal="$(canister_id control_guard)"
-vault_principal="$(canister_id funds_vault)"
-core_principal="$(canister_id trading_core)"
-policy_principal="$(canister_id policy_registry)"
-journal_principal="$(canister_id send_journal)"
-call send_journal register_worker "(\"vault\", principal \"$vault_principal\")" >/dev/null
-call send_journal register_worker "(\"core\", principal \"$core_principal\")" >/dev/null
-call funds_vault set_send_journal "(principal \"$journal_principal\")" >/dev/null
-call trading_core set_send_journal "(principal \"$journal_principal\")" >/dev/null
-call funds_vault set_journal_guard "(principal \"$guard_principal\")" >/dev/null
-call trading_core set_journal_guard "(principal \"$guard_principal\")" >/dev/null
-call control_guard set_sns_principal "(principal \"$controller_principal\")" >/dev/null
-call policy_registry set_operator "(principal \"$controller_principal\")" >/dev/null
-call policy_registry set_sns_principal "(principal \"$controller_principal\")" >/dev/null
-call policy_registry set_guard_principal "(principal \"$guard_principal\")" >/dev/null
-call policy_registry register_budget_worker "(\"vault\", principal \"$vault_principal\")" >/dev/null
-call policy_registry register_budget_worker "(\"core\", principal \"$core_principal\")" >/dev/null
-call control_guard configure_rest_budget "(principal \"$policy_principal\", record { capacity = 1200 : nat32; exit_reserve = 300 : nat32 })" >/dev/null
-call control_guard configure_eligibility "(principal \"$vault_principal\", 1 : nat64, $issuer_bytes, true)" >/dev/null
-# Local estimates only. Testnet floors and reserves require measured calibration.
-call control_guard configure_cycles "(principal \"$vault_principal\", 1000000000 : nat, 100000000000 : nat)" >/dev/null
-call control_guard configure_cycles "(principal \"$core_principal\", 1000000000 : nat, 100000000000 : nat)" >/dev/null
+call private_perp policy_configure_rest_budget '(record { capacity = 1200 : nat32; exit_reserve = 300 : nat32 })' >/dev/null
+call private_perp vault_configure_eligibility "(1 : nat64, $issuer_bytes, true)" >/dev/null
+# Local estimates only; testnet values require measured calibration.
+call private_perp vault_configure_cycles '(1000000000 : nat, 100000000000 : nat)' >/dev/null
+call private_perp core_configure_cycles '(1000000000 : nat, 100000000000 : nat)' >/dev/null
 # BTC・ETHを許可する（asset indexはmetaから解決する）。
 # An unconfigured policy returns an application Err on a fresh installation.
 # Read it without the strict mutation wrapper so the initialization below runs;
 # transport/CLI failures still terminate the script under set -e.
-policy_state="$(icp canister call policy_registry get_policy '()' --args-format candid)"
+policy_state="$(icp canister call private_perp get_policy '()' --args-format candid)"
 if [[ "$policy_state" != *"Ok"* || "$policy_state" != *"BTC"* || "$policy_state" != *"ETH"* ]]; then
-  call control_guard configure_policy_version "(principal \"$policy_principal\", 1 : nat64, vec { \"BTC\"; \"ETH\" })" >/dev/null
-  policy_state="$(call policy_registry get_policy '()')"
+  call private_perp set_policy_version "(1 : nat64, vec { \"BTC\"; \"ETH\" })" >/dev/null
+  policy_state="$(call private_perp get_policy '()')"
 fi
 if [[ "$policy_state" != *"Ok"* || "$policy_state" != *"BTC"* || "$policy_state" != *"ETH"* ]]; then
   echo "bootstrap-local: policy allowlist configuration failed: $policy_state" >&2
   exit 1
 fi
-# 政策行が無い間は停止扱い（fail-closed）のため、SNS経路で解除する。
-call policy_registry clear_emergency_stop '()' >/dev/null
+# 政策行が無い間は停止扱い（fail-closed）のため、指定管理者で解除する。
+call private_perp clear_emergency_stop '()' >/dev/null
 
 echo "bootstrap-local: trading_core を設定する"
-call trading_core set_vault_principal "(principal \"$vault_principal\")" >/dev/null
-call trading_core set_policy_principal "(principal \"$policy_principal\")" >/dev/null
 # network・dexとmeta（asset indexとszDecimalsの出所。本番はHL /infoから取得する）。
-call trading_core set_market_context "(\"$hl_network\", \"hyperliquid\")" >/dev/null
-call trading_core set_meta_cache "(\"$hl_network\", \"hyperliquid\", $universe_candid)" >/dev/null
+call private_perp set_market_context "(\"$hl_network\", \"hyperliquid\")" >/dev/null
+call private_perp set_meta_cache "(\"$hl_network\", \"hyperliquid\", $universe_candid)" >/dev/null
 # ローカルの環境（mock HL。実venueのhostは拒否される）。
-call trading_core set_venue_endpoints "(\"$exchange_url\", \"$info_url\")" >/dev/null
-call trading_core set_ecdsa_key_id '("test_key_1")' >/dev/null
-call control_guard configure_market_threshold "(principal \"$core_principal\", record { market = \"BTC\"; expected_index = $btc_index : nat32; min_day_notional_usdc = 1000000 : nat64; max_spread_bps = 20 : nat32; min_each_side_depth_usdc = 10000 : nat64 })" >/dev/null
-call control_guard configure_market_threshold "(principal \"$core_principal\", record { market = \"ETH\"; expected_index = $eth_index : nat32; min_day_notional_usdc = 1000000 : nat64; max_spread_bps = 20 : nat32; min_each_side_depth_usdc = 1000 : nat64 })" >/dev/null
+call private_perp core_set_venue_endpoints "(\"$exchange_url\", \"$info_url\")" >/dev/null
+call private_perp core_set_ecdsa_key_id '("test_key_1")' >/dev/null
+call private_perp core_configure_market_threshold "(record { market = \"BTC\"; expected_index = $btc_index : nat32; min_day_notional_usdc = 1000000 : nat64; max_spread_bps = 20 : nat32; min_each_side_depth_usdc = 10000 : nat64 })" >/dev/null
+call private_perp core_configure_market_threshold "(record { market = \"ETH\"; expected_index = $eth_index : nat32; min_day_notional_usdc = 1000000 : nat64; max_spread_bps = 20 : nat32; min_each_side_depth_usdc = 1000 : nat64 })" >/dev/null
 # 個人APIの封筒（未生成の個人APIはfail-closedで拒否する）。
-call trading_core rotate_hpke_key '()' >/dev/null
-call trading_core refresh_market '()' >/dev/null
+call private_perp core_rotate_hpke_key '()' >/dev/null
+call private_perp refresh_market '()' >/dev/null
 
 echo "bootstrap-local: funds_vault を設定する"
-call funds_vault set_core_principal "(principal \"$core_principal\")" >/dev/null
-call funds_vault set_policy_principal "(principal \"$policy_principal\")" >/dev/null
-call funds_vault set_network "(\"$hl_network\")" >/dev/null
-call funds_vault set_venue_endpoints "(\"$exchange_url\", \"$info_url\")" >/dev/null
+call private_perp set_network "(\"$hl_network\")" >/dev/null
+call private_perp vault_set_venue_endpoints "(\"$exchange_url\", \"$info_url\")" >/dev/null
 # ローカルmockのページングを検証した環境に限り、未実行判定を許可する。
-call funds_vault set_recovery_history_verified "($history_verified)" >/dev/null
-call funds_vault set_ecdsa_key_id '("test_key_1")' >/dev/null
-call funds_vault rotate_hpke_key '()' >/dev/null
+call private_perp set_recovery_history_verified "($history_verified)" >/dev/null
+call private_perp vault_set_ecdsa_key_id '("test_key_1")' >/dev/null
+call private_perp vault_rotate_hpke_key '()' >/dev/null
 
 echo "bootstrap-local: 設定を確認する"
-echo "  trading_core: $(call_read trading_core get_environment)"
-echo "  funds_vault:  $(call_read funds_vault get_environment)"
-echo "  policy:       $(call_read policy_registry get_stop_status)"
+echo "  trading_core: $(call_read private_perp core_get_environment)"
+echo "  funds_vault:  $(call_read private_perp vault_get_environment)"
+echo "  policy:       $(call_read private_perp get_stop_status)"
 echo "bootstrap-local: ok"

@@ -80,13 +80,13 @@ fn to_fixed<const N: usize>(bytes: &[u8], what: &str) -> Result<[u8; N], ErrorCo
 }
 
 /// このビルドのバージョン。デプロイ確認用。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Guard, prefix = "guard_")]
 fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// SNS governanceのPrincipalを設定する（controllerのみ、初期化時）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 fn set_sns_principal(principal: Principal) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -100,7 +100,7 @@ fn set_sns_principal(principal: Principal) -> Result<(), ErrorCode> {
 }
 
 /// SNS governanceのPrincipal（診断用）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Guard, prefix = "guard_")]
 fn get_sns_principal() -> Option<Principal> {
     db::tx::query(db::repo::guard::sns_principal)
         .ok()
@@ -109,7 +109,7 @@ fn get_sns_principal() -> Option<Principal> {
 }
 
 /// 変更を予約する（SNS governanceのみ）。7日後にだけ実行できる。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 fn schedule_upgrade(args: ScheduleUpgradeArgs) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     let now = clock::now_ms();
@@ -135,7 +135,7 @@ fn schedule_upgrade(args: ScheduleUpgradeArgs) -> Result<(), ErrorCode> {
 /// 予約を取り消す（SNS governanceのみ）。対象を指定する。
 ///
 /// 対象を指定せずに全件取消にすると、実行（対象ごとに1件）と対象が食い違う。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 fn cancel_upgrade(target: Principal) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     let now = clock::now_ms();
@@ -165,14 +165,19 @@ fn require_sns(caller: Principal) -> Result<(), ErrorCode> {
 }
 
 /// SNSが共有REST予算を設定する経路。policyは登録済みguardのcallerを検証する。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 async fn configure_rest_budget(
     policy: Principal,
     config: RestBudgetConfig,
 ) -> Result<(), ErrorCode> {
     require_sns(ic_cdk::api::msg_caller())?;
     check_principal(policy, "invalid policy principal")?;
-    let response = Call::bounded_wait(policy, "configure_rest_budget")
+    let method = if cfg!(feature = "embedded") {
+        "policy_configure_rest_budget"
+    } else {
+        "configure_rest_budget"
+    };
+    let response = Call::bounded_wait(policy, method)
         .with_arg(config)
         .await
         .map_err(|error| ErrorCode::UpstreamUnavailable {
@@ -185,7 +190,7 @@ async fn configure_rest_budget(
 }
 
 /// SNSが市場の許可版を設定する経路。policyは登録済みguardのcallerを検証する。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 async fn configure_policy_version(
     policy: Principal,
     version: u64,
@@ -202,7 +207,7 @@ async fn configure_policy_version(
         .map_err(|_| ErrorCode::PolicyUnavailable)?
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 async fn configure_eligibility(
     vault: Principal,
     terms_version: u64,
@@ -211,7 +216,12 @@ async fn configure_eligibility(
 ) -> Result<(), ErrorCode> {
     require_sns(ic_cdk::api::msg_caller())?;
     check_principal(vault, "invalid vault principal")?;
-    let response = Call::bounded_wait(vault, "configure_eligibility")
+    let method = if cfg!(feature = "embedded") {
+        "vault_configure_eligibility"
+    } else {
+        "configure_eligibility"
+    };
+    let response = Call::bounded_wait(vault, method)
         .with_args(&(terms_version, issuer_address, mock_issuer))
         .await
         .map_err(|_| ErrorCode::PolicyUnavailable)?;
@@ -220,7 +230,7 @@ async fn configure_eligibility(
         .map_err(|_| ErrorCode::PolicyUnavailable)?
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 async fn configure_cycles(
     worker: Principal,
     daily_floor: u128,
@@ -237,14 +247,19 @@ async fn configure_cycles(
         .map_err(|_| ErrorCode::PolicyUnavailable)?
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 async fn configure_market_threshold(
     core: Principal,
     input: api_types::operations_status::MarketThreshold,
 ) -> Result<(), ErrorCode> {
     require_sns(ic_cdk::api::msg_caller())?;
     check_principal(core, "invalid core principal")?;
-    let response = Call::bounded_wait(core, "configure_market_threshold")
+    let method = if cfg!(feature = "embedded") {
+        "core_configure_market_threshold"
+    } else {
+        "configure_market_threshold"
+    };
+    let response = Call::bounded_wait(core, method)
         .with_arg(input)
         .await
         .map_err(|_| ErrorCode::PolicyUnavailable)?;
@@ -254,7 +269,7 @@ async fn configure_market_threshold(
 }
 
 /// SNSだけが、独立送信ジャーナルの証跡が一致したworkerを再開できる。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 async fn resume_journal(worker: Principal) -> Result<(), ErrorCode> {
     require_sns(ic_cdk::api::msg_caller())?;
     check_principal(worker, "invalid worker principal")?;
@@ -268,7 +283,7 @@ async fn resume_journal(worker: Principal) -> Result<(), ErrorCode> {
 }
 
 /// 予約済みの内容と一致するupgradeを実行する（実行者は誰でもよい）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Guard, prefix = "guard_")]
 async fn execute_upgrade(
     target: Principal,
     wasm_module: Vec<u8>,
@@ -346,7 +361,7 @@ async fn execute_upgrade(
 }
 
 /// 予約状況（公開）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Guard, prefix = "guard_")]
 fn get_upgrade_status() -> UpgradeStatus {
     // 直近の予約を状態を問わず返す（実行済み・取消済みも監視できるようにする）。
     let latest = db::tx::query(db::repo::guard::latest_upgrade)
@@ -376,19 +391,34 @@ fn get_upgrade_status() -> UpgradeStatus {
 }
 
 fn init_db() {
-    if let Err(error) = db::init(MEMORY_ID, db::schema::guard::MIGRATIONS) {
+    if let Err(error) = if cfg!(feature = "embedded") {
+        db::init_scoped(db::DbScope::Guard, db::schema::guard::MIGRATIONS)
+    } else {
+        db::init(MEMORY_ID, db::schema::guard::MIGRATIONS)
+    } {
         ic_cdk::trap(format!("db init failed: {error}"));
     }
 }
 
-#[ic_cdk::init]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::init)]
 fn init() {
     init_db();
 }
 
-#[ic_cdk::post_upgrade]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::post_upgrade)]
 fn post_upgrade() {
     init_db();
 }
 
+#[cfg(feature = "embedded")]
+pub fn embedded_init() {
+    db::tx::with_scope(db::DbScope::Guard, init);
+}
+
+#[cfg(feature = "embedded")]
+pub fn embedded_post_upgrade() {
+    db::tx::with_scope(db::DbScope::Guard, post_upgrade);
+}
+
+#[cfg(not(feature = "embedded"))]
 ic_cdk::export_candid!();

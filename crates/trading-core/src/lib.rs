@@ -10,6 +10,7 @@
 //! 認可は `funds_vault` の `session_status` に問い合わせ、返却されたprincipalをこの
 //! Canisterが受け取ったcallerと比較する（vaultはcoreのcallerを知らないため）。
 
+mod close_price;
 mod cycles;
 mod environment;
 mod market;
@@ -67,13 +68,13 @@ fn map_db(error: DbError) -> ErrorCode {
 }
 
 /// このビルドのバージョン。デプロイ確認用。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// vaultのprincipalを設定する（controllerのみ）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn set_vault_principal(vault: Principal) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -103,7 +104,7 @@ fn set_vault_principal(vault: Principal) -> Result<(), ErrorCode> {
 }
 
 /// 政策Canisterのprincipalを設定する（controllerのみ）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn set_policy_principal(policy: Principal) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -123,7 +124,7 @@ fn set_policy_principal(policy: Principal) -> Result<(), ErrorCode> {
 }
 
 /// 政策Canisterのprincipal（診断用）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn get_policy_principal() -> Option<Principal> {
     db::tx::query(db::repo::core_config::policy_principal)
         .ok()
@@ -175,7 +176,7 @@ async fn policy_markets() -> Result<Vec<String>, ErrorCode> {
 }
 
 /// vaultのprincipal（診断用）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn get_vault_principal() -> Option<Principal> {
     db::tx::query(db::repo::core_config::vault_principal)
         .ok()
@@ -183,51 +184,51 @@ fn get_vault_principal() -> Option<Principal> {
         .map(|bytes| Principal::from_slice(&bytes))
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn prepare_recovery(
     request: api_types::recovery::PrepareRecovery,
 ) -> Result<api_types::recovery::RecoveryFenceToken, ErrorCode> {
     recovery::prepare(request).await
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn commit_recovery(token: api_types::recovery::RecoveryFenceToken) -> Result<(), ErrorCode> {
     recovery::commit(token).await
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn mark_recovery_unknown(token: api_types::recovery::RecoveryFenceToken) -> Result<(), ErrorCode> {
     recovery::mark_unknown(token)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn abort_recovery(token: api_types::recovery::RecoveryFenceToken) -> Result<(), ErrorCode> {
     recovery::abort(token)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn finish_recovery(token: api_types::recovery::RecoveryFenceToken) -> Result<(), ErrorCode> {
     recovery::finish(token)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn migrate_recovery(
     request: api_types::recovery::PrepareRecovery,
 ) -> Result<api_types::recovery::RecoveryFenceToken, ErrorCode> {
     recovery::migrate(request)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn finish_recovery_migration() -> Result<(), ErrorCode> {
     recovery::finish_migration()
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn begin_recovery_migration() -> Result<(), ErrorCode> {
     recovery::begin_migration()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn recovery_migration_locked() -> Result<bool, ErrorCode> {
     db::tx::query(db::repo::recovery_fences::migration_locked).map_err(map_db)
 }
@@ -237,7 +238,7 @@ fn recovery_migration_locked() -> Result<bool, ErrorCode> {
 /// 秘密鍵はcanister内のDBに留め、公開鍵のみを配布する（`Plan.md` 16.5、
 /// `docs/phase-0/api-contract.md` 6節）。更新すると以前の世代は退役し、
 /// 旧鍵で作られた封筒は復号できない（クライアントは公開鍵を取得し直す）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -260,7 +261,7 @@ async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
 }
 
 /// 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn get_hpke_public_key() -> Result<api_types::Blob, ErrorCode> {
     db::tx::query(db::repo::hpke::active_public)
         .map_err(map_db)?
@@ -421,7 +422,7 @@ async fn raw_rand32() -> Result<[u8; 32], ErrorCode> {
 /// セッションを検証し、本人のuser_idを返す（認可境界の試験用）。///
 /// vaultに問い合わせ、返却されたprincipalが「このメッセージのcaller」と一致する場合だけ
 /// user_idを返す。順序を逆にしない（callerを信用しない）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn whoami(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     let vault_bytes = db::tx::query(db::repo::core_config::vault_principal)
@@ -449,7 +450,7 @@ async fn whoami(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
 }
 
 /// 銘柄解決に使うnetwork・dexを設定する（controllerのみ）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn set_market_context(network: String, dex: String) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -465,31 +466,31 @@ fn set_market_context(network: String, dex: String) -> Result<(), ErrorCode> {
     .map_err(map_db)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn configure_cycles(daily_floor: u128, exit_reserve: u128) -> Result<(), ErrorCode> {
     cycles::configure(daily_floor, exit_reserve)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn get_cycles_status() -> Result<api_types::operations_status::CyclesStatus, ErrorCode> {
     cycles::status()
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn configure_market_threshold(
     input: api_types::operations_status::MarketThreshold,
 ) -> Result<(), ErrorCode> {
     market::configure(input)
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn get_market_status(
     market: String,
 ) -> Result<api_types::operations_status::MarketStatus, ErrorCode> {
     market::status(&market)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn refresh_market() -> Result<(), ErrorCode> {
     if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
         return Err(ErrorCode::Unauthenticated {
@@ -500,7 +501,7 @@ async fn refresh_market() -> Result<(), ErrorCode> {
 }
 
 /// `meta`の`universe`を登録する（ローカルのブートストラップ。本番はHL `/info` から取得する）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn set_meta_cache(network: String, dex: String, universe: String) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -519,7 +520,7 @@ fn set_meta_cache(network: String, dex: String, universe: String) -> Result<(), 
 /// Hyperliquidのendpointを設定する（controllerのみ）。
 ///
 /// 設定済みのnetworkと整合しないhost（例：testnet設定にmainnet endpoint）は拒否する。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn set_venue_endpoints(exchange_url: String, info_url: String) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -540,7 +541,7 @@ fn set_venue_endpoints(exchange_url: String, info_url: String) -> Result<(), Err
 /// 閾値ECDSAのkey IDを設定する（controllerのみ）。
 ///
 /// testnetの鍵名はデプロイ後に実測して確定する（`docs/phase-0/environments.md` 2節）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn set_ecdsa_key_id(key_id: String) -> Result<(), ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -556,12 +557,12 @@ fn set_ecdsa_key_id(key_id: String) -> Result<(), ErrorCode> {
 }
 
 /// 現在の環境設定（診断用・公開）。秘密は含まない。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn get_environment() -> Result<api_types::environment::EnvironmentView, ErrorCode> {
     environment::resolved()
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn set_send_journal(principal: Principal) -> Result<(), ErrorCode> {
     if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
         return Err(ErrorCode::Unauthenticated {
@@ -571,7 +572,7 @@ fn set_send_journal(principal: Principal) -> Result<(), ErrorCode> {
     journal_client::configure(principal)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn set_journal_guard(principal: Principal) -> Result<(), ErrorCode> {
     if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
         return Err(ErrorCode::Unauthenticated {
@@ -581,22 +582,22 @@ fn set_journal_guard(principal: Principal) -> Result<(), ErrorCode> {
     journal_client::set_guard(principal)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn resume_journal() -> Result<(), ErrorCode> {
     journal_client::resume("core").await
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn get_send_journal() -> Result<Option<Principal>, ErrorCode> {
     journal_client::configured()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn get_journal_send_status() -> Result<(bool, bool), ErrorCode> {
     journal_client::public_status()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn get_journal_guard() -> Result<Option<Principal>, ErrorCode> {
     if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
         return Err(ErrorCode::Unauthenticated {
@@ -606,7 +607,7 @@ fn get_journal_guard() -> Result<Option<Principal>, ErrorCode> {
     journal_client::guard()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn journal_restore_status() -> Result<(u64, u64, bool), ErrorCode> {
     if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
         return Err(ErrorCode::Unauthenticated {
@@ -616,7 +617,7 @@ fn journal_restore_status() -> Result<(u64, u64, bool), ErrorCode> {
     journal_client::status()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn recovery_stage_status() -> Result<(u64, bool), ErrorCode> {
     if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
         return Err(ErrorCode::Unauthenticated {
@@ -626,7 +627,7 @@ fn recovery_stage_status() -> Result<(u64, bool), ErrorCode> {
     journal_client::recovery_stage_status()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Core, prefix = "core_")]
 fn recovery_replay_pending() -> Result<bool, ErrorCode> {
     if !ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
         return Err(ErrorCode::Unauthenticated {
@@ -637,7 +638,7 @@ fn recovery_replay_pending() -> Result<bool, ErrorCode> {
 }
 
 /// 外部確認済みのleverage preflight不明状態をcontrollerが解決する。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 fn resolve_unknown_order_preflight(
     order_id: api_types::Blob,
     resolution: api_types::order::PreflightResolution,
@@ -1348,7 +1349,7 @@ fn close_order_args(
 ///
 /// mark価格は`entry_price + unrealized_pnl / size`で近似する（coreはmark配信を
 /// 持たない）。reduce-onlyでは価格はスリッページ上限としてのみ作用し、建玉を
-/// 反転できないため、近似でも安全側に働く。価格の桁は`szDecimals`に合わせて切り捨てる。
+/// 反転できないため、近似でも安全側に働く。価格は市場の小数桁数と有効数字5桁に丸める。
 fn slippage_bounded_price(
     position: &api_types::order::PositionView,
     is_long: bool,
@@ -1379,19 +1380,7 @@ fn slippage_bounded_price(
             "cannot derive a positive limit price",
         ));
     }
-    let step = if sz_decimals >= 6 {
-        1u128
-    } else {
-        10u128.pow(sz_decimals)
-    };
-    // 売りの上限は切り捨て（弱気側）、買いの上限は切り上げ（スリッページ幅を狭めない）。
-    let micros = bounded.unsigned_abs();
-    let floored = micros / step * step;
-    let rounded = if is_long || floored == micros {
-        floored
-    } else {
-        floored + step
-    };
+    let rounded = close_price::round_price_micros(bounded.unsigned_abs(), !is_long, sz_decimals);
     Ok(micros_to_decimal(rounded))
 }
 
@@ -1484,7 +1473,7 @@ async fn request_agent_generation(
 /// Agent世代の状態（承認済みは`current`、要求中は`next`）。
 ///
 /// 認可にvaultへのinter-canister呼び出しが必要なためqueryにはできない（updateで提供）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn get_agent_status(
     session: SessionHandle,
 ) -> Result<api_types::fund::AgentStatus, ErrorCode> {
@@ -1560,7 +1549,7 @@ pub(crate) fn ecdsa_key_id() -> Result<EcdsaKeyId, ErrorCode> {
 /// 注文の取消を要求する（**封筒必須**。署名・送信はパイプラインが行う）。
 ///
 /// 認証は封筒の`aad`と本文のセッションで行う（`api-contract.md` 6節）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn cancel_order(
     envelope: api_types::envelope::HpkeRequest,
 ) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
@@ -1622,7 +1611,7 @@ async fn cancel_all(session: SessionHandle) -> Result<u64, ErrorCode> {
 }
 
 /// 本人向け書込みの封筒入口。業務エラーも暗号化した結果として返す。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn private_call(
     envelope: api_types::envelope::HpkeRequest,
 ) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
@@ -1686,7 +1675,7 @@ async fn private_call(
 }
 
 /// 約定一覧（新しい順。**封筒必須**。認可にvaultへの問い合わせが必要なためupdate）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn list_fills(
     envelope: api_types::envelope::HpkeRequest,
 ) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
@@ -1733,7 +1722,7 @@ async fn fills_page(
 }
 
 /// 口座snapshot（残高はvault、注文はcore。**封筒必須**）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn get_account_snapshot(
     envelope: api_types::envelope::HpkeRequest,
 ) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
@@ -1875,7 +1864,7 @@ async fn account_snapshot(
 /// queryでは他Canisterを呼べない。最終設計では、(a) 個人向け読み取りをupdateのまま
 /// 提供する、(b) vaultからセッション写像をcoreへ同期してqueryで返す、のいずれかを選ぶ
 /// （`docs/phase-1/README.md` の残課題）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn list_orders(
     envelope: api_types::envelope::HpkeRequest,
 ) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
@@ -1886,7 +1875,7 @@ async fn list_orders(
 }
 
 /// 受付結果を再送せずに照合する。不存在と他人の要求は区別しない。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn get_order_by_request(
     envelope: api_types::envelope::HpkeRequest,
 ) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
@@ -2259,7 +2248,7 @@ fn validate_trigger(
 ///
 /// 戻り値は `(署名対象ダイジェスト, 65バイト署名)`。署名経路の検証に使う。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn test_sign_order_action(
     order_id: api_types::Blob,
 ) -> Result<(api_types::Blob, api_types::Blob), ErrorCode> {
@@ -2301,7 +2290,7 @@ async fn test_sign_order_action(
 ///
 /// 本番の送信経路（`heartbeat`・`sweep`）と同じ`pipeline::sweep_once`を呼ぶ。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn test_sweep_now() -> Result<api_types::order::SweepOutcome, ErrorCode> {
     pipeline::sweep_once(ic_cdk::api::time() / 1_000_000).await
 }
@@ -2309,7 +2298,7 @@ async fn test_sweep_now() -> Result<api_types::order::SweepOutcome, ErrorCode> {
 /// 未処理の注文・取消を送信し、取引所状態を照合する（controllerのみ）。
 ///
 /// 本番は `heartbeat` が間隔を空けて呼ぶ。停止した場合の手動実行の入口でもある。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn sweep() -> Result<api_types::order::SweepOutcome, ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -2335,11 +2324,17 @@ fn schedule_sweep() {
     let timer_id = ic_cdk_timers::set_timer_interval_serial(
         core::time::Duration::from_millis(pipeline::SWEEP_INTERVAL_MS),
         async || {
-            // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
-            let now = ic_cdk::api::time() / 1_000_000;
-            if let Err(error) = pipeline::sweep_once(now).await {
-                ic_cdk::println!("trading sweep failed: {error:?}");
-            }
+            db::tx::with_optional_scope_future(
+                cfg!(feature = "embedded").then_some(db::DbScope::Core),
+                async {
+                    // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
+                    let now = ic_cdk::api::time() / 1_000_000;
+                    if let Err(error) = pipeline::sweep_once(now).await {
+                        ic_cdk::println!("trading sweep failed: {error:?}");
+                    }
+                },
+            )
+            .await
         },
     );
     SWEEP_TIMER.with(|timer| *timer.borrow_mut() = Some(timer_id));
@@ -2349,7 +2344,7 @@ fn schedule_sweep() {
 ///
 /// 本番は`heartbeat`の照合が取引所から取得する。同じ取り込み関数を使う。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn test_ingest_fills(
     session: api_types::auth::SessionHandle,
     fills_json: String,
@@ -2362,7 +2357,7 @@ async fn test_ingest_fills(
 
 /// テスト専用：`/info`の`orderStatus`相当を反映する（`test-venue`のみ）。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn test_apply_order_status(
     session: api_types::auth::SessionHandle,
     status_json: String,
@@ -2378,7 +2373,7 @@ async fn test_apply_order_status(
 ///
 /// 本番は`heartbeat`の照合が取引所から取得する。同じ取り込み関数を使う。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Core, prefix = "core_")]
 async fn test_ingest_positions(
     session: api_types::auth::SessionHandle,
     positions_json: String,
@@ -2393,19 +2388,23 @@ async fn test_ingest_positions(
 }
 
 fn init_db() {
-    if let Err(error) = db::init(MEMORY_ID, db::schema::core::MIGRATIONS) {
+    if let Err(error) = if cfg!(feature = "embedded") {
+        db::init_scoped(db::DbScope::Core, db::schema::core::MIGRATIONS)
+    } else {
+        db::init(MEMORY_ID, db::schema::core::MIGRATIONS)
+    } {
         ic_cdk::trap(format!("db init failed: {error}"));
     }
 }
 
-#[ic_cdk::init]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::init)]
 fn init() {
     init_db();
     #[cfg(not(feature = "test-venue"))]
     schedule_sweep();
 }
 
-#[ic_cdk::post_upgrade]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::post_upgrade)]
 fn post_upgrade() {
     init_db();
     if let Err(error) = journal_client::lock() {
@@ -2421,4 +2420,15 @@ fn post_upgrade() {
     schedule_sweep();
 }
 
+#[cfg(feature = "embedded")]
+pub fn embedded_init() {
+    db::tx::with_scope(db::DbScope::Core, init);
+}
+
+#[cfg(feature = "embedded")]
+pub fn embedded_post_upgrade() {
+    db::tx::with_scope(db::DbScope::Core, post_upgrade);
+}
+
+#[cfg(not(feature = "embedded"))]
 ic_cdk::export_candid!();

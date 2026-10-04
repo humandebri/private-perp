@@ -25,6 +25,7 @@ fn inbound(body: &[u8], destination: &[u8]) -> Vec<u8> {
     for entry in entries.as_array_mut().unwrap() {
         if entry["delta"]["type"] == "deposit" {
             entry["delta"]["type"] = "internalTransfer".into();
+            entry["delta"]["fee"] = "0".into();
             entry["delta"]["user"] = format!("0x{}", hex::encode(sender)).into();
             entry["delta"]["destination"] = format!("0x{}", hex::encode(destination)).into();
         }
@@ -172,7 +173,7 @@ fn fetched_deposits_are_credited_once() {
     let evidence = evidence.expect("private evidence");
     assert!(evidence.iter().any(|record| matches!(
         &record.event.payload,
-        RecoveryPayload::DepositCredit {
+        RecoveryPayload::DepositCreditWithFee {
             amount_micros: 100_500_000,
             ..
         }
@@ -271,7 +272,7 @@ fn fetched_deposits_are_credited_once() {
     let incoming = |hash: &str, time| {
         serde_json::json!({
             "time": time, "hash": hash,
-            "delta": {"type": "internalTransfer", "user": sender, "destination": destination, "usdc": "1"}
+            "delta": {"type": "internalTransfer", "user": sender, "destination": destination, "usdc": "1", "fee": "0"}
         })
     };
     // 499 unrelated updates followed by an inbound transfer on the page boundary.
@@ -340,4 +341,469 @@ fn fetched_deposits_are_credited_once() {
     let pending: Result<bool, ErrorCode> =
         query(&pic, vault, controller, "recovery_replay_pending", ()).unwrap();
     assert!(pending.unwrap());
+}
+
+#[test]
+fn activation_fees_credit_net_receipts_and_settle_gross_allocations() {
+    let pic = pic();
+    let controller = principal(193);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let caller = principal(194);
+    let session = open_session(&pic, vault, caller, &secret(240));
+    let reserve: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .unwrap();
+    let reserve = reserve.unwrap();
+    let before_receipts = pic
+        .take_canister_snapshot(vault, Some(controller), None)
+        .unwrap();
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).unwrap();
+    let guard = guard.unwrap().unwrap();
+    let sender = address_from_secret(&secret(240)).unwrap();
+    let receipt = |destination: &[u8],
+                   sender: &[u8],
+                   hash: &str,
+                   gross: &str,
+                   fee: serde_json::Value,
+                   time: u64| {
+        serde_json::to_vec(&serde_json::json!([{"time":time,"hash":hash,"delta":{
+            "type":"internalTransfer","user":format!("0x{}",hex::encode(sender)),
+            "destination":format!("0x{}",hex::encode(destination)),"usdc":gross,"fee":fee
+        }}]))
+        .unwrap()
+    };
+    let history = receipt(
+        reserve.as_ref(),
+        &sender,
+        "0xfa01",
+        "9",
+        "1".into(),
+        1758000000000,
+    );
+    for expected in [1, 0] {
+        let result: Result<u32, ErrorCode> = call_with_mocked_outcall(
+            &pic,
+            vault,
+            controller,
+            "reconcile_deposits",
+            (reserve.clone(),),
+            Ok((200, history.clone())),
+        )
+        .unwrap();
+        assert_eq!(result.unwrap(), expected);
+    }
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    assert_eq!(status.unwrap().reserve_unallocated, 8_000_000);
+    // Fail closed without advancing the cursor when fee evidence is missing or invalid.
+    for fee in [
+        serde_json::Value::Null,
+        "-1".into(),
+        "9".into(),
+        "10".into(),
+        "0.0000001".into(),
+    ] {
+        let result: Result<u32, ErrorCode> = call_with_mocked_outcall(
+            &pic,
+            vault,
+            controller,
+            "reconcile_deposits",
+            (reserve.clone(),),
+            Ok((
+                200,
+                receipt(reserve.as_ref(), &sender, "0xfa02", "9", fee, 1758000000001),
+            )),
+        )
+        .unwrap();
+        assert!(matches!(result, Err(ErrorCode::UpstreamRejected { .. })));
+    }
+    let accepted: Result<api_types::fund::FundRequestAccepted, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "request_allocation",
+        api_types::fund::AllocationRequest {
+            session: session.clone(),
+            client_request_id: blob(b"fee-allocation"),
+            amount: 5_000_000,
+            target: api_types::AccountKind::Trading,
+            intent_signature: None,
+        },
+    )
+    .unwrap();
+    accepted.unwrap();
+    let sent: Result<u32, ErrorCode> = call_with_mocked_outcall(
+        &pic,
+        vault,
+        caller,
+        "test_sweep_now",
+        (),
+        Ok((
+            200,
+            br#"{"status":"ok","response":{"type":"default"}}"#.to_vec(),
+        )),
+    )
+    .unwrap();
+    assert_eq!(sent.unwrap(), 1);
+    let before_allocation_receipt = pic
+        .take_canister_snapshot(vault, Some(controller), None)
+        .unwrap();
+    let trading: Result<Blob, ErrorCode> =
+        update(&pic, vault, caller, "get_trading_address", session.clone()).unwrap();
+    let trading = trading.unwrap();
+    let allocation_history = receipt(
+        trading.as_ref(),
+        reserve.as_ref(),
+        "0xfa03",
+        "5",
+        "1".into(),
+        1758000000002,
+    );
+    for expected in [1, 0] {
+        let result: Result<u32, ErrorCode> = call_with_mocked_outcall(
+            &pic,
+            vault,
+            controller,
+            "reconcile_deposits",
+            (trading.clone(),),
+            Ok((200, allocation_history.clone())),
+        )
+        .unwrap();
+        assert_eq!(result.unwrap(), expected);
+    }
+    let status: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    let status = status.unwrap();
+    assert_eq!(status.reserve_unallocated, 3_000_000);
+    assert_eq!(status.trading_equity, 4_000_000);
+    assert_eq!(status.in_transit, 0);
+    let events: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session.clone(), None::<Blob>, 10u32),
+    )
+    .unwrap();
+    assert_eq!(
+        events.unwrap().items[0].state,
+        api_types::fund::FundRequestState::Settled
+    );
+    let journal: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_send_journal", ()).unwrap();
+    let evidence: Result<Vec<RecoveryRecord>, ErrorCode> = update_args(
+        &pic,
+        journal.unwrap().unwrap(),
+        vault,
+        "recovery_events",
+        (0u64, 100u32),
+    )
+    .unwrap();
+    assert_eq!(
+        evidence
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(
+                &r.event.payload,
+                RecoveryPayload::DepositCreditWithFee {
+                    fee_micros: 1_000_000,
+                    ..
+                }
+            ))
+            .count(),
+        2
+    );
+    pic.load_canister_snapshot(vault, Some(controller), before_allocation_receipt.id)
+        .unwrap();
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, guard, principal(239), "resume_journal", vault).unwrap();
+    assert!(
+        resumed.is_err(),
+        "live evidence validation remains required"
+    );
+    let restored: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    let restored = restored.unwrap();
+    assert_eq!(restored.reserve_unallocated, 3_000_000);
+    assert_eq!(restored.trading_equity, 4_000_000);
+    assert_eq!(restored.in_transit, 0);
+    pic.load_canister_snapshot(vault, Some(controller), before_receipts.id)
+        .unwrap();
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, guard, principal(239), "resume_journal", vault).unwrap();
+    assert!(
+        resumed.is_err(),
+        "old snapshot cannot promote an unverified send to a receipt"
+    );
+    let restored: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    assert_eq!(restored.unwrap().reserve_unallocated, 8_000_000);
+}
+
+#[test]
+fn spot_receipt_converts_once_and_late_login_claims_only_its_sender() {
+    let pic = pic();
+    let controller = principal(201);
+    let caller = principal(202);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let wrong_session = open_session(&pic, vault, caller, &secret(240));
+    let reserve: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        wrong_session.clone(),
+    )
+    .unwrap();
+    let reserve = reserve.unwrap();
+    let sender = address_from_secret(&secret(238)).unwrap();
+    let timestamp = (pic.get_time().as_nanos_since_unix_epoch() / 1_000_000).saturating_sub(1);
+    let incoming = serde_json::json!({"time":timestamp,"hash":format!("0x{}",hex::encode([211;32])),"delta":{"type":"send","token":"USDC","amount":"10","fee":"1","sourceDex":"spot","destinationDex":"spot","user":format!("0x{}",hex::encode(sender)),"destination":format!("0x{}",hex::encode(reserve.as_ref()))}});
+    // Fail after durable preparation but before any dispatch. The same receipt
+    // must resume with its original nonce once the key configuration is repaired.
+    let configured: Result<(), ErrorCode> = update(
+        &pic,
+        vault,
+        controller,
+        "set_ecdsa_key_id",
+        "missing_test_key".to_string(),
+    )
+    .unwrap();
+    configured.unwrap();
+    let (failed, _): (Result<u32, ErrorCode>, _) = pocket_ic_tests::call_with_routed_outcalls(
+        &pic,
+        vault,
+        controller,
+        "reconcile_deposits",
+        (reserve.clone(),),
+        |call| {
+            assert!(
+                !call.url.ends_with("/exchange"),
+                "preparation must not dispatch"
+            );
+            let body: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+            Ok((
+                200,
+                if body["type"] == "spotClearinghouseState" {
+                    br#"{"balances":[{"coin":"USDC","token":0,"total":"10","hold":"0"}]}"#.to_vec()
+                } else {
+                    serde_json::to_vec(&vec![incoming.clone()]).unwrap()
+                },
+            ))
+        },
+    )
+    .unwrap();
+    assert!(failed.is_err());
+    let configured: Result<(), ErrorCode> = update(
+        &pic,
+        vault,
+        controller,
+        "set_ecdsa_key_id",
+        "test_key_1".to_string(),
+    )
+    .unwrap();
+    configured.unwrap();
+    let posts = std::cell::Cell::new(0);
+    let nonce = std::cell::Cell::new(0);
+    let class_receipts = std::cell::RefCell::new(Vec::<serde_json::Value>::new());
+    for (iteration, expected) in [1, 0, 1].into_iter().enumerate() {
+        let mut incoming = incoming.clone();
+        if iteration == 2 {
+            incoming["hash"] = format!("0x{}", hex::encode([213; 32])).into();
+        }
+        let(result,calls):(Result<u32,ErrorCode>,_)=pocket_ic_tests::call_with_routed_outcalls(&pic,vault,controller,"reconcile_deposits",(reserve.clone(),),|call|{
+            let body:serde_json::Value=serde_json::from_slice(&call.body).unwrap();
+            if call.url.ends_with("/exchange") {
+                posts.set(posts.get()+1);nonce.set(body["nonce"].as_u64().unwrap());
+                class_receipts.borrow_mut().push(serde_json::json!({"time":nonce.get(),"hash":format!("0x{}",hex::encode([212+posts.get() as u8;32])),"delta":{"type":"accountClassTransfer","usdc":"10","toPerp":true}}));
+                assert_eq!(body["action"]["type"],"usdClassTransfer");assert_eq!(body["action"]["amount"],"10");assert_eq!(body["action"]["toPerp"],true);
+                assert_eq!(call.replication,pocket_ic::common::rest::CanisterHttpReplication::NonReplicated);
+                return Ok((200,br#"{"status":"ok","response":{"type":"default"}}"#.to_vec()));
+            }
+            assert_eq!(call.replication,pocket_ic::common::rest::CanisterHttpReplication::FullyReplicated);
+            match body["type"].as_str().unwrap() {
+                "spotClearinghouseState"=>Ok((200,br#"{"balances":[{"coin":"USDC","token":0,"total":"10","hold":"0"}]}"#.to_vec())),
+                "userNonFundingLedgerUpdates" if body.get("endTime").is_some()=>Ok((200,serde_json::to_vec(&*class_receipts.borrow()).unwrap())),
+                "userNonFundingLedgerUpdates"=>Ok((200,serde_json::to_vec(&vec![incoming.clone()]).unwrap())),
+                other=>panic!("unexpected info {other}"),
+            }
+        }).unwrap();
+        assert_eq!(result.unwrap(), expected);
+        assert!(!calls.is_empty());
+    }
+    assert_eq!(posts.get(), 2);
+    let wrong: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", wrong_session).unwrap();
+    assert_eq!(wrong.unwrap().reserve_unallocated, 0);
+    for _ in 0..2 {
+        let session = open_session(&pic, vault, principal(203), &secret(238));
+        let funds: Result<FundStatus, ErrorCode> =
+            update(&pic, vault, principal(203), "get_fund_status", session).unwrap();
+        assert_eq!(funds.unwrap().reserve_unallocated, 20_000_000);
+    }
+}
+
+#[test]
+fn lost_spot_conversion_response_reconciles_after_upgrade_without_reposting() {
+    let pic = pic();
+    let controller = principal(204);
+    let caller = principal(205);
+    let vault = deploy(
+        &pic,
+        FUNDS_VAULT_WASM,
+        Some(vec![controller]),
+        candid::encode_one(()).unwrap(),
+    );
+    let session = open_session(&pic, vault, caller, &secret(240));
+    let reserve: Result<Blob, ErrorCode> = update(
+        &pic,
+        vault,
+        caller,
+        "provision_reserve_account",
+        session.clone(),
+    )
+    .unwrap();
+    let reserve = reserve.unwrap();
+    let sender = address_from_secret(&secret(240)).unwrap();
+    let timestamp = (pic.get_time().as_nanos_since_unix_epoch() / 1_000_000).saturating_sub(1);
+    let incoming = serde_json::json!({"time":timestamp,"hash":format!("0x{}",hex::encode([215;32])),"delta":{"type":"send","token":"USDC","amount":"10","destinationDex":"spot","user":format!("0x{}",hex::encode(sender)),"destination":format!("0x{}",hex::encode(reserve.as_ref()))}});
+    let nonce = std::cell::Cell::new(0);
+    let posts = std::cell::Cell::new(0);
+    let (first, _): (Result<u32, ErrorCode>, _) = pocket_ic_tests::call_with_routed_outcalls(
+        &pic,
+        vault,
+        controller,
+        "reconcile_deposits",
+        (reserve.clone(),),
+        |call| {
+            let b: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+            if call.url.ends_with("/exchange") {
+                posts.set(posts.get() + 1);
+                nonce.set(b["nonce"].as_u64().unwrap());
+                return Ok((503, b"unknown".to_vec()));
+            }
+            if b["type"] == "spotClearinghouseState" {
+                return Ok((
+                    200,
+                    br#"{"balances":[{"coin":"USDC","token":0,"total":"10","hold":"0"}]}"#.to_vec(),
+                ));
+            }
+            Ok((
+                200,
+                if b.get("endTime").is_some() {
+                    b"[]".to_vec()
+                } else {
+                    serde_json::to_vec(&vec![incoming.clone()]).unwrap()
+                },
+            ))
+        },
+    )
+    .unwrap();
+    assert!(first.is_err());
+    let funds: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session.clone()).unwrap();
+    let funds = funds.unwrap();
+    assert_eq!(funds.reserve_unallocated, 0);
+    assert_eq!(funds.unknowns.len(), 1);
+    pic.upgrade_canister(
+        vault,
+        pocket_ic_tests::wasm(FUNDS_VAULT_WASM),
+        candid::encode_one(()).unwrap(),
+        Some(controller),
+    )
+    .unwrap();
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, vault, controller, "get_journal_guard", ()).unwrap();
+    let resumed: Result<(), ErrorCode> = update(
+        &pic,
+        guard.unwrap().unwrap(),
+        principal(239),
+        "resume_journal",
+        vault,
+    )
+    .unwrap();
+    resumed.unwrap();
+    let (second,_):(Result<u32,ErrorCode>,_)=pocket_ic_tests::call_with_routed_outcalls(&pic,vault,controller,"reconcile_deposits",(reserve,),|call|{
+        assert!(!call.url.ends_with("/exchange"),"must not retry a POST after uncertain response or upgrade");
+        let b:serde_json::Value=serde_json::from_slice(&call.body).unwrap();
+        Ok((200,if b.get("endTime").is_some(){serde_json::to_vec(&serde_json::json!([{"time":nonce.get(),"hash":format!("0x{}",hex::encode([216;32])),"delta":{"type":"accountClassTransfer","usdc":"10","toPerp":true}}])).unwrap()}else{serde_json::to_vec(&vec![incoming.clone()]).unwrap()}))
+    }).unwrap();
+    assert_eq!(second.unwrap(), 1);
+    assert_eq!(posts.get(), 1);
+    let funds: Result<FundStatus, ErrorCode> =
+        update(&pic, vault, caller, "get_fund_status", session).unwrap();
+    let funds = funds.unwrap();
+    assert_eq!(funds.reserve_unallocated, 10_000_000);
+    assert!(funds.unknowns.is_empty());
+}
+
+#[test]
+fn invalid_spot_receipts_balances_and_ambiguous_conversions_never_credit() {
+    for (amount, available, ambiguous, expected_posts) in [
+        ("-10", "10", false, 0),
+        ("10", "9", false, 0),
+        ("10", "10", true, 1),
+    ] {
+        let pic = pic();
+        let controller = principal(206);
+        let caller = principal(207);
+        let vault = deploy(
+            &pic,
+            FUNDS_VAULT_WASM,
+            Some(vec![controller]),
+            candid::encode_one(()).unwrap(),
+        );
+        let session = open_session(&pic, vault, caller, &secret(240));
+        let reserve: Result<Blob, ErrorCode> = update(
+            &pic,
+            vault,
+            caller,
+            "provision_reserve_account",
+            session.clone(),
+        )
+        .unwrap();
+        let reserve = reserve.unwrap();
+        let sender = address_from_secret(&secret(240)).unwrap();
+        let time = (pic.get_time().as_nanos_since_unix_epoch() / 1_000_000).saturating_sub(1);
+        let incoming = serde_json::json!({"time":time,"hash":format!("0x{}",hex::encode([218;32])),"delta":{"type":"send","token":"USDC","amount":amount,"destinationDex":"spot","user":format!("0x{}",hex::encode(sender)),"destination":format!("0x{}",hex::encode(reserve.as_ref()))}});
+        let nonce = std::cell::Cell::new(0);
+        let posts = std::cell::Cell::new(0);
+        let (result,_): (Result<u32, ErrorCode>, _) = pocket_ic_tests::call_with_routed_outcalls(&pic,vault,controller,"reconcile_deposits",(reserve,),|call| {
+            let body:serde_json::Value=serde_json::from_slice(&call.body).unwrap();
+            if call.url.ends_with("/exchange") {
+                posts.set(posts.get()+1);
+                nonce.set(body["nonce"].as_u64().unwrap());
+                return Ok((200, br#"{"status":"ok","response":{"type":"default"}}"#.to_vec()));
+            }
+            if body["type"]=="spotClearinghouseState" {
+                return Ok((200,serde_json::to_vec(&serde_json::json!({"balances":[{"coin":"USDC","token":0,"total":available,"hold":"0"}]})).unwrap()));
+            }
+            if body.get("endTime").is_some() {
+                assert!(ambiguous);
+                return Ok((200,serde_json::to_vec(&(0..2).map(|i|serde_json::json!({"time":nonce.get(),"hash":format!("0x{}",hex::encode([219+i;32])),"delta":{"type":"accountClassTransfer","usdc":"10","toPerp":true}})).collect::<Vec<_>>()).unwrap()));
+            }
+            Ok((200,serde_json::to_vec(&vec![incoming.clone()]).unwrap()))
+        }).unwrap();
+        assert!(result.is_err());
+        assert_eq!(posts.get(), expected_posts);
+        let funds: Result<FundStatus, ErrorCode> =
+            update(&pic, vault, caller, "get_fund_status", session).unwrap();
+        assert_eq!(funds.unwrap().reserve_unallocated, 0);
+    }
 }

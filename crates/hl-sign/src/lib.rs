@@ -14,6 +14,7 @@ pub mod error;
 pub mod hash;
 pub mod keccak;
 pub mod private_perp;
+pub mod rest_budget;
 pub mod signature;
 pub mod typed_data;
 pub mod usd_send;

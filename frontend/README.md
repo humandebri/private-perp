@@ -1,29 +1,66 @@
 # private-perp UI
 
-TanStack Start＋Reactで、ローカルICP replicaとローカルHyperliquid mockへ実接続する単一ユーザー開発UIです。公開市況WebSocket、建玉、SL/TP、決済、取消と最小クライアントを含みます。testnet・mainnet・実資金には接続しません。
+A TanStack Start and React development UI connecting to a local ICP replica and
+Hyperliquid mock. It includes public market data, positions, stop-loss/take-profit,
+closing and cancelling orders, and a minimal fallback client.
 
-## 一括起動・E2E
+The [public HL testnet UI](https://private-perp-ui-testnet.hude.workers.dev) connects
+to the unified IC canister `xis3j-paaaa-aaaai-axumq-cai`. Signed login and encrypted
+API calls have been checked on that deployment; live HL orders and the complete
+fund round trip remain unverified. See the
+[single-canister design](../docs/phase-3/single-canister.md).
 
-リポジトリルートで次を実行します。
+## Setup and local E2E
+
+Use Node.js 24 and pnpm 12.4.2. From the repository root:
 
 ```sh
+corepack enable
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend cf:typegen
+pnpm --dir frontend exec playwright install chromium
 bash scripts/local-e2e.sh
 ```
 
-mock HL起動、ローカルIC network、4 Canisterのdeploy/bootstrap、短命の`frontend/.env.local`生成、frontend build、Playwrightを一括実行し、終了時に子プロセスとIC networkを停止します。Playwrightは固定秘密鍵を製品コードへ入れず、試験専用`e2e-signer`をEIP-1193 providerとして注入します。
+The E2E script starts mock HL and a local IC network, deploys and bootstraps the
+unified canister, writes `frontend/.env.local`, builds the frontend, and runs
+Playwright. On exit it stops its child mock process and the IC network if it
+started that network. Use an isolated local network: the script can reuse and
+modify an existing deployment. Playwright injects the test-only `e2e-signer` as an
+EIP-1193 provider instead of embedding a fixed signing key in product code.
 
-手動起動では`.env.example`を`.env.local`へ写し、deploy後の2 Canister IDを設定してください。`VITE_APP_STAGE=local`、IC host、mock HTTP/WS URLの全てが必須で、loopback以外は拒否します。mockの管理APIを別のfrontendポートから使う場合は、起動時の`MOCK_HL_ADMIN_ORIGINS`へ完全なOriginをカンマ区切りで指定します（既定は`127.0.0.1:4173`と`:5173`）。
+For manual setup, copy `.env.example` to `.env.local` and set
+`VITE_PRIVATE_PERP_CANISTER_ID` after deployment. `VITE_APP_STAGE=local`, the IC
+host, and mock HTTP/WS URLs are required; non-loopback hosts are rejected in local
+mode. Start the UI with `pnpm dev` from this directory. All `VITE_` variables are
+public browser configuration and must not contain secrets.
 
-## 接続範囲
+To use the mock admin API from another frontend port, set `MOCK_HL_ADMIN_ORIGINS`
+to a comma-separated list of exact origins when starting the mock. Defaults are
+`http://127.0.0.1:4173` and `http://127.0.0.1:5173`.
 
-- MetaMask `eth_requestAccounts` / `eth_signTypedData_v4`によるEOA認証。
-- ページメモリだけに保持する短命Ed25519 identity、SessionHandle、HPKE秘密鍵。
-- 共通保管口座への模擬入金・残高保持と、後から指定額を本人の取引口座へ配分、Agent生成・承認、market/limit注文、取消、不足額の自動回収と署名付き出金、資金・注文・約定履歴。入金と配分は別操作。「残高の調整」から取引口座の資金を保管残高に戻せる。
-- 入金は認証済みEOAのHL口座を送金元にする。金額・時刻による相関耐性は未達。[共通口座の実装範囲](../docs/phase-3/shared-reserve.md)。旧schemaとの後方互換はない。
-- 個人参照と取消はCandidを一元codecで封入し、request ID再利用や復号失敗を自動再送しません。
-- marketは即時約定、limitはrestingとなる決定的なLOCAL MOCK。admin APIはloopback bindだけです。
+## Supported flows
 
-## 検証
+- EOA authentication through MetaMask `eth_requestAccounts` and
+  `eth_signTypedData_v4`.
+- Short-lived Ed25519 identity, session handle, and HPKE private key held only in
+  page memory.
+- Mock deposits into a shared reserve, later allocation to the user's trading
+  account, agent creation and approval, market/limit orders, cancellation,
+  automatic recovery of withdrawal shortfalls, signed withdrawals, and fund,
+  order, and fill history. Deposit and allocation are separate actions; balance
+  adjustment returns trading funds to reserve balance.
+- Deposits originate from the authenticated EOA's HL account. Resistance to
+  amount/time correlation is incomplete; see the
+  [shared reserve scope](../docs/phase-3/shared-reserve.md).
+- Personal queries and cancellations use a centralized Candid envelope codec.
+  Request-ID reuse and decryption failures do not trigger automatic retries.
+- Deterministic LOCAL MOCK execution: market orders fill immediately, limit
+  orders rest, and admin endpoints bind to loopback only.
+
+## Verification
+
+Run from `frontend/`:
 
 ```sh
 pnpm lint
@@ -31,21 +68,55 @@ pnpm format:check
 pnpm typecheck
 pnpm test
 pnpm build
-pnpm test:e2e            # shell/CSP。実接続ケースはskip
-bash ../scripts/local-e2e.sh # 実Canister一巡
+pnpm test:e2e                    # Shell/CSP; live canister cases are skipped
+bash ../scripts/local-e2e.sh     # Full local canister flow
 node --test ../tools/mock-hl/server.test.mjs
 ```
 
-通常のPlaywrightはbuild後のWorkers preview（127.0.0.1:4173）を使います。実接続E2Eだけがローカルreplicaとmockを必要とします。
+Default Playwright tests use Workers preview at `127.0.0.1:4173` after a build.
+Only the local integration E2E requires a replica and mock venue.
 
-## 安全境界
+## Testnet configuration
 
-- Workersは`APP_STAGE=local`かつloopback requestだけを許可し、CSP `connect-src`は設定済みIC hostとmock hostだけです。
-- `/fallback`は通常の取引画面や市況接続に依存せず、認証・注文取消・本人EOA宛出金だけを提供します。Canister停止を回避するものではありません。
-- SSR/server functionsへ本人データを渡さず、localStorage・sessionStorage・Cookieへ鍵やセッションを保存しません。
-- unknownは画面へそのまま表示し、自動再送しません。古いsnapshot、未承認Agent、未観測口座では新規注文を停止します。
-- snapshotの鮮度は受信後の経過時間を加算して判定し、10秒超過または必須データ取得失敗で新規注文を停止します。取消・reduce-only操作はこの停止条件から分離しています。
-- 注文の受付応答を失った場合は、HPKE経由の`get_order_by_request`で本人の受付結果を照合します。未観測は失敗確定ではなく、新規注文を再開する条件にはなりません。HTTPクライアントの自動再試行も無効です。
-- ログアウト・失効時は即座にセッション世代を無効化し、口座・履歴の追加ページ・未解決要求を破棄します。古い通信の成功・失敗は新セッションへ反映しません。未解決要求は再読込後に復元できないため、再読込を解決手段にしないでください。
-- mock seedは画面と応答の両方で`LOCAL MOCK`と表示します。一般ユーザー機能や本番APIではありません。
-- Cloudflare公開、SNS操作、controller変更、本番資金受付は行いません。
+Copy `.env.testnet.example` to `.env.testnet.local` and set the dedicated testnet
+canister ID. `pnpm build --mode testnet` selects `wrangler.testnet.jsonc`.
+This builds the frontend; publishing it requires a separate deployment step.
+Testnet mode uses real HL testnet endpoints and does not run mock deposit actions.
+Mainnet fund acceptance is outside the current scope.
+
+## Safety and behavior boundaries
+
+- Workers permit only loopback access in local mode and public GET/HEAD in testnet
+  mode. CSP connections are restricted to configured IC and market hosts.
+- Charts fetch 24 hours of BTC/ETH one-minute candles from testnet
+  `candleSnapshot` and update through the same testnet WebSocket. Timestamps use
+  UTC. Fetch errors are shown without fabricating replacement candles. Local
+  mode uses the local mock.
+- Orders accept Long/Short, USDC margin or asset quantity, and 1–5× leverage.
+  Market price limits use the latest mid and slippage, rounded to asset precision.
+  Estimates exclude fees and funding. Available funds conservatively subtract
+  used margin and order reservations from equity.
+- Five-minute, fifteen-minute, and hourly candles aggregate the fetched minute
+  data; the initial view shows the latest 120 bars. Volume, the user's entry price,
+  and SL/TP are shown. On mobile the chart comes first and a fixed Trade button
+  opens the same order form. Deposits, allocations, and orders require explicit
+  user actions.
+- `/fallback` supports authentication, cancellation, and withdrawal to the user's
+  EOA without depending on the main trading view or market connection. It cannot
+  bypass a stopped canister.
+- Personal data is not passed to SSR/server functions. Keys and sessions are not
+  stored in localStorage, sessionStorage, or cookies.
+- Unknown outcomes remain visible and are not retried automatically. Stale
+  snapshots, unapproved agents, or unobserved accounts block new orders.
+- Snapshot age includes elapsed time after receipt. Age over ten seconds or a
+  failed required fetch blocks new orders; cancellation and reduce-only operations
+  are handled separately.
+- A lost order acknowledgement is reconciled through HPKE
+  `get_order_by_request`. An unobserved result does not establish failure or permit
+  new orders to resume. HTTP automatic retries are disabled.
+- Logout or expiry immediately invalidates the session generation and discards
+  account data, additional history pages, and unresolved requests. Old responses
+  cannot affect a new session. Unresolved requests are not restored after reload;
+  reloading is not a reconciliation mechanism.
+- Mock seed operations are labeled `LOCAL MOCK` in both the UI and responses.
+  They are test tools rather than normal user or production API features.

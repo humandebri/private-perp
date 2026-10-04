@@ -1,6 +1,7 @@
 {
   "name": "private-perp-hl-fixture-gen",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "generate": "node generate.mjs"

@@ -333,6 +333,33 @@ pub fn allocation_confirm(
     at: u64,
     external_event_id: &[u8; 32],
 ) -> Result<i64, Error> {
+    allocation_confirm_with_fee(
+        connection,
+        user_id,
+        trading_account_id,
+        amount,
+        0,
+        at,
+        external_event_id,
+    )
+}
+
+pub fn allocation_confirm_with_fee(
+    connection: &mut UpdateConnection<'_>,
+    user_id: &[u8; 32],
+    trading_account_id: &[u8; 32],
+    amount: u64,
+    fee: u64,
+    at: u64,
+    external_event_id: &[u8; 32],
+) -> Result<i64, Error> {
+    let received = i64::try_from(
+        amount
+            .checked_sub(fee)
+            .filter(|net| *net > 0)
+            .ok_or(Error::Invariant("invalid allocation fee"))?,
+    )
+    .map_err(|_| Error::Overflow)?;
     let amount = i64::try_from(amount).map_err(|_| Error::Overflow)?;
     post_journal(
         connection,
@@ -344,7 +371,7 @@ pub fn allocation_confirm(
             Posting {
                 account: CASH_TRADING.to_string(),
                 kind: AccountKind::Asset,
-                amount,
+                amount: received,
             },
             Posting {
                 account: CASH_IN_TRANSIT.to_string(),
@@ -359,7 +386,7 @@ pub fn allocation_confirm(
             Posting {
                 account: user_trading(trading_account_id),
                 kind: AccountKind::Liability,
-                amount: -amount,
+                amount: -received,
             },
         ],
     )

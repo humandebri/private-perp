@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Hyperliquidのaction構築・署名対象ハッシュ（純粋・非async）"
+license.workspace = true
+repository.workspace = true
+description = "Pure synchronous Hyperliquid action encoding and signing hashes"
 
 [dependencies]
 hl-types = { path = "../hl-types" }

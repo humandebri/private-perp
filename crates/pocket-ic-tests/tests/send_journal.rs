@@ -326,12 +326,13 @@ fn unmatched_deposit_without_account_mapping_stays_staged() {
     let event = RecoveryEvent {
         version: 1,
         logical_id: hl_sign::keccak256(&logical).to_vec().into(),
-        payload: RecoveryPayload::DepositCredit {
+        payload: RecoveryPayload::DepositCreditWithFee {
             sender: None,
             tx_hash: tx_hash.to_vec().into(),
             network: "local".into(),
             address: vec![42u8; 20].into(),
             amount_micros: 1_000_000,
+            fee_micros: 0,
             observed_at_ms: 1,
         },
     };
@@ -553,12 +554,13 @@ fn private_recovery_stream_is_idempotent_and_isolated() {
             address: vec![4; 20].into(),
             network: "local".into(),
         },
-        RecoveryPayload::DepositCredit {
+        RecoveryPayload::DepositCreditWithFee {
             sender: None,
             tx_hash: vec![3; 32].into(),
             network: "local".into(),
             address: vec![4; 20].into(),
             amount_micros: 1,
+            fee_micros: 0,
             observed_at_ms: 1,
         },
         RecoveryPayload::DepositClaim {

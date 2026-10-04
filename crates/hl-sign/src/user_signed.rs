@@ -38,6 +38,15 @@ pub const USD_SEND_FIELDS: &[TypedField] = &[
     field("time", TypedKind::Uint64),
 ];
 
+/// `usdClassTransfer` moves USDC between Spot and Perps in the same account.
+pub const USD_CLASS_TRANSFER_PRIMARY_TYPE: &str = "HyperliquidTransaction:UsdClassTransfer";
+pub const USD_CLASS_TRANSFER_FIELDS: &[TypedField] = &[
+    field("hyperliquidChain", TypedKind::String),
+    field("amount", TypedKind::String),
+    field("toPerp", TypedKind::Bool),
+    field("nonce", TypedKind::Uint64),
+];
+
 /// `HyperliquidSignTransaction` domain。
 pub const fn transaction_domain(chain_id: u64) -> Domain {
     Domain {
@@ -88,6 +97,31 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[31] = seed;
         bytes
+    }
+
+    #[test]
+    fn class_transfer_digest_matches_independent_sdk() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/user-signed/usd-class-transfer.json"
+        ))
+        .unwrap();
+        let actual = digest(
+            421_614,
+            super::USD_CLASS_TRANSFER_PRIMARY_TYPE,
+            super::USD_CLASS_TRANSFER_FIELDS,
+            &[
+                TypedValue::String("Testnet".into()),
+                TypedValue::String("10".into()),
+                TypedValue::Bool(true),
+                TypedValue::Uint64(fixture["nonce"].as_u64().unwrap()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            format!("0x{}", hex::encode(actual)),
+            fixture["digest"].as_str().unwrap()
+        );
+        assert_eq!(fixture["amountMicros"], 10_000_000);
     }
 
     #[test]

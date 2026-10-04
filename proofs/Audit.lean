@@ -44,3 +44,6 @@ import CanisterProofs
 #print axioms CanisterProofs.SendPermit.delayed_callback_cannot_send
 #print axioms CanisterProofs.SendPermit.authorization_survives_interleavings
 #print axioms CanisterProofs.SendPermit.cancellation_excludes_prior_authorization
+
+#print axioms CanisterProofs.Ledger.fee_allocation_balanced
+#print axioms CanisterProofs.Ledger.fee_allocation_accepted

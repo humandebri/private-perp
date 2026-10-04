@@ -1,39 +1,10 @@
-# canister build/deploy configuration (icp-cli)
-#
-# 実装状態：Phase 0 の雛形。Canister IDやenvironmentは未確定であり、
-# ここへ推測値を書かない（docs/phase-0/environments.md 2節・5節）。
-# 依存関係は `icp` の canister environment variables（PUBLIC_CANISTER_ID:<name>）で渡し、
-# ハードコードしない。frontendはWorkers配信であり、icpのcanisterとしては定義しない。
+# Unified canister build configuration; the frontend is hosted separately.
 canisters:
-  - name: policy_registry
+  - name: private_perp
     recipe:
       type: "@dfinity/rust@v3.2.0"
       configuration:
-        package: policy
-
-  - name: funds_vault
-    recipe:
-      type: "@dfinity/rust@v3.2.0"
-      configuration:
-        package: funds-vault
-
-  - name: control_guard
-    recipe:
-      type: "@dfinity/rust@v3.2.0"
-      configuration:
-        package: control-guard
-
-  - name: trading_core
-    recipe:
-      type: "@dfinity/rust@v3.2.0"
-      configuration:
-        package: trading-core
-
-  - name: send_journal
-    recipe:
-      type: "@dfinity/rust@v3.2.0"
-      configuration:
-        package: send-journal
+        package: private-perp
 
 networks:
   - name: local

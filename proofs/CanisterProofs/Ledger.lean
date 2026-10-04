@@ -62,6 +62,25 @@ theorem positive_templates_accepted (k : Kind) (a : Int)
   have hn : -a ≠ 0 := by omega
   cases k <;> simp [accepted, postings, checkedTotal, ha, hn, fitsI64] <;> omega
 
+-- Gross transit is discharged; only the recipient's net amount becomes equity.
+def allocationPostingsWithFee (gross fee : Int) : List Int :=
+  [gross - fee, -gross, gross, -(gross - fee)]
+
+theorem fee_allocation_balanced (gross fee : Int) :
+    (allocationPostingsWithFee gross fee).sum = 0 := by
+  simp only [allocationPostingsWithFee, List.sum_cons, List.sum_nil]
+  omega
+
+theorem fee_allocation_accepted (gross fee : Int)
+    (positive : 0 < gross) (bounded : gross ≤ 9223372036854775807)
+    (validFee : 0 ≤ fee ∧ fee < gross) : accepted (allocationPostingsWithFee gross fee) := by
+  have hn : gross - fee ≠ 0 := by omega
+  have hg : gross ≠ 0 := by omega
+  have hng : -gross ≠ 0 := by omega
+  have hnn : -(gross - fee) ≠ 0 := by omega
+  simp [accepted, allocationPostingsWithFee, checkedTotal, hn, hg, hng, hnn, fitsI64]
+  omega
+
 -- Mathematical projection of successful checked_sub in user_balances.
 def withdrawable (reserve holds : Nat) : Option Nat :=
   if holds ≤ reserve then some (reserve - holds) else none

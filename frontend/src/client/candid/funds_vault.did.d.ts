@@ -157,6 +157,7 @@ export type ErrorCode =
   | { Unauthenticated: { reason: string } }
 export type FundActionKind =
   | { AgentRevocation: null }
+  | { SpotDeposit: null }
   | { Recovery: null }
   | { Withdrawal: null }
   | { AgentApproval: null }

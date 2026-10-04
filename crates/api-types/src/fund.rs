@@ -46,6 +46,7 @@ pub enum FundActionKind {
     Recovery,
     Withdrawal,
     AgentApproval,
+    SpotDeposit,
     AgentRevocation,
 }
 

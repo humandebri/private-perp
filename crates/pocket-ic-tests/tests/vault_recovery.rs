@@ -1632,7 +1632,7 @@ fn lost_allocation_reply_is_reconciled_without_resending() {
     let q: serde_json::Value = serde_json::from_slice(&calls[0].body).unwrap();
     let nonce = q["nonce"].as_u64().unwrap();
     let destination = q["action"]["destination"].as_str().unwrap();
-    let history=serde_json::json!([{"time":nonce,"hash":format!("0x{}",hex::encode([91;32])),"delta":{"type":"internalTransfer","user":reserve,"destination":destination,"usdc":"0.4"}}]).to_string().into_bytes();
+    let history=serde_json::json!([{"time":nonce,"hash":format!("0x{}",hex::encode([91;32])),"delta":{"type":"internalTransfer","user":reserve,"destination":destination,"usdc":"0.4","fee":"0"}}]).to_string().into_bytes();
     pic.advance_time(std::time::Duration::from_secs(61));
     let (result, calls): (Result<u32, ErrorCode>, _) =
         call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |call| {

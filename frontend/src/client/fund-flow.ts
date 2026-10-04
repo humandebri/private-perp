@@ -6,7 +6,7 @@ const pause: Pause = () => new Promise((resolve) => setTimeout(resolve, 1_000))
 
 function requireKnownFunds(status: FundStatus, allowDispatching = false) {
   if (status.unknowns.some((action) => !allowDispatching || !('Dispatching' in action.state)))
-    throw new Error('資金移動の結果を照合中です。履歴を確認してください。')
+    throw new Error('Reconciling the transfer result. Check history.')
 }
 
 /** Poll reads only. A timeout never retries a transfer with a new request ID. */
@@ -21,7 +21,7 @@ export async function waitForFunds(
     if (!status.unknowns.length && ready(status)) return status
     await sleep()
   }
-  throw new Error('資金移動の確認待ちです。再送せず、残高と履歴を確認してください。')
+  throw new Error('Waiting for transfer confirmation. Do not resubmit; check balances and history.')
 }
 
 /** Recover only the shortfall, then wait for confirmed spendable reserve. */
@@ -31,7 +31,7 @@ export async function prepareWithdrawal(
   recover: (amount: bigint) => Promise<unknown>,
   sleep: Pause = pause,
 ): Promise<void> {
-  if (amount <= 0n) throw new Error('出金額は0より大きい値にしてください。')
+  if (amount <= 0n) throw new Error('Withdrawal amount must be greater than zero.')
   let status = await read()
   requireKnownFunds(status)
   if (status.recovery_fence.length) {

@@ -73,12 +73,15 @@ exit ${tests}
 test('success builds isolated wasm and runs tests before announcing completion', (t) => {
   const result = run(t)
   assert.equal(result.status, 0)
-  assert.equal(result.commands.split('\n').filter(Boolean).length, 4)
+  assert.equal(result.commands.split('\n').filter(Boolean).length, 6)
+  assert.equal(result.commands.split('\n').filter((line) => line.includes('-p private-perp')).length, 2)
   assert.match(result.commands, /test --locked -p pocket-ic-tests --no-fail-fast/)
   assert.match(result.stdout, /all requested tests completed successfully/)
   assert.equal(result.lockExists, false)
   assert.deepEqual(result.targets, [
     join(result.root, 'target'),
+    join(result.root, 'target'),
+    join(result.root, 'target/test-venue'),
     join(result.root, 'target/test-venue'),
     join(result.root, 'target/test-venue'),
     join(result.root, 'inherited-target'),
@@ -86,7 +89,7 @@ test('success builds isolated wasm and runs tests before announcing completion',
 })
 for (const [name, options, status, count] of [
   ['build failure', { build: 23 }, 23, 1],
-  ['test failure', { tests: 24 }, 24, 4],
+  ['test failure', { tests: 24 }, 24, 6],
   ['server failure', { fetch: 25 }, 25, 0],
   ['lock failure', { locked: true }, 1, 0],
   ['empty server path', { emptyServer: true }, 1, 0],

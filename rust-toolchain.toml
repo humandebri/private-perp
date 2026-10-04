@@ -1,10 +1,4 @@
-# Rustツールチェーンの固定。
-#
-# `channel = "1.93.0"` は `ic-sqlite-vfs 2.0.0` が要求する MSRV 1.95.0 を満たさないため、
-# 導入済みで wasm32-unknown-unknown・rustfmt・clippy が揃っている 1.97.0 を使う。
-# （このマシンではtoolchainの追加インストールがサンドボックス制約で失敗した。）
-# 実測値は docs/implementation-status.md に記録する。再現可能ビルドのための
-# リリース用の完全固定はPhase 4で行う。
+# Pin the toolchain, formatter, linter, and canister target.
 [toolchain]
 channel = "1.97.0"
 components = ["rustfmt", "clippy"]

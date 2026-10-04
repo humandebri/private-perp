@@ -5,6 +5,22 @@ use api_types::journal::{
     JournalHead, JournalRecord, RecoveryEvent, RecoveryPayload, RecoveryRecord, SendIntent,
 };
 use candid::Principal;
+
+fn scoped_role() -> Result<&'static str, ErrorCode> {
+    match db::tx::active_scope() {
+        Some(db::DbScope::Vault) => Ok("vault"),
+        Some(db::DbScope::Core) => Ok("core"),
+        _ => Err(ErrorCode::PolicyUnavailable),
+    }
+}
+
+fn journal_worker_bytes() -> Result<Vec<u8>, ErrorCode> {
+    if cfg!(feature = "embedded") {
+        Ok(scoped_role()?.as_bytes().to_vec())
+    } else {
+        Ok(ic_cdk::api::canister_self().as_slice().to_vec())
+    }
+}
 use ic_cdk::call::Call;
 use ic_sqlite_vfs::db::UpdateConnection;
 use sha2::{Digest, Sha256};
@@ -91,32 +107,65 @@ pub fn set_guard(principal: Principal) -> Result<(), ErrorCode> {
         .map_err(map_db)
 }
 
-/// SNS認可済みguardだけがupgrade後の送信停止を解除する。差分のある復元は拒否する。
-pub async fn resume(role: &str) -> Result<(), ErrorCode> {
-    let guard = db::tx::query(db::repo::send_journal_client::guard_principal)
-        .map_err(map_db)?
-        .ok_or(ErrorCode::PolicyUnavailable)?;
-    if ic_cdk::api::msg_caller().as_slice() != guard.as_slice() {
-        return Err(ErrorCode::Unauthenticated {
-            reason: "journal resume requires guard".into(),
-        });
+/// Unified builds require the administrator explicitly supplied at installation.
+/// Standalone builds retain the existing guard authorization.
+pub fn require_management() -> Result<(), ErrorCode> {
+    #[cfg(feature = "embedded")]
+    {
+        let caller = ic_cdk::api::msg_caller();
+        if caller != Principal::anonymous()
+            && db::tx::is_application_admin(caller.as_slice()).map_err(map_db)?
+        {
+            Ok(())
+        } else {
+            Err(ErrorCode::Unauthenticated {
+                reason: "application administrator required".into(),
+            })
+        }
     }
+    #[cfg(not(feature = "embedded"))]
+    {
+        let guard = db::tx::query(db::repo::send_journal_client::guard_principal)
+            .map_err(map_db)?
+            .ok_or(ErrorCode::PolicyUnavailable)?;
+        if ic_cdk::api::msg_caller().as_slice() != guard.as_slice() {
+            return Err(ErrorCode::Unauthenticated {
+                reason: "management requires guard".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Reconcile both journal chains before lifting the post-upgrade send lock.
+pub async fn resume(role: &str) -> Result<(), ErrorCode> {
+    require_management()?;
     let resume_epoch =
         db::tx::update(db::repo::send_journal_client::begin_resume).map_err(map_db)?;
     let principal = configured()?.ok_or(ErrorCode::PolicyUnavailable)?;
-    let response = Call::bounded_wait(principal, "head")
-        .with_arg(())
-        .await
-        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let response = if cfg!(feature = "embedded") {
+        Call::bounded_wait(principal, "role_head")
+            .with_arg(role.to_string())
+            .await
+    } else {
+        Call::bounded_wait(principal, "head").with_arg(()).await
+    }
+    .map_err(|_| ErrorCode::PolicyUnavailable)?;
     let remote = response
         .candid::<Result<JournalHead, ErrorCode>>()
         .map_err(|_| ErrorCode::PolicyUnavailable)??;
     // The V2 business stream has its own sequence. Stage and verify its next
     // batch, but do not treat staged events as a replayed business state.
-    let recovery_response = Call::bounded_wait(principal, "recovery_head")
-        .with_arg(())
-        .await
-        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let recovery_response = if cfg!(feature = "embedded") {
+        Call::bounded_wait(principal, "role_recovery_head")
+            .with_arg(role.to_string())
+            .await
+    } else {
+        Call::bounded_wait(principal, "recovery_head")
+            .with_arg(())
+            .await
+    }
+    .map_err(|_| ErrorCode::PolicyUnavailable)?;
     let recovery_remote = recovery_response
         .candid::<Result<JournalHead, ErrorCode>>()
         .map_err(|_| ErrorCode::PolicyUnavailable)??;
@@ -214,10 +263,20 @@ async fn recover_prepared_send(
     let Some(candidate) = candidate else {
         return Ok(());
     };
-    let response = Call::bounded_wait(principal, "cancel_prepared_send")
-        .with_args(&(candidate.kind.clone(), candidate.action_id.to_vec()))
-        .await
-        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let response = if cfg!(feature = "embedded") {
+        Call::bounded_wait(principal, "role_cancel_prepared_send")
+            .with_args(&(
+                scoped_role()?.to_string(),
+                candidate.kind.clone(),
+                candidate.action_id.to_vec(),
+            ))
+            .await
+    } else {
+        Call::bounded_wait(principal, "cancel_prepared_send")
+            .with_args(&(candidate.kind.clone(), candidate.action_id.to_vec()))
+            .await
+    }
+    .map_err(|_| ErrorCode::PolicyUnavailable)?;
     let cancelled = response
         .candid::<Result<bool, ErrorCode>>()
         .map_err(|_| ErrorCode::PolicyUnavailable)??;
@@ -255,7 +314,9 @@ fn validate_staged_recovery_event(
     hasher.update(b"private-perp/recovery-event/v1");
     hasher.update(event.previous_hash);
     hasher.update(event.sequence.to_be_bytes());
-    hasher.update(ic_cdk::api::canister_self().as_slice());
+    hasher.update(
+        journal_worker_bytes().map_err(|_| db::error::Error::Invariant("missing journal role"))?,
+    );
     hasher.update(event.logical_id);
     hasher.update(event.version.to_be_bytes());
     hasher.update(&event.payload);
@@ -318,7 +379,7 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
             let payload: RecoveryPayload = candid::decode_one(&event.payload)
                 .map_err(|_| db::error::Error::Invariant("invalid staged recovery payload"))?;
             validate_staged_recovery_event(c, &event)?;
-            match payload {
+            match payload.into_fee_aware() {
                 RecoveryPayload::IdentityRegistration {
                     user_id,
                     owner,
@@ -448,12 +509,13 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                         }
                     }
                 }
-                RecoveryPayload::DepositCredit {
+                RecoveryPayload::DepositCreditWithFee {
                     sender,
                     tx_hash,
                     network,
                     address,
                     amount_micros,
+                    fee_micros,
                     observed_at_ms,
                 } => {
                     let sender: Option<[u8; 20]> = sender
@@ -473,6 +535,7 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                         || tx_hash.len() > 64
                         || amount_micros == 0
                         || amount_micros > i64::MAX as u64
+                        || fee_micros >= amount_micros
                         || observed_at_ms == 0
                         || observed_at_ms > i64::MAX as u64
                     {
@@ -501,25 +564,28 @@ fn replay_vault_identity_registrations() -> Result<(), ErrorCode> {
                     else {
                         return Ok(false);
                     };
-                    if owner.kind != "reserve" {
-                        return Ok(false);
-                    }
-                    let account = db::repo::ledger::custody_account(
-                        c,
-                        &[0; 32],
-                        api_types::AccountKind::Reserve,
-                    )?
-                    .ok_or(db::error::Error::NotFound)?;
+                    let (user, kind) = match owner.kind.as_str() {
+                        "reserve" => ([0; 32], api_types::AccountKind::Reserve),
+                        "trading" => (
+                            owner.user_id.ok_or(db::error::Error::Conflict)?,
+                            api_types::AccountKind::Trading,
+                        ),
+                        _ => return Ok(false),
+                    };
+                    db::repo::deposits::ensure_allocation_ready(c, &address, sender.as_ref())?;
+                    let account = db::repo::ledger::custody_account(c, &user, kind)?
+                        .ok_or(db::error::Error::NotFound)?;
                     if account.account_id != owner.account_id
                         || account.master_address != address
                         || account.network != network
                         || account.state != "active"
-                        || !db::repo::deposits::credit_external_deposit(
+                        || !db::repo::deposits::credit_external_deposit_with_fee(
                             c,
                             &event_id,
                             &network,
                             tx_hash,
                             amount_micros,
+                            fee_micros,
                             &address,
                             "usdc",
                             observed_at_ms,
@@ -1232,7 +1298,7 @@ fn replay_core_prefix() -> Result<(), ErrorCode> {
             let payload: RecoveryPayload = candid::decode_one(&event.payload)
                 .map_err(|_| db::error::Error::Invariant("invalid staged recovery payload"))?;
             validate_staged_recovery_event(c, &event)?;
-            match payload {
+            match payload.into_fee_aware() {
                 RecoveryPayload::IdentityAccount {
                     user_id,
                     owner,
@@ -1519,10 +1585,16 @@ async fn stage_missing_recovery(
     if after == remote.sequence {
         return Ok(());
     }
-    let response = Call::bounded_wait(principal, "recovery_events")
-        .with_args(&(after, 100u32))
-        .await
-        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let response = if cfg!(feature = "embedded") {
+        Call::bounded_wait(principal, "role_recovery_events")
+            .with_args(&(scoped_role()?.to_string(), after, 100u32))
+            .await
+    } else {
+        Call::bounded_wait(principal, "recovery_events")
+            .with_args(&(after, 100u32))
+            .await
+    }
+    .map_err(|_| ErrorCode::PolicyUnavailable)?;
     let records = response
         .candid::<Result<Vec<RecoveryRecord>, ErrorCode>>()
         .map_err(|_| ErrorCode::PolicyUnavailable)??;
@@ -1553,8 +1625,9 @@ async fn stage_missing_recovery(
             .as_ref()
             .try_into()
             .map_err(|_| ErrorCode::PolicyUnavailable)?;
-        let payload =
-            candid::encode_one(&record.event.payload).map_err(|_| ErrorCode::PolicyUnavailable)?;
+        let payload = record
+            .payload_bytes()
+            .map_err(|_| ErrorCode::PolicyUnavailable)?;
         if payload.len() > 4096 {
             return Err(ErrorCode::PolicyUnavailable);
         }
@@ -1562,7 +1635,7 @@ async fn stage_missing_recovery(
         hasher.update(b"private-perp/recovery-event/v1");
         hasher.update(previous_hash);
         hasher.update(sequence.to_be_bytes());
-        hasher.update(ic_cdk::api::canister_self().as_slice());
+        hasher.update(journal_worker_bytes()?);
         hasher.update(logical_id);
         hasher.update(record.event.version.to_be_bytes());
         hasher.update(&payload);
@@ -1596,10 +1669,16 @@ async fn stage_missing(principal: Principal, remote: &JournalHead) -> Result<(),
     if after >= remote.sequence {
         return Ok(());
     }
-    let response = Call::bounded_wait(principal, "records")
-        .with_args(&(after, 100u32))
-        .await
-        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let response = if cfg!(feature = "embedded") {
+        Call::bounded_wait(principal, "role_records")
+            .with_args(&(scoped_role()?.to_string(), after, 100u32))
+            .await
+    } else {
+        Call::bounded_wait(principal, "records")
+            .with_args(&(after, 100u32))
+            .await
+    }
+    .map_err(|_| ErrorCode::PolicyUnavailable)?;
     let records = response
         .candid::<Result<Vec<JournalRecord>, ErrorCode>>()
         .map_err(|_| ErrorCode::PolicyUnavailable)??;
@@ -1645,7 +1724,7 @@ async fn stage_missing(principal: Principal, remote: &JournalHead) -> Result<(),
         hasher.update(b"private-perp/send-journal/v1");
         hasher.update(previous_hash);
         hasher.update(sequence.to_be_bytes());
-        hasher.update(ic_cdk::api::canister_self().as_slice());
+        hasher.update(journal_worker_bytes()?);
         hasher.update(record.intent.kind.as_bytes());
         hasher.update(request_id);
         hasher.update(account_id);
@@ -1705,19 +1784,29 @@ pub async fn ensure_ready(role: &str) -> Result<(), ErrorCode> {
         lock()?;
         return Err(ErrorCode::PolicyUnavailable);
     }
-    let response = Call::bounded_wait(principal, "head")
-        .with_arg(())
-        .await
-        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let response = if cfg!(feature = "embedded") {
+        Call::bounded_wait(principal, "role_head")
+            .with_arg(role.to_string())
+            .await
+    } else {
+        Call::bounded_wait(principal, "head").with_arg(()).await
+    }
+    .map_err(|_| ErrorCode::PolicyUnavailable)?;
     let remote = response
         .candid::<Result<JournalHead, ErrorCode>>()
         .map_err(|_| ErrorCode::PolicyUnavailable)??;
     // The business stream must match locally committed receipts. A remote
     // event without its local transaction is treated as an unapplied delta.
-    let recovery_response = Call::bounded_wait(principal, "recovery_head")
-        .with_arg(())
-        .await
-        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let recovery_response = if cfg!(feature = "embedded") {
+        Call::bounded_wait(principal, "role_recovery_head")
+            .with_arg(role.to_string())
+            .await
+    } else {
+        Call::bounded_wait(principal, "recovery_head")
+            .with_arg(())
+            .await
+    }
+    .map_err(|_| ErrorCode::PolicyUnavailable)?;
     let recovery_remote = recovery_response
         .candid::<Result<JournalHead, ErrorCode>>()
         .map_err(|_| ErrorCode::PolicyUnavailable)??;
@@ -1750,10 +1839,20 @@ pub async fn prepare_send(role: &str, intent: SendIntent) -> Result<JournalAck, 
 
 pub async fn authorize_send(intent: &SendIntent) -> Result<(), ErrorCode> {
     let principal = configured()?.ok_or(ErrorCode::PolicyUnavailable)?;
-    let response = Call::bounded_wait(principal, "authorize_send")
-        .with_args(&(intent.kind.clone(), intent.request_id.clone()))
-        .await
-        .map_err(|_| ErrorCode::PolicyUnavailable)?;
+    let response = if cfg!(feature = "embedded") {
+        Call::bounded_wait(principal, "role_authorize_send")
+            .with_args(&(
+                scoped_role()?.to_string(),
+                intent.kind.clone(),
+                intent.request_id.clone(),
+            ))
+            .await
+    } else {
+        Call::bounded_wait(principal, "authorize_send")
+            .with_args(&(intent.kind.clone(), intent.request_id.clone()))
+            .await
+    }
+    .map_err(|_| ErrorCode::PolicyUnavailable)?;
     if response
         .candid::<Result<bool, ErrorCode>>()
         .map_err(|_| ErrorCode::PolicyUnavailable)??
@@ -1795,9 +1894,20 @@ async fn append_impl(
         return Err(error);
     }
     let principal = configured()?.ok_or(ErrorCode::PolicyUnavailable)?;
-    let response = Call::bounded_wait(principal, method)
-        .with_arg(intent.clone())
-        .await;
+    let response = if cfg!(feature = "embedded") {
+        let role_method = match method {
+            "append" => "role_append",
+            "append_prepared" => "role_append_prepared",
+            _ => return Err(ErrorCode::PolicyUnavailable),
+        };
+        Call::bounded_wait(principal, role_method)
+            .with_args(&(role.to_string(), intent.clone()))
+            .await
+    } else {
+        Call::bounded_wait(principal, method)
+            .with_arg(intent.clone())
+            .await
+    };
     let decoded = response
         .map_err(|_| ErrorCode::PolicyUnavailable)
         .and_then(|response| {
@@ -1820,17 +1930,27 @@ async fn append_impl(
             Err(error)
         }
         Err(error) => {
-            let recovered = Call::bounded_wait(principal, "intent_record")
-                .with_args(&(intent.kind.clone(), intent.request_id.clone()))
-                .await
-                .ok()
-                .and_then(|response| {
-                    response
-                        .candid::<Result<Option<JournalRecord>, ErrorCode>>()
-                        .ok()
-                })
-                .and_then(Result::ok)
-                .flatten();
+            let recovered = if cfg!(feature = "embedded") {
+                Call::bounded_wait(principal, "role_intent_record")
+                    .with_args(&(
+                        role.to_string(),
+                        intent.kind.clone(),
+                        intent.request_id.clone(),
+                    ))
+                    .await
+            } else {
+                Call::bounded_wait(principal, "intent_record")
+                    .with_args(&(intent.kind.clone(), intent.request_id.clone()))
+                    .await
+            }
+            .ok()
+            .and_then(|response| {
+                response
+                    .candid::<Result<Option<JournalRecord>, ErrorCode>>()
+                    .ok()
+            })
+            .and_then(Result::ok)
+            .flatten();
             if let Some(record) = recovered
                 && record.intent == intent
                 && record.hash.len() == 32
@@ -1910,9 +2030,15 @@ where
         return Err(error);
     }
     let principal = configured()?.ok_or(ErrorCode::PolicyUnavailable)?;
-    let response = Call::bounded_wait(principal, "append_recovery_event")
-        .with_arg(event.clone())
-        .await;
+    let response = if cfg!(feature = "embedded") {
+        Call::bounded_wait(principal, "role_append_recovery_event")
+            .with_args(&(scoped_role()?.to_string(), event.clone()))
+            .await
+    } else {
+        Call::bounded_wait(principal, "append_recovery_event")
+            .with_arg(event.clone())
+            .await
+    };
     let decoded = response
         .map_err(|_| ErrorCode::PolicyUnavailable)
         .and_then(|response| {
@@ -1938,17 +2064,23 @@ where
             // An append response may be lost after the independent journal
             // committed it. Resolve by the stable logical ID, never by
             // re-appending with a new ID or assuming no external effect.
-            let recovered = Call::bounded_wait(principal, "recovery_event")
-                .with_arg(event.logical_id.clone())
-                .await
-                .ok()
-                .and_then(|response| {
-                    response
-                        .candid::<Result<Option<RecoveryRecord>, ErrorCode>>()
-                        .ok()
-                })
-                .and_then(Result::ok)
-                .flatten();
+            let recovered = if cfg!(feature = "embedded") {
+                Call::bounded_wait(principal, "role_recovery_event")
+                    .with_args(&(scoped_role()?.to_string(), event.logical_id.clone()))
+                    .await
+            } else {
+                Call::bounded_wait(principal, "recovery_event")
+                    .with_arg(event.logical_id.clone())
+                    .await
+            }
+            .ok()
+            .and_then(|response| {
+                response
+                    .candid::<Result<Option<RecoveryRecord>, ErrorCode>>()
+                    .ok()
+            })
+            .and_then(Result::ok)
+            .flatten();
             if let Some(record) = recovered
                 && record.event == event
                 && record.hash.len() == 32
@@ -2006,7 +2138,9 @@ pub fn record_recovery_event(
     hasher.update(b"private-perp/recovery-event/v1");
     hasher.update(previous_hash);
     hasher.update(ack.head.sequence.to_be_bytes());
-    hasher.update(ic_cdk::api::canister_self().as_slice());
+    hasher.update(
+        journal_worker_bytes().map_err(|_| db::error::Error::Invariant("missing journal role"))?,
+    );
     hasher.update(logical_id);
     hasher.update(event.version.to_be_bytes());
     hasher.update(&payload);
@@ -2080,7 +2214,9 @@ pub fn record(
     hasher.update(b"private-perp/send-journal/v1");
     hasher.update(previous_hash);
     hasher.update(ack.head.sequence.to_be_bytes());
-    hasher.update(ic_cdk::api::canister_self().as_slice());
+    hasher.update(
+        journal_worker_bytes().map_err(|_| db::error::Error::Invariant("missing journal role"))?,
+    );
     hasher.update(intent.kind.as_bytes());
     hasher.update(request_id);
     hasher.update(account_id);

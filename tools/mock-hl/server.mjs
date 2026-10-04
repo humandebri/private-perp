@@ -128,7 +128,7 @@ export function exchange(body) {
       entries.push({
         hash: key,
         time: Number(action.time),
-        delta: { type: 'internalTransfer', user: sender, destination, usdc: String(action.amount) },
+        delta: { type: 'internalTransfer', user: sender, destination, usdc: String(action.amount), fee: '0' },
       })
       state.deposits.set(destination, entries)
       const outgoing = state.deposits.get(sender) ?? []
@@ -180,6 +180,11 @@ export function exchange(body) {
 
 export function info(body) {
   if (state.scenario.infoUnavailable) throw new HttpError(503, 'LOCAL MOCK info unavailable')
+  if (body.type === 'meta') return { universe: [
+    { name: 'SOL', szDecimals: 0, maxLeverage: 10 },
+    { name: 'ETH', szDecimals: 5, maxLeverage: 50 },
+    { name: 'BTC', szDecimals: 5, maxLeverage: 50 },
+  ] }
   if (body.type === 'metaAndAssetCtxs') return [
     { universe: [
       { name: 'SOL', szDecimals: 0, maxLeverage: 10 },
@@ -198,6 +203,14 @@ export function info(body) {
       [{ px: String(mid - 1), sz: '1.25', n: 2 }],
       [{ px: String(mid + 1), sz: '1.10', n: 2 }],
     ] }
+  }
+  if (body.type === 'candleSnapshot' && marketState[body.req?.coin] && body.req.interval === '1m') {
+    const { coin, startTime, endTime } = body.req
+    const mid = marketState[coin].mid
+    const candles = []
+    for (let t = Math.floor(startTime / 60_000) * 60_000; t <= endTime; t += 60_000)
+      candles.push({ s: coin, i: '1m', t, T: t + 59_999, o: String(mid - 10), h: String(mid + 20), l: String(mid - 20), c: String(mid), v: '12.5', n: 10 })
+    return candles.slice(-5000)
   }
   if (body.type === 'userNonFundingLedgerUpdates') {
     return (state.deposits.get(normalizeAddress(body.user)) ?? [])
@@ -240,7 +253,7 @@ export function seedDeposit(body) {
     hash: hash(`deposit:${id}`),
     time: Number(body.time ?? Date.now()),
     delta: body.sender
-      ? { type: 'internalTransfer', user: normalizeAddress(body.sender), destination: address, usdc: String(body.amount) }
+      ? { type: 'internalTransfer', user: normalizeAddress(body.sender), destination: address, usdc: String(body.amount), fee: '0' }
       : { type: 'deposit', usdc: String(body.amount) },
   }
   if (!entries.some((entry) => entry.hash === event.hash)) {
@@ -274,7 +287,7 @@ const marketMessage = (subscription) => {
   if (subscription.type === 'trades')
     return { channel: 'trades', data: [{ coin, px: String(mid), sz: '0.01', side: 'B', time: now, tid: now }] }
   if (subscription.type === 'candle')
-    return { channel: 'candle', data: { s: coin, i: subscription.interval ?? '1m', t: now - 60_000, T: now, o: String(mid - 10), h: String(mid + 20), l: String(mid - 20), c: String(mid), v: '12.5', n: 10 } }
+    return { channel: 'candle', data: { s: coin, i: subscription.interval ?? '1m', t: Math.floor(now / 60_000) * 60_000, T: Math.floor(now / 60_000) * 60_000 + 59_999, o: String(mid - 10), h: String(mid + 20), l: String(mid - 20), c: String(mid), v: '12.5', n: 10 } }
   if (subscription.type === 'bbo')
     return { channel: 'bbo', data: { coin, time: now, bbo: [{ px: String(mid - 1), sz: '1.25' }, { px: String(mid + 1), sz: '1.10' }] } }
   if (subscription.type === 'activeAssetCtx')
@@ -284,15 +297,27 @@ const marketMessage = (subscription) => {
 
 const sockets = new WebSocketServer({ noServer: true })
 sockets.on('connection', (socket) => {
+  const subscriptions = new Map()
+  const updates = setInterval(() => {
+    if (socket.readyState !== 1) return
+    for (const subscription of subscriptions.values()) {
+      if (!['allMids', 'candle'].includes(subscription.type)) continue
+      const payload = marketMessage(subscription)
+      if (payload) socket.send(JSON.stringify(payload))
+    }
+  }, 1000)
+  socket.on('close', () => clearInterval(updates))
   socket.on('message', (raw) => {
     let message
     try { message = JSON.parse(raw.toString()) } catch { return }
     if (message.method === 'ping') return socket.send(JSON.stringify({ channel: 'pong' }))
     if (message.method === 'subscribe') {
+      subscriptions.set(JSON.stringify(message.subscription), message.subscription ?? {})
       const payload = marketMessage(message.subscription ?? {})
       if (payload) socket.send(JSON.stringify(payload))
       socket.send(JSON.stringify({ channel: 'subscriptionResponse', data: message }))
     }
+    if (message.method === 'unsubscribe') subscriptions.delete(JSON.stringify(message.subscription))
   })
 })
 
@@ -300,7 +325,7 @@ export const server = createServer(async (request, response) => {
   let allowedOrigin
   try {
     const isAdmin = ['/admin/reset', '/admin/deposits', '/admin/scenarios'].includes(request.url)
-    allowedOrigin = isAdmin
+    allowedOrigin = isAdmin || request.url === '/info'
       ? validateAdminAccess(request.socket.remoteAddress, request.headers.origin)
       : undefined
     if (request.method === 'OPTIONS') return json(response, 204, null, allowedOrigin)
@@ -308,7 +333,7 @@ export const server = createServer(async (request, response) => {
       return json(response, 405, { error: 'POST required' }, allowedOrigin)
     const body = await readJson(request)
     if (request.url === '/exchange') return json(response, 200, exchange(body))
-    if (request.url === '/info') return json(response, 200, info(body))
+    if (request.url === '/info') return json(response, 200, info(body), allowedOrigin)
     if (request.url === '/admin/reset') {
       reset()
       return json(response, 200, { ok: true, mode: 'LOCAL MOCK' }, allowedOrigin)

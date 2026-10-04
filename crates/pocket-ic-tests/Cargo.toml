@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "PocketICによるCanister統合・障害注入試験（テスト専用）"
+license.workspace = true
+repository.workspace = true
+description = "PocketIC integration and fault-injection test harness"
 
 [dependencies]
 api-types = { path = "../api-types" }

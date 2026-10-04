@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Canister APIのCandid型（純粋・共有）"
+license.workspace = true
+repository.workspace = true
+description = "Shared Candid API types for canister interfaces"
 
 [dependencies]
 candid.workspace = true

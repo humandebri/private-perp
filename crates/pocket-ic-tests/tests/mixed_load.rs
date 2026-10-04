@@ -227,6 +227,23 @@ fn run(users: usize) {
             .iter()
             .filter(|call| call.url.ends_with("/exchange"))
             .count();
+        // The helper credited an initial direct trading deposit before the
+        // allocation POST. Observe the allocation's later arrival as a
+        // separate event so no transfer remains outstanding at recovery.
+        let arrived: Result<bool, ErrorCode> = update_args(
+            &pic,
+            vault,
+            controller,
+            "credit_venue_deposit",
+            (
+                Blob::from(vec![index as u8 + 101; 32]),
+                5_000_000_000u64,
+                Blob::from(trading_address.to_vec()),
+                "usdc".to_string(),
+            ),
+        )
+        .unwrap();
+        assert!(arrived.unwrap(), "allocation arrival for user {index}");
         phase_before = add_phase_cycles(&pic, &watched, &phase_before, &mut phase_cycles[1]);
 
         let agent: Result<AgentGeneration, ErrorCode> = update(
@@ -350,7 +367,7 @@ fn run(users: usize) {
         let status: Result<FundStatus, ErrorCode> =
             update(&pic, vault, caller, "get_fund_status", session).unwrap();
         let status = status.unwrap();
-        if status.recovery_fence.is_some() || status.trading_equity != 4_999_000_000 {
+        if status.recovery_fence.is_some() || status.trading_equity != 9_999_000_000 {
             failure_count += 1;
         }
         let expected = format!("0x{}", hex::encode(trading_address));

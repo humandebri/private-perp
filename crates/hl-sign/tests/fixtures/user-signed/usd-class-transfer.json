@@ -1,0 +1,6 @@
+{
+  "sdk": "@nktkas/hyperliquid 0.33.3 + viem",
+  "amountMicros": 10000000,
+  "nonce": 1758000000000,
+  "digest": "0xefc12257f8606e0f6431f06dc83f114685cb1b7dfce38d104ba75ff7c02a4ea4"
+}

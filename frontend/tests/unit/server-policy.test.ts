@@ -25,6 +25,13 @@ describe('edge boundary', () => {
       403,
     )
   })
+  it('serves testnet UI publicly but still blocks financial POSTs', () => {
+    expect(gateRequest(new Request('https://private-perp.example/funds'), 'testnet')).toBeNull()
+    expect(
+      gateRequest(new Request('https://private-perp.example/funds', { method: 'POST' }), 'testnet')
+        ?.status,
+    ).toBe(405)
+  })
   it('sets security and non-cache headers', () => {
     const response = secureResponse(new Response('public'), 'no-store', [
       'http://127.0.0.1:18100',

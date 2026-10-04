@@ -118,7 +118,7 @@ export class LocalGateway {
         vaultPrivateCodec.empty,
         { address, session, clients, envelope },
       ).catch(() => undefined)
-      throw new Error('セッションは破棄されました')
+      throw new Error('The session was discarded')
     }
     this.active = { address, session, clients, envelope }
     return this.active
@@ -130,20 +130,20 @@ export class LocalGateway {
     generation: number,
   ): Promise<SessionHandle> {
     for (let attempt = 0; attempt < 4; attempt++) {
-      if (generation !== this.generation) throw new Error('セッションは破棄されました')
+      if (generation !== this.generation) throw new Error('The session was discarded')
       // open_session consumes its challenge before the journal write. A busy
       // journal therefore needs a fresh challenge and signature on retry.
       const challenge = unwrap(
         await clients.vault.issue_challenge({
           principal: clients.principal,
           origin: location.origin,
-          network: { Local: null },
+          network: clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
           purpose: { Login: null },
           eoa_address: hexToBytes(address, 20),
         }),
       )
       const signature = await signTypedData(address, new Uint8Array(challenge.typed_data))
-      if (generation !== this.generation) throw new Error('セッションは破棄されました')
+      if (generation !== this.generation) throw new Error('The session was discarded')
       try {
         return unwrap(
           await clients.vault.open_session({
@@ -161,7 +161,7 @@ export class LocalGateway {
         await new Promise((resolve) => setTimeout(resolve, 150 * 2 ** attempt))
       }
     }
-    throw new Error('セッションを開始できませんでした')
+    throw new Error('Could not start the session')
   }
 
   async logout(): Promise<void> {
@@ -178,7 +178,7 @@ export class LocalGateway {
   }
 
   private require(): SessionData {
-    if (!this.active) throw new Error('MetaMaskでログインしてください')
+    if (!this.active) throw new Error('Connect MetaMask to log in')
     return this.active
   }
 
@@ -198,7 +198,7 @@ export class LocalGateway {
     const expiresAt = nowMs() + 60_000n
     const canister = Principal.fromText(active.clients.config.tradingCore)
     const aad = envelopeAad(
-      'local',
+      active.clients.config.stage,
       canister.toUint8Array(),
       method,
       active.clients.principal.toUint8Array(),
@@ -208,7 +208,7 @@ export class LocalGateway {
     const response = unwrap(
       await active.clients.core[method]({
         key_id: serverKey,
-        network: { Local: null },
+        network: active.clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
         canister,
         method,
         request_id: id,
@@ -219,7 +219,7 @@ export class LocalGateway {
       }),
     )
     if (!id.every((byte, index) => byte === response.request_id[index]))
-      throw new Error('応答request_idが一致しません')
+      throw new Error('Response request_id does not match')
     return decode(await active.envelope.open(aad, new Uint8Array(response.ciphertext)))
   }
 
@@ -245,7 +245,7 @@ export class LocalGateway {
     const expiresAt = nowMs() + 60_000n
     const canister = Principal.fromText(active.clients.config.fundsVault)
     const aad = envelopeAad(
-      'local',
+      active.clients.config.stage,
       canister.toUint8Array(),
       method,
       active.clients.principal.toUint8Array(),
@@ -255,7 +255,7 @@ export class LocalGateway {
     const response = unwrap(
       await active.clients.vault.private_call({
         key_id: serverKey,
-        network: { Local: null },
+        network: active.clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
         canister,
         method,
         request_id: id,
@@ -266,7 +266,7 @@ export class LocalGateway {
       }),
     )
     if (!id.every((byte, index) => byte === response.request_id[index]))
-      throw new Error('応答request_idが一致しません')
+      throw new Error('Response request_id does not match')
     return decode(await active.envelope.open(aad, new Uint8Array(response.ciphertext)))
   }
 
@@ -286,7 +286,7 @@ export class LocalGateway {
     const expiresAt = nowMs() + 60_000n
     const canister = Principal.fromText(active.clients.config.tradingCore)
     const aad = envelopeAad(
-      'local',
+      active.clients.config.stage,
       canister.toUint8Array(),
       method,
       active.clients.principal.toUint8Array(),
@@ -296,7 +296,7 @@ export class LocalGateway {
     const response = unwrap(
       await active.clients.core.private_call({
         key_id: serverKey,
-        network: { Local: null },
+        network: active.clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
         canister,
         method,
         request_id: id,
@@ -307,7 +307,7 @@ export class LocalGateway {
       }),
     )
     if (!id.every((byte, index) => byte === response.request_id[index]))
-      throw new Error('応答request_idが一致しません')
+      throw new Error('Response request_id does not match')
     return decode(await active.envelope.open(aad, new Uint8Array(response.ciphertext)))
   }
 
@@ -315,9 +315,9 @@ export class LocalGateway {
     const active = this.require()
     const { session, clients } = active
     const funds = unwrap(await clients.vault.get_fund_status(session))
-    if (active !== this.active) throw new Error('セッションは破棄されました')
+    if (active !== this.active) throw new Error('The session was discarded')
     const fundEvents = await this.listFundEvents()
-    if (active !== this.active) throw new Error('セッションは破棄されました')
+    if (active !== this.active) throw new Error('The session was discarded')
     const optional = await Promise.allSettled([
       clients.core.get_agent_status(session).then(unwrap),
       this.sealed('get_account_snapshot', codec.snapshotQuery(session), codec.snapshot),
@@ -453,6 +453,8 @@ export class LocalGateway {
 
   async seedDeposit(amount: string): Promise<void> {
     const active = this.require()
+    if (active.clients.config.stage !== 'local')
+      throw new Error('Mock deposits are available only locally')
     const instructions = await this.fundingInstructions()
     const response = await fetch(`${active.clients.config.mockHl}/admin/deposits`, {
       method: 'POST',
@@ -464,7 +466,7 @@ export class LocalGateway {
         id: crypto.randomUUID(),
       }),
     })
-    if (!response.ok) throw new Error(`LOCAL MOCK seed失敗: ${response.status}`)
+    if (!response.ok) throw new Error(`LOCAL MOCK seed failed: ${response.status}`)
   }
 
   async allocate(amount: bigint) {
@@ -479,14 +481,14 @@ export class LocalGateway {
   async depositToReserve(amount: string, value: bigint) {
     const active = this.require()
     const read = async () => {
-      if (this.active !== active) throw new Error('セッションが変更されました。')
+      if (this.active !== active) throw new Error('The session has changed.')
       const status = unwrap(await active.clients.vault.get_fund_status(active.session))
-      if (this.active !== active) throw new Error('セッションが変更されました。')
+      if (this.active !== active) throw new Error('The session has changed.')
       return status
     }
     const before = await read()
     if (before.unknowns.length || before.recovery_fence.length)
-      throw new Error('先の資金移動を照合中です。履歴を確認してください。')
+      throw new Error('Reconciling the previous transfer. Check history.')
     await this.seedDeposit(amount)
     await waitForFunds(read, (status) => status.withdrawable >= before.withdrawable + value)
   }
@@ -494,14 +496,14 @@ export class LocalGateway {
   async allocateFromReserve(value: bigint) {
     const active = this.require()
     const read = async () => {
-      if (this.active !== active) throw new Error('セッションが変更されました。')
+      if (this.active !== active) throw new Error('The session has changed.')
       const status = unwrap(await active.clients.vault.get_fund_status(active.session))
-      if (this.active !== active) throw new Error('セッションが変更されました。')
+      if (this.active !== active) throw new Error('The session has changed.')
       return status
     }
     const before = await read()
     if (before.unknowns.length || before.recovery_fence.length)
-      throw new Error('先の資金移動を照合中です。履歴を確認してください。')
+      throw new Error('Reconciling the previous transfer. Check history.')
     const accepted = await this.allocate(value)
     await waitForFunds(
       read,
@@ -551,8 +553,8 @@ export class LocalGateway {
     let account: Uint8Array | number[] | undefined
     try {
       account = unwrap(await clients.vault.get_trading_account(session))[0]
-      if (!account) throw new Error('取引口座がありません。先に配分してください')
-      if (active !== this.active) throw new Error('セッションは破棄されました')
+      if (!account) throw new Error('No trading account. Allocate funds first')
+      if (active !== this.active) throw new Error('The session was discarded')
     } catch (cause) {
       if (
         cause instanceof CanisterError &&
@@ -643,13 +645,13 @@ export class LocalGateway {
     const active = this.require()
     const { address, session, clients } = active
     const read = async () => {
-      if (this.active !== active) throw new Error('セッションが変更されました。')
+      if (this.active !== active) throw new Error('The session has changed.')
       const status = unwrap(await clients.vault.get_fund_status(session))
-      if (this.active !== active) throw new Error('セッションが変更されました。')
+      if (this.active !== active) throw new Error('The session has changed.')
       return status
     }
     await prepareWithdrawal(amount, read, (shortfall) => this.recover(shortfall))
-    if (this.active !== active) throw new Error('セッションが変更されました。')
+    if (this.active !== active) throw new Error('The session has changed.')
     const nonce = nowMs()
     const expiresAt = nonce + 300_000n
     const typedData = withdrawalTypedData({
@@ -658,9 +660,10 @@ export class LocalGateway {
       nonce,
       expiresAt,
       canister: Principal.fromText(clients.config.fundsVault),
+      network: clients.config.stage,
     })
     const signature = await signTypedData(address, typedData)
-    if (this.active !== active) throw new Error('セッションが変更されました。')
+    if (this.active !== active) throw new Error('The session has changed.')
     return this.sealedVault(
       'request_withdrawal',
       vaultPrivateCodec.withdrawal({
@@ -669,7 +672,7 @@ export class LocalGateway {
         amount,
         asset: { Usdc: null },
         destination: { AuthenticatedEoaHlAccount: null },
-        network: { Local: null },
+        network: clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
         nonce,
         expires_at: expiresAt,
         intent_signature: signature,

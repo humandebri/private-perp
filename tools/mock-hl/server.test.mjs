@@ -19,6 +19,25 @@ test('deposit seed is idempotent and queryable', () => {
   assert.equal(entries[0].delta.usdc, '12.000001')
 })
 
+test('public candle history uses minute boundaries and the requested symbol', () => {
+  const candles = info({ type: 'candleSnapshot', req: { coin: 'ETH', interval: '1m', startTime: 60_000, endTime: 180_000 } })
+  assert.deepEqual(candles.map(candle => candle.t), [60_000, 120_000, 180_000])
+  assert.ok(candles.every(candle => candle.s === 'ETH' && candle.i === '1m' && Number(candle.h) >= Number(candle.c) && Number(candle.l) <= Number(candle.o)))
+})
+
+test('sender-attributed mock deposits provide an explicit zero transfer fee', () => {
+  const address = `0x${'11'.repeat(20)}`
+  const sender = `0x${'22'.repeat(20)}`
+  reset()
+  seedDeposit({ address, sender, amount: '10', id: 'inbound-transfer' })
+  const [entry] = info({ type: 'userNonFundingLedgerUpdates', user: address })
+  assert.equal(entry.delta.type, 'internalTransfer')
+  assert.equal(entry.delta.user, sender)
+  assert.equal(entry.delta.fee, '0')
+  assert.equal(entry.delta.usdc, '10')
+  assert.equal(info({ type: 'clearinghouseState', user: address }).marginSummary.accountValue, '10')
+})
+
 test('market fills, limit rests, and cancellation succeeds', () => {
   reset()
   const market = exchange({ nonce: 1, action: { type: 'order', orders: [{ a: 2, p: '60000', s: '0.01', t: { limit: { tif: 'Ioc' } } }] } })
@@ -63,6 +82,7 @@ test('usdSend appears as a destination ledger update', () => {
   assert.equal(entries.length, 1)
   assert.equal(entries[0].delta.usdc, '12.5')
   assert.equal(entries[0].delta.type, 'internalTransfer')
+  assert.equal(entries[0].delta.fee, '0')
   assert.equal(entries[0].delta.user, fixture.address)
   assert.equal(entries[0].delta.destination, destination)
   assert.deepEqual(info({ type: 'userNonFundingLedgerUpdates', user: fixture.address }), entries)
@@ -107,6 +127,14 @@ test('admin HTTP responses use exact-origin CORS and reject foreign origins', as
     })
     assert.equal(denied.status, 403)
     assert.equal(denied.headers.get('access-control-allow-origin'), null)
+    const infoUrl = `http://127.0.0.1:${address.port}/info`
+    const preflight = await fetch(infoUrl, { method: 'OPTIONS', headers: { origin: 'http://127.0.0.1:4173' } })
+    assert.equal(preflight.headers.get('access-control-allow-origin'), 'http://127.0.0.1:4173')
+    const metadata = await fetch(infoUrl, { method: 'POST', headers: { origin: 'http://127.0.0.1:4173', 'content-type': 'application/json' }, body: JSON.stringify({ type: 'meta' }) })
+    assert.equal(metadata.headers.get('access-control-allow-origin'), 'http://127.0.0.1:4173')
+    assert.equal((await metadata.json()).universe.find(asset => asset.name === 'BTC').szDecimals, 5)
+    const foreignInfo = await fetch(infoUrl, { method: 'OPTIONS', headers: { origin: 'https://attacker.example' } })
+    assert.equal(foreignInfo.status, 403)
   } finally {
     await new Promise((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

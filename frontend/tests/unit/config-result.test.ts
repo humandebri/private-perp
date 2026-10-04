@@ -8,8 +8,7 @@ const valid = {
   VITE_IC_HOST: 'http://127.0.0.1:18100',
   VITE_MOCK_HL_URL: 'http://localhost:8080',
   VITE_MARKET_WS_URL: 'ws://localhost:8080/ws',
-  VITE_FUNDS_VAULT_CANISTER_ID: 'aaaaa-aa',
-  VITE_TRADING_CORE_CANISTER_ID: 'aaaaa-aa',
+  VITE_PRIVATE_PERP_CANISTER_ID: 'aaaaa-aa',
 }
 describe('local configuration and results', () => {
   it('requires every local endpoint and refuses non-loopback', () => {
@@ -22,6 +21,25 @@ describe('local configuration and results', () => {
     expect(() =>
       resolveConfig({ ...valid, VITE_MARKET_WS_URL: 'http://localhost:8080/ws' }),
     ).toThrow('WebSocket')
+  })
+  it('uses one canister ID and secure endpoints on testnet', () => {
+    const config = resolveConfig({
+      VITE_APP_STAGE: 'testnet',
+      VITE_IC_HOST: 'https://icp-api.io',
+      VITE_MARKET_WS_URL: 'wss://api.hyperliquid-testnet.xyz/ws',
+      VITE_PRIVATE_PERP_CANISTER_ID: 'aaaaa-aa',
+    })
+    expect(config.fundsVault).toBe(config.tradingCore)
+    expect(config.privatePerp).toBe('aaaaa-aa')
+    expect(config.fetchRootKey).toBe(false)
+    expect(() =>
+      resolveConfig({
+        VITE_APP_STAGE: 'testnet',
+        VITE_IC_HOST: 'http://icp-api.io',
+        VITE_MARKET_WS_URL: 'wss://api.hyperliquid-testnet.xyz/ws',
+        VITE_PRIVATE_PERP_CANISTER_ID: 'aaaaa-aa',
+      }),
+    ).toThrow('HTTPS')
   })
   it('maps candid results without hiding the error code', () => {
     expect(unwrap({ Ok: 7 })).toBe(7)

@@ -4,7 +4,8 @@ import { bytesToHex } from '../client/wallet'
 import { variantName } from '../client/result'
 
 const toMicros = (value: string) => {
-  if (!/^\d+(\.\d{1,6})?$/.test(value)) throw new Error('USDCは小数6桁以内で入力してください')
+  if (!/^\d+(\.\d{1,6})?$/.test(value))
+    throw new Error('Enter USDC with no more than six decimal places')
   const [whole, fraction = ''] = value.split('.')
   return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0'))
 }
@@ -15,13 +16,13 @@ export function FallbackClient() {
   const [data, setData] = useState<LiveData>()
   const [amount, setAmount] = useState('1')
   const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('通常UI停止時だけ使用してください。')
+  const [message, setMessage] = useState('Use only when the standard UI is unavailable.')
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true)
     try {
       await action()
       if (gateway.session) setData(await gateway.refresh())
-      setMessage('操作を受け付けました。取引所側の確定状態を確認してください。')
+      setMessage('Action accepted. Check the confirmed state on the exchange.')
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error))
     } finally {
@@ -30,10 +31,14 @@ export function FallbackClient() {
   }
   return (
     <main className="fallback-client">
-      <div className="eyebrow">MINIMUM RECOVERY CLIENT / LOCAL</div>
-      <h1>取消・出金クライアント</h1>
+      <div className="eyebrow">
+        MINIMUM RECOVERY CLIENT /{' '}
+        {import.meta.env.VITE_APP_STAGE === 'testnet' ? 'HL TESTNET' : 'LOCAL'}
+      </div>
+      <h1>Cancellation and withdrawal client</h1>
       <p>
-        これはCanister停止を回避する仕組みではありません。取引口座は公開され、入出金の額と時刻から関連を推測される場合があります。
+        This cannot bypass a stopped canister. Trading accounts are public; deposit and withdrawal
+        amounts and timing may reveal links.
       </p>
       <output className="warning-banner fallback-message">{message}</output>
       {!address ? (
@@ -48,7 +53,7 @@ export function FallbackClient() {
             })
           }
         >
-          MetaMaskで認証
+          Authenticate with MetaMask
         </button>
       ) : (
         <>
@@ -57,24 +62,25 @@ export function FallbackClient() {
             <dd>
               {address.slice(0, 10)}…{address.slice(-6)}
             </dd>
-            <dt>観測時刻</dt>
+            <dt>Observed at</dt>
             <dd>
               {data?.snapshot
-                ? new Date(Number(data.snapshot.observed_at)).toLocaleString()
-                : '未観測'}
+                ? new Date(Number(data.snapshot.observed_at)).toLocaleString('en-US')
+                : 'Not observed'}
             </dd>
-            <dt>鮮度</dt>
+            <dt>Data age</dt>
             <dd>{data?.snapshot ? `${data.snapshot.data_age_ms} ms` : '—'}</dd>
           </dl>
           <section className="panel table-panel">
             <div className="panel-title">
-              <h2>未終端注文</h2>
+              <h2>Non-terminal orders</h2>
               <button
                 className="danger"
                 disabled={busy}
                 onClick={() =>
-                  window.confirm('保護用SL/TPを含む未終端注文をすべて取り消しますか？') &&
-                  void run(() => gateway.cancelAll())
+                  window.confirm(
+                    'Cancel all non-terminal orders, including protective SL/TP orders?',
+                  ) && void run(() => gateway.cancelAll())
                 }
               >
                 Cancel All
@@ -84,9 +90,9 @@ export function FallbackClient() {
               <thead>
                 <tr>
                   <th>ID</th>
-                  <th>市場</th>
-                  <th>状態</th>
-                  <th>操作</th>
+                  <th>Market</th>
+                  <th>State</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -106,7 +112,7 @@ export function FallbackClient() {
                           disabled={busy}
                           onClick={() => void run(() => gateway.cancel(order.order_id))}
                         >
-                          取消要求
+                          Request cancellation
                         </button>
                       </td>
                     </tr>
@@ -115,11 +121,11 @@ export function FallbackClient() {
             </table>
           </section>
           <section className="panel">
-            <h2>本人EOA宛出金</h2>
+            <h2>Withdraw to your own wallet</h2>
             <label>
-              金額 (USDC)
+              Amount (USDC)
               <input
-                aria-label="fallback出金額"
+                aria-label="Fallback withdrawal amount"
                 value={amount}
                 onChange={(event) => setAmount(event.target.value)}
               />
@@ -128,12 +134,12 @@ export function FallbackClient() {
               disabled={busy}
               onClick={() => void run(() => gateway.withdraw(toMicros(amount)))}
             >
-              MetaMask署名で出金
+              Withdraw with MetaMask
             </button>
           </section>
           <div className="fallback-actions">
             <button disabled={busy} onClick={() => void run(async () => undefined)}>
-              再読込
+              Refresh
             </button>
             <button
               className="danger"
@@ -146,7 +152,7 @@ export function FallbackClient() {
                 })
               }
             >
-              ログアウト
+              Log out
             </button>
           </div>
         </>

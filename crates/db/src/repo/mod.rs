@@ -29,6 +29,7 @@ pub mod positions;
 pub mod recovery_fences;
 pub mod send_journal;
 pub mod send_journal_client;
+pub mod spot_deposits;
 pub mod vault_config;
 
 use crate::error::Error;

@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "ic-sqlite-vfs の同期ラッパ（非async）"
+license.workspace = true
+repository.workspace = true
+description = "Synchronous SQLite storage wrapper for Internet Computer canisters"
 
 [dependencies]
 api-types = { path = "../api-types" }

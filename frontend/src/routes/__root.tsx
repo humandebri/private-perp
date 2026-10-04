@@ -3,27 +3,29 @@ import type { ReactNode } from 'react'
 import stylesheet from '../styles.css?url'
 import { LocalSessionProvider } from '../ui/local-session'
 
+const isTestnet = import.meta.env.VITE_APP_STAGE === 'testnet'
+
 export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { title: 'VEIL / Private Perpetuals — Local' },
+      { title: `VEIL / Private Perpetuals — ${isTestnet ? 'Testnet' : 'Local'}` },
     ],
     links: [{ rel: 'stylesheet', href: stylesheet }],
   }),
   shellComponent: Document,
   notFoundComponent: () => (
     <main className="page">
-      <h1>ページが見つかりません</h1>
-      <Link to="/">ホームへ</Link>
+      <h1>Page not found</h1>
+      <Link to="/">Go home</Link>
     </main>
   ),
 })
 
 function Document({ children }: { children: ReactNode }) {
   return (
-    <html lang="ja">
+    <html lang="en">
       <head>
         <HeadContent />
       </head>
@@ -32,21 +34,25 @@ function Document({ children }: { children: ReactNode }) {
           <Link to="/" className="brand">
             <span className="brand-mark">V</span> VEIL<span className="brand-sub"> / PERPS</span>
           </Link>
-          <nav aria-label="メインナビゲーション">
-            <Link to="/trade">取引</Link>
-            <Link to="/funds">資金</Link>
-            <Link to="/history">履歴</Link>
-            <Link to="/fallback">最小クライアント</Link>
+          <nav aria-label="Main navigation">
+            <Link to="/trade">Trade</Link>
+            <Link to="/funds">Funds</Link>
+            <Link to="/history">History</Link>
+            <Link to="/fallback">Minimal client</Link>
           </nav>
-          <span className="badge">LOCAL MOCK</span>
+          <span className="badge">{isTestnet ? 'HL TESTNET' : 'LOCAL MOCK'}</span>
         </header>
         <LocalSessionProvider>{children}</LocalSessionProvider>
         <footer>
           <span>
             <i className="status-dot" />
-            ローカルCanister接続
+            {isTestnet ? 'Public canister connection' : 'Local canister connection'}
           </span>
-          <span>loopback限定 · 実資金・testnet・mainnetは対象外</span>
+          <span>
+            {isTestnet
+              ? 'HL testnet only · Test USDC only'
+              : 'Localhost only · No real funds, testnet or mainnet'}
+          </span>
         </footer>
         <Scripts />
       </body>

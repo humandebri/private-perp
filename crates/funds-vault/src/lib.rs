@@ -27,6 +27,7 @@ mod private_api;
 mod random;
 mod recovery;
 mod rest_budget;
+mod spot_deposits;
 #[cfg(feature = "test-venue")]
 mod test_atomicity;
 mod venue;
@@ -49,21 +50,23 @@ thread_local! {
 }
 
 /// このビルドのバージョン。デプロイ確認用。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// ログインchallengeを発行する。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn issue_challenge(request: ChallengeRequest) -> Result<ChallengeResponse, ErrorCode> {
     auth::issue_challenge(request, ic_cdk::api::canister_self()).await
 }
 
 /// challengeを消費してセッションを発行する。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn open_session(request: OpenSessionRequest) -> Result<SessionHandle, ErrorCode> {
-    auth::open_session(request, ic_cdk::api::msg_caller()).await
+    let session = auth::open_session(request, ic_cdk::api::msg_caller()).await?;
+    spot_deposits::claim_for_session(&session).await?;
+    Ok(session)
 }
 
 /// セッションを失効させる。
@@ -74,7 +77,7 @@ fn revoke_session(session: SessionHandle) -> Result<(), ErrorCode> {
 /// HPKEの鍵世代を更新する（controllerのみ）。
 ///
 /// 秘密鍵はcanister内のDBに留め、公開鍵のみを配布する（`Plan.md` 16.5）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -101,7 +104,7 @@ async fn rotate_hpke_key() -> Result<api_types::Blob, ErrorCode> {
 /// 正規化したイベントID（`keccak256("deposit" ‖ tx_hash)`）で**二重計上を防ぐ**。
 /// 本番ではreplicatedな`/info`照合がこの経路を呼ぶ。ユーザーへの紐付け（宛先アドレス→
 /// 利用者）と`deposit_confirmed`の起票は次段階（アドレス写像の実装後）に行う。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn ingest_venue_deposit(
     tx_hash: api_types::Blob,
     amount: u64,
@@ -143,7 +146,7 @@ fn ingest_venue_deposit(
 
 /// テスト専用：queuedなactionのダイジェストを壊す（`test-venue` featureでのみ存在）。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn test_corrupt_action_digest() -> Result<u32, ErrorCode> {
     db::tx::update(|connection| db::repo::actions::overwrite_queued_digest(connection, &[0u8; 32]))
         .map(|changed| changed as u32)
@@ -152,7 +155,7 @@ fn test_corrupt_action_digest() -> Result<u32, ErrorCode> {
 
 /// テスト専用：現行鍵で封筒を作る（`test-venue` featureでのみ存在）。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn test_hpke_seal(plaintext: api_types::Blob) -> Result<api_types::Blob, ErrorCode> {
     let public = db::tx::query(db::repo::hpke::active_public)
         .map_err(|error| auth::map_db(error, None))?
@@ -172,7 +175,7 @@ async fn test_hpke_seal(plaintext: api_types::Blob) -> Result<api_types::Blob, E
 
 /// テスト専用：封筒を開ける（`aad`の`expires_at`を変えると失敗する）。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn test_hpke_open(
     envelope: api_types::Blob,
     expires_at: u64,
@@ -223,7 +226,7 @@ fn require_controller(reason: &str) -> Result<(), ErrorCode> {
 /// 環境のnetworkを設定する（controllerのみ）。
 ///
 /// mainnetはPhase 2では拒否する（`docs/phase-0/environments.md` E-2）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn set_network(network: String) -> Result<(), ErrorCode> {
     require_controller("only a controller can set the network")?;
     hl_types::environment::parse_network(&network).map_err(environment::map_environment)?;
@@ -235,7 +238,7 @@ fn set_network(network: String) -> Result<(), ErrorCode> {
 /// Hyperliquidのendpointを設定する（controllerのみ）。
 ///
 /// 設定済みのnetworkと整合しないhost（例：testnet設定にmainnet endpoint）は拒否する。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn set_venue_endpoints(exchange_url: String, info_url: String) -> Result<(), ErrorCode> {
     require_controller("only a controller can set the venue endpoints")?;
     let network: hl_types::Network = environment::network()?.into();
@@ -251,7 +254,7 @@ fn set_venue_endpoints(exchange_url: String, info_url: String) -> Result<(), Err
 /// 閾値ECDSAのkey IDを設定する（controllerのみ）。
 ///
 /// testnetの鍵名はデプロイ後に実測して確定する（`docs/phase-0/environments.md` 2節）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn set_ecdsa_key_id(key_id: String) -> Result<(), ErrorCode> {
     require_controller("only a controller can set the ecdsa key id")?;
     hl_types::environment::validate_key_id(&key_id).map_err(environment::map_environment)?;
@@ -262,7 +265,7 @@ fn set_ecdsa_key_id(key_id: String) -> Result<(), ErrorCode> {
 }
 
 /// 共有REST予算のpolicy principal（controllerのみ）。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn set_policy_principal(policy: Principal) -> Result<(), ErrorCode> {
     require_controller("only a controller can set the policy principal")?;
     let bytes = policy.as_slice();
@@ -278,7 +281,7 @@ fn set_policy_principal(policy: Principal) -> Result<(), ErrorCode> {
     .map_err(|error| auth::map_db(error, None))
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_policy_principal() -> Option<Principal> {
     db::tx::query(db::repo::vault_config::policy_principal)
         .ok()
@@ -286,58 +289,58 @@ fn get_policy_principal() -> Option<Principal> {
         .map(|bytes| Principal::from_slice(&bytes))
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn set_send_journal(principal: Principal) -> Result<(), ErrorCode> {
     require_controller("only a controller can configure the send journal")?;
     journal_client::configure(principal)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn set_journal_guard(principal: Principal) -> Result<(), ErrorCode> {
     require_controller("only a controller can configure the journal guard")?;
     journal_client::set_guard(principal)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn resume_journal() -> Result<(), ErrorCode> {
     journal_client::resume("vault").await
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_send_journal() -> Result<Option<Principal>, ErrorCode> {
     journal_client::configured()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_journal_send_status() -> Result<(bool, bool), ErrorCode> {
     journal_client::public_status()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_journal_guard() -> Result<Option<Principal>, ErrorCode> {
     require_controller("only a controller can inspect the journal guard")?;
     journal_client::guard()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn journal_restore_status() -> Result<(u64, u64, bool), ErrorCode> {
     require_controller("only a controller can inspect journal restore")?;
     journal_client::status()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn recovery_stage_status() -> Result<(u64, bool), ErrorCode> {
     require_controller("only a controller can inspect journal restore")?;
     journal_client::recovery_stage_status()
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn recovery_replay_pending() -> Result<bool, ErrorCode> {
     require_controller("only a controller can inspect journal restore")?;
     journal_client::replay_pending_validation()
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn set_core_principal(core: Principal) -> Result<(), ErrorCode> {
     require_controller("only a controller can set the core principal")?;
     let bytes = core.as_slice();
@@ -360,7 +363,7 @@ fn set_core_principal(core: Principal) -> Result<(), ErrorCode> {
     .map_err(|error| auth::map_db(error, None))
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_core_principal() -> Option<Principal> {
     db::tx::query(db::repo::vault_config::core_principal)
         .ok()
@@ -368,7 +371,7 @@ fn get_core_principal() -> Option<Principal> {
         .map(|bytes| Principal::from_slice(&bytes))
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn set_recovery_history_verified(verified: bool) -> Result<(), ErrorCode> {
     require_controller("only a controller can confirm recovery history completeness")?;
     db::tx::update(|connection| {
@@ -377,20 +380,20 @@ fn set_recovery_history_verified(verified: bool) -> Result<(), ErrorCode> {
     .map_err(|error| auth::map_db(error, None))
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_recovery_history_verified() -> Result<bool, ErrorCode> {
     db::tx::query(db::repo::vault_config::recovery_history_verified)
         .map_err(|error| auth::map_db(error, None))
 }
 
 /// 現在の環境設定（診断用・公開）。秘密は含まない。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_environment() -> Result<api_types::environment::EnvironmentView, ErrorCode> {
     environment::resolved()
 }
 
 /// 現行のHPKE公開鍵。未生成はエラー（機密性の前提が欠けている）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_hpke_public_key() -> Result<api_types::Blob, ErrorCode> {
     let public =
         db::tx::query(db::repo::hpke::active_public).map_err(|error| auth::map_db(error, None))?;
@@ -400,7 +403,7 @@ fn get_hpke_public_key() -> Result<api_types::Blob, ErrorCode> {
 }
 
 /// 本人の取引口座アドレス（着金確認や照合に使う）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_trading_address(session: SessionHandle) -> Result<api_types::Blob, ErrorCode> {
     let status = auth::session_status(&session)?;
     let user_id: [u8; 32] =
@@ -426,7 +429,7 @@ fn get_trading_address(session: SessionHandle) -> Result<api_types::Blob, ErrorC
 ///
 /// 戻り値は `(取引口座の残高, 出金可能額)`。認可のcaller束縛は呼び出し側（core）が
 /// `session_status` で行う。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_balances(session: SessionHandle) -> Result<(u64, u64), ErrorCode> {
     let status = auth::session_status(&session)?;
     let user_id: [u8; 32] =
@@ -456,7 +459,7 @@ fn get_balances(session: SessionHandle) -> Result<(u64, u64), ErrorCode> {
 }
 
 /// 本人の取引口座ID（`trading_core` が所有権の確認に使う）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_trading_account(session: SessionHandle) -> Result<Option<api_types::Blob>, ErrorCode> {
     // canister間（trading_core）からの呼び出しを想定し、caller束縛は呼び出し側で行う
     // （coreは先に session_status で本人のprincipalを確認する）。
@@ -505,7 +508,7 @@ async fn approve_agent_generation(
 }
 
 /// 口座・世代の承認状態（`trading_core` が状態表示と署名可否の判断に使う）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_agent_approval(
     account_id: api_types::Blob,
     generation: u64,
@@ -523,13 +526,13 @@ fn get_agent_approval(
 }
 
 /// セッションの有効性（canister間の検証経路。呼び出し元は返却されたprincipalを検証する）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn session_status(session: SessionHandle) -> Result<api_types::auth::SessionStatus, ErrorCode> {
     auth::session_status(&session)
 }
 
 /// 入金案内（認証済みセッションが必要）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_funding_instructions(
     session: SessionHandle,
 ) -> Result<api_types::fund::FundingInstructions, ErrorCode> {
@@ -548,17 +551,17 @@ fn get_funding_instructions(
     fund::funding_instructions(&verified)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn configure_cycles(daily_floor: u128, exit_reserve: u128) -> Result<(), ErrorCode> {
     cycles::configure(daily_floor, exit_reserve)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn get_cycles_status() -> Result<api_types::operations_status::CyclesStatus, ErrorCode> {
     cycles::status()
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn configure_eligibility(
     terms_version: u64,
     issuer_address: api_types::Blob,
@@ -567,7 +570,7 @@ fn configure_eligibility(
     eligibility::configure(terms_version, issuer_address, mock_issuer)
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_eligibility_configuration() -> Result<Option<(u64, api_types::Blob)>, ErrorCode> {
     db::tx::query(db::repo::eligibility::config)
         .map(|config| {
@@ -576,7 +579,7 @@ fn get_eligibility_configuration() -> Result<Option<(u64, api_types::Blob)>, Err
         .map_err(|e| auth::map_db(e, None))
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn eligibility_status(
     session: SessionHandle,
 ) -> Result<api_types::eligibility::EligibilityStatus, ErrorCode> {
@@ -593,7 +596,7 @@ fn eligibility_status(
     )
 }
 
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn builder_fee_mock_status(
     session: SessionHandle,
 ) -> Result<api_types::builder_fee::BuilderFeeMockStatus, ErrorCode> {
@@ -611,7 +614,7 @@ fn builder_fee_mock_status(
 }
 
 /// Core-only admission check. Core must separately bind the session principal to its caller.
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn check_eligibility_for_core(
     session: SessionHandle,
     account_id: api_types::Blob,
@@ -637,7 +640,7 @@ fn check_eligibility_for_core(
     eligibility::require(&user_id, status.principal, &account_id)
 }
 
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn check_eligibility_account_for_core(
     user_id: api_types::Blob,
     account_id: api_types::Blob,
@@ -662,14 +665,14 @@ fn check_eligibility_account_for_core(
 }
 
 /// 資金状態（認証済みセッションが必要）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn get_fund_status(session: SessionHandle) -> Result<api_types::fund::FundStatus, ErrorCode> {
     let verified = auth::verify_session(&session, ic_cdk::api::msg_caller())?;
     fund::fund_status_with_holds(&verified)
 }
 
 /// 資金履歴（認証済みセッションが必要）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn list_fund_events(
     session: SessionHandle,
     cursor: Option<api_types::Blob>,
@@ -697,7 +700,7 @@ async fn request_withdrawal(
 
 /// テスト専用のECDSA往復（`test-venue` featureでのみ存在）。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn test_ecdsa_roundtrip(
     seed: u32,
     digest: api_types::Blob,
@@ -720,7 +723,7 @@ async fn test_ecdsa_roundtrip(
 
 /// テスト専用の入金計上（`test-venue` featureでのみ存在）。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn test_credit_deposit(
     session: SessionHandle,
     amount: u64,
@@ -752,30 +755,37 @@ fn schedule_sweep() {
     let timer_id = ic_cdk_timers::set_timer_interval_serial(
         core::time::Duration::from_millis(outbox::SWEEP_INTERVAL_MS),
         async || {
-            let now = clock::now_ms();
-            // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
-            if let Err(error) = outbox::sweep(now).await {
-                ic_cdk::println!("fund outbox sweep failed: {error:?}");
-            }
+            db::tx::with_optional_scope_future(
+                cfg!(feature = "embedded").then_some(db::DbScope::Vault),
+                async {
+                    let now = clock::now_ms();
+                    // 1回の失敗でtimerを止めない（次の間隔で再試行する）。
+                    if let Err(error) = outbox::sweep(now).await {
+                        ic_cdk::println!("fund outbox sweep failed: {error:?}");
+                    }
 
-            // ローカル実接続はE2Eの待ち時間を抑えるため5秒、それ以外は60秒。
-            // いずれも1回あたり2件までとしてoutcall数を制限する。
-            let deposit_interval = if environment::network_name().ok().as_deref() == Some("local") {
-                5_000
-            } else {
-                60_000
-            };
-            let due_deposits = LAST_DEPOSIT_RECONCILE.with(|cell| {
-                if now.saturating_sub(cell.get()) < deposit_interval {
-                    false
-                } else {
-                    cell.set(now);
-                    true
-                }
-            });
-            if due_deposits && let Err(error) = deposits::reconcile_all(2).await {
-                ic_cdk::println!("deposit reconciliation failed: {error:?}");
-            }
+                    // ローカル実接続はE2Eの待ち時間を抑えるため5秒、それ以外は60秒。
+                    // いずれも1回あたり2件までとしてoutcall数を制限する。
+                    let deposit_interval =
+                        if environment::network_name().ok().as_deref() == Some("local") {
+                            5_000
+                        } else {
+                            60_000
+                        };
+                    let due_deposits = LAST_DEPOSIT_RECONCILE.with(|cell| {
+                        if now.saturating_sub(cell.get()) < deposit_interval {
+                            false
+                        } else {
+                            cell.set(now);
+                            true
+                        }
+                    });
+                    if due_deposits && let Err(error) = deposits::reconcile_all(2).await {
+                        ic_cdk::println!("deposit reconciliation failed: {error:?}");
+                    }
+                },
+            )
+            .await
         },
     );
     SWEEP_TIMER.with(|timer| *timer.borrow_mut() = Some(timer_id));
@@ -783,20 +793,20 @@ fn schedule_sweep() {
 
 /// テスト専用のsweep（`test-venue` featureでのみ存在）。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn test_sweep_now() -> Result<u32, ErrorCode> {
     outbox::sweep(clock::now_ms()).await
 }
 
 /// 呼び出し元のPrincipal（診断用。認可の判断は各メソッド内で行う）。
-#[ic_cdk::query]
+#[scoped_entrypoint::query(scope = Vault, prefix = "vault_")]
 fn caller_principal() -> Principal {
     ic_cdk::api::msg_caller()
 }
 
 /// ローカル試験専用の入金注入。実運用はHL履歴の照合を経由する。
 #[cfg(feature = "test-venue")]
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn credit_venue_deposit(
     tx_hash: api_types::Blob,
     amount: u64,
@@ -855,7 +865,7 @@ fn credit_venue_deposit(
 ///
 /// `credit` がsuspenseへ計上したイベントだけを対象にする（既に本人へ計上済みの
 /// イベントを再計上しない）。同一イベントの二重請求は仕訳の要求IDで拒否する。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn claim_unmatched_deposit(
     event_id: api_types::Blob,
     user_id: api_types::Blob,
@@ -964,7 +974,7 @@ async fn provision_reserve_account(session: SessionHandle) -> Result<api_types::
 /// 取引所の入金を取得して取り込む（controllerのみ）。
 ///
 /// 取得はreplicated outcall（変換関数で決定論化）、取り込みは検証済みの`deposits::credit`。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> {
     let caller = ic_cdk::api::msg_caller();
     if !ic_cdk::api::is_controller(&caller) {
@@ -986,7 +996,7 @@ async fn reconcile_deposits(address: api_types::Blob) -> Result<u32, ErrorCode> 
 ///
 /// 未確認の外部送信を自由文の申告だけで「未実行」と確定してはならない。
 /// 取引所履歴との照合による証明経路ができるまで手動解消を停止する。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 fn resolve_unknown_action(
     _action_id: api_types::Blob,
     _executed: bool,
@@ -1014,7 +1024,7 @@ async fn request_recovery(
 }
 
 /// 個人向け書込みの唯一の公開入口。エラーを含む業務結果も暗号化して返す。
-#[ic_cdk::update]
+#[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn private_call(
     envelope: api_types::envelope::HpkeRequest,
 ) -> Result<api_types::envelope::HpkeResponse, ErrorCode> {
@@ -1124,19 +1134,23 @@ async fn private_call(
 }
 
 fn init_db() {
-    if let Err(error) = db::init(MEMORY_ID, db::schema::vault::MIGRATIONS) {
+    if let Err(error) = if cfg!(feature = "embedded") {
+        db::init_scoped(db::DbScope::Vault, db::schema::vault::MIGRATIONS)
+    } else {
+        db::init(MEMORY_ID, db::schema::vault::MIGRATIONS)
+    } {
         ic_cdk::trap(format!("db init failed: {error}"));
     }
 }
 
-#[ic_cdk::init]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::init)]
 fn init() {
     init_db();
     #[cfg(not(feature = "test-venue"))]
     schedule_sweep();
 }
 
-#[ic_cdk::post_upgrade]
+#[cfg_attr(not(feature = "embedded"), ic_cdk::post_upgrade)]
 fn post_upgrade() {
     init_db();
     if let Err(error) = journal_client::lock() {
@@ -1147,4 +1161,15 @@ fn post_upgrade() {
     schedule_sweep();
 }
 
+#[cfg(feature = "embedded")]
+pub fn embedded_init() {
+    db::tx::with_scope(db::DbScope::Vault, init);
+}
+
+#[cfg(feature = "embedded")]
+pub fn embedded_post_upgrade() {
+    db::tx::with_scope(db::DbScope::Vault, post_upgrade);
+}
+
+#[cfg(not(feature = "embedded"))]
 ic_cdk::export_candid!();

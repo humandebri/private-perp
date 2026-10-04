@@ -23,7 +23,7 @@ mkdir -p "$out_dir"
 
 # `--target js` は実行時（idlFactory・init）、`--target ts` は型定義を生成する。
 # 同じ基底名にして `.did.js` + `.did.d.ts` の組で置く（TypeScriptは.jsの型を.d.tsから引く）。
-for canister in funds_vault trading_core; do
+for canister in funds_vault trading_core private_perp; do
   header="// 生成物: \`bash scripts/generate-frontend-bindings.sh\`（元: candid/$canister.did）
 // 手で編集しない。契約（\`crates/api-types\`）を変えたら .did と本ファイルを再生成する。"
   runtime="$out_dir/$canister.did.js"
