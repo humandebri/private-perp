@@ -93,7 +93,7 @@ export function orderBlockReason(
   )
     return 'Reconciling an unknown order outcome. Do not resubmit or reload.'
   if (effectiveAge(state, now) > 10_000)
-    return 'New orders are paused because account data is stale'
+    return 'Account data is stale. Use Refresh trading information before placing an order.'
 }
 
 /** 非同期処理は世代を跨いで状態を書き戻さない。取得は世代内で直列化する。 */

@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 thread_local! {
+    static UPDATE_LISTENERS: RefCell<std::collections::BTreeMap<Option<DbScope>, fn()>> = RefCell::new(std::collections::BTreeMap::new());
     static STASHED: RefCell<Option<Error>> = const { RefCell::new(None) };
     static ACTIVE_SCOPE: RefCell<Option<DbScope>> = const { RefCell::new(None) };
 }
@@ -102,6 +103,16 @@ fn take_stashed() -> Error {
         .unwrap_or_else(|| Error::Sql("transaction failed without a domain error".to_string()))
 }
 
+/// Register a cheap wake-up callback for this database. Called after commit,
+/// never while the SQLite connection is borrowed. Re-register after upgrades.
+/// The callback may query committed work to decide whether to schedule a worker.
+/// It must not write: another update would recursively invoke the listener.
+pub fn on_update(callback: fn()) {
+    UPDATE_LISTENERS.with(|listeners| {
+        listeners.borrow_mut().insert(active_scope(), callback);
+    });
+}
+
 /// 書き込みトランザクション。
 pub fn update<T>(
     f: impl FnOnce(&mut UpdateConnection<'_>) -> Result<T, Error>,
@@ -117,7 +128,14 @@ pub fn update<T>(
             .update(run),
         None => ic_sqlite_vfs::Db::update(run),
     };
-    result.map_err(|_| take_stashed())
+    let result = result.map_err(|_| take_stashed());
+    if result.is_ok() {
+        let callback = UPDATE_LISTENERS.with(|listeners| listeners.borrow().get(&scope).copied());
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+    result
 }
 
 /// 読み取りクエリ。

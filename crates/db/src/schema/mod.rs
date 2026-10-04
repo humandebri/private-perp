@@ -9,3 +9,11 @@ pub mod guard;
 pub mod policy;
 pub mod send_journal;
 pub mod vault;
+
+/// Execution permissions are separate from financial state and send evidence.
+pub const MANUAL_WORK: &str = "CREATE TABLE worker_permissions (
+ kind TEXT NOT NULL, work_id BLOB NOT NULL CHECK(length(work_id)=32),
+ user_id BLOB NOT NULL CHECK(length(user_id)=32),
+ generation INTEGER NOT NULL DEFAULT 0,
+ allowed INTEGER NOT NULL CHECK(allowed IN (0,1)),
+ PRIMARY KEY(kind,work_id));";

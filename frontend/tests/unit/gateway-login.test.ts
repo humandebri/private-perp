@@ -42,19 +42,16 @@ describe('login journal contention', () => {
     vi.spyOn(EnvelopeClient, 'create').mockResolvedValue({} as EnvelopeClient)
   })
 
-  it('uses a fresh challenge only after a temporary writer conflict', async () => {
+  it('stops on a writer conflict without requesting another signature', async () => {
     const session = { session_id: Uint8Array.of(9) }
     const { gateway, issue_challenge, open_session } = fixture([
       { Err: { JournalWriterBusy: null } },
       { Ok: session },
     ])
-    await expect(gateway.login()).resolves.toMatchObject({ address, session })
-    expect(issue_challenge).toHaveBeenCalledTimes(2)
-    expect(signTypedData).toHaveBeenCalledTimes(2)
-    expect(open_session.mock.calls.map(([request]) => [...request.challenge_id])).toEqual([
-      [1],
-      [2],
-    ])
+    await expect(gateway.login()).rejects.toMatchObject({ code: 'JournalWriterBusy' })
+    expect(issue_challenge).toHaveBeenCalledTimes(1)
+    expect(signTypedData).toHaveBeenCalledTimes(1)
+    expect(open_session.mock.calls.map(([request]) => [...request.challenge_id])).toEqual([[1]])
     expect(connectWallet).toHaveBeenCalledTimes(1)
   })
 

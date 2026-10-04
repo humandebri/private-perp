@@ -214,3 +214,7 @@ When the verifier reports drift, review the affected definitions and the mapping
 above, revise the proofs if necessary, and only then refresh the corresponding
 hashes. Do not treat refreshing hashes as verification of model correspondence.
 `Audit.lean` must list each newly added named theorem.
+
+## Manual worker integration correspondence
+
+The integration adds durable permission checks around existing lifecycle transitions. Candidate filters restrict execution; consuming a permission before an await does not introduce a dispatch transition or reset an epoch. `claim_action`, signing-to-dispatch transactions, journal authorization, nonce binding, and post-dispatch CAS edges retain their existing semantics. Database wakeup callbacks run after the transaction releases its connection and may query committed work only. Allocation-arrival reads and migration maintenance change scheduling, not the modeled send lifecycle. The source hashes were refreshed after reviewing these differences. Permission ownership, generation handling, crash persistence, migration scheduling, and eventual completion are tested in PocketIC and remain outside the Lean model.

@@ -500,8 +500,8 @@ pub fn queued_orders(
     let rows = connection
         .query_all(
             "SELECT order_id FROM orders
-              WHERE (dispatch_state = 'queued' AND (next_check_at IS NULL OR next_check_at <= ?1))
-                 OR (dispatch_state = 'signing' AND lease_until < ?1)
+              WHERE NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='order' AND w.work_id=orders.order_id AND w.allowed=0) AND ((dispatch_state = 'queued' AND (next_check_at IS NULL OR next_check_at <= ?1))
+                 OR (dispatch_state = 'signing' AND lease_until < ?1))
               ORDER BY created_at LIMIT ?2",
             params![now as i64, limit as i64],
             |row| row.get::<Vec<u8>>(0),
@@ -585,17 +585,6 @@ pub fn dispatch_blocker(
     worker_epoch: u64,
     now: u64,
 ) -> Result<Option<&'static str>, Error> {
-    if crate::repo::recovery_fences::migration_locked(connection)? {
-        let reduce_only = connection
-            .query_optional_scalar::<i64>(
-                "SELECT reduce_only FROM orders WHERE order_id = ?1",
-                params![order_id.as_slice()],
-            )
-            .map_err(sql)?;
-        if reduce_only == Some(0) {
-            return Ok(Some("recovery migration is pending"));
-        }
-    }
     let row = connection
         .query_optional(
             "SELECT state, dispatch_state, worker_epoch, cancel_requested, expires_after,
@@ -1544,7 +1533,8 @@ pub fn oids_awaiting_status(
     let rows = connection
         .query_all(
             "SELECT hl_oid FROM orders
-              WHERE account_id = ?1 AND hl_oid IS NOT NULL
+              WHERE NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='order' AND w.work_id=orders.order_id AND w.allowed=0) AND account_id = ?1 AND hl_oid IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='cancel' AND w.work_id=orders.order_id AND w.allowed=0 AND orders.cancel_dispatch_state IN ('dispatching','unknown'))
                 AND state IN ('open', 'partially_filled', 'unknown')
               ORDER BY last_status_checked_at, rowid LIMIT ?2",
             params![account_id.as_slice(), limit as i64],
@@ -1563,6 +1553,14 @@ pub fn oids_awaiting_status(
         .collect()
 }
 
+/// 送信済みか不明な取消は再送せず、一度分の照合許可を消費する。
+pub fn cancel_unresolved(connection: &Connection, order_id: &[u8; 32]) -> Result<bool, Error> {
+    Ok(connection.query_optional_scalar::<i64>(
+        "SELECT 1 FROM orders WHERE order_id=?1 AND cancel_dispatch_state IN ('dispatching','unknown') AND state IN ('open','partially_filled','unknown')",
+        params![order_id.as_slice()],
+    ).map_err(sql)?.is_some())
+}
+
 /// 取消送信の対象（取消要求済みで未送信、`hl_oid`既知の未終端注文）。
 pub fn cancel_candidates(
     connection: &Connection,
@@ -1572,7 +1570,7 @@ pub fn cancel_candidates(
     let rows = connection
         .query_all(
             "SELECT order_id FROM orders
-              WHERE cancel_requested = 1
+              WHERE NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='cancel' AND w.work_id=orders.order_id AND w.allowed=0) AND cancel_requested = 1
                 AND (cancel_dispatch_state IS NULL
                   OR (cancel_dispatch_state = 'signing' AND cancel_lease_until < ?1))
                 AND hl_oid IS NOT NULL AND state IN ('open', 'partially_filled')
@@ -1931,7 +1929,7 @@ pub fn prune_terminal_history(
 
 /// Unknown sends retain their preassigned cloid even when the POST response is lost.
 pub fn unknown_cloids(c: &Connection, account_id: &[u8; 32]) -> Result<Vec<Vec<u8>>, Error> {
-    c.query_all("SELECT cloid FROM orders WHERE account_id=?1 AND hl_oid IS NULL AND state='unknown' AND preflight_state='reconciled' ORDER BY updated_at LIMIT 4", params![account_id.as_slice()], |r| r.get(0)).map_err(sql)
+    c.query_all("SELECT cloid FROM orders WHERE NOT EXISTS(SELECT 1 FROM worker_permissions w WHERE w.kind='order' AND w.work_id=orders.order_id AND w.allowed=0) AND account_id=?1 AND hl_oid IS NULL AND state='unknown' AND preflight_state='reconciled' ORDER BY updated_at LIMIT 4", params![account_id.as_slice()], |r| r.get(0)).map_err(sql)
 }
 pub fn cloid_status_target(
     c: &Connection,

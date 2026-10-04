@@ -829,8 +829,6 @@ service : (principal) -> {
 
   check_eligibility_for_core : (vault_SessionHandle, blob) -> (vault_Result_1);
 
-  claim_unmatched_deposit : (blob, blob) -> (vault_Result_1);
-
   clear_emergency_stop : () -> (policy_Result);
 
   clear_recovery_pause : () -> (policy_Result);
@@ -943,6 +941,8 @@ service : (principal) -> {
 
   prepare_recovery : (core_PrepareRecovery) -> (core_Result_10);
 
+  queue_recovery_migration : () -> (vault_Result_1);
+
   reconcile_deposits : (blob) -> (vault_Result_20);
 
   records : (nat64, nat32) -> (journal_Result_3);
@@ -956,6 +956,8 @@ service : (principal) -> {
   recovery_migration_locked : () -> (core_Result_11) query;
 
   refresh_market : () -> (core_Result);
+
+  refresh_trading_balance : (vault_SessionHandle) -> (vault_Result_1);
 
   resolve_unknown_action : (blob, bool, text) -> (vault_Result_1);
 

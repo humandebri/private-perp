@@ -521,4 +521,19 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE orders ADD COLUMN last_status_checked_at INTEGER NOT NULL DEFAULT 0;
           ALTER TABLE account_observations ADD COLUMN fills_cursor INTEGER;",
     },
+    Migration {
+        version: 29,
+        sql: super::MANUAL_WORK,
+    },
+    Migration {
+        version: 30,
+        sql: "INSERT INTO worker_permissions(kind,work_id,user_id,allowed)
+          SELECT 'order',order_id,user_id,0 FROM orders
+          WHERE state='unknown' OR dispatch_state IN ('signing','dispatching')
+             OR (dispatch_state='queued' AND last_error IS NOT NULL) ON CONFLICT(kind,work_id) DO NOTHING;
+          INSERT INTO worker_permissions(kind,work_id,user_id,allowed)
+          SELECT 'cancel',order_id,user_id,0 FROM orders
+          WHERE cancel_dispatch_state IN ('signing','dispatching','unknown')
+             OR (cancel_requested=1 AND cancel_dispatch_state IS NULL AND last_error IS NOT NULL) ON CONFLICT(kind,work_id) DO NOTHING;",
+    },
 ];

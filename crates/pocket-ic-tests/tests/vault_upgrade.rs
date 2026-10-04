@@ -142,7 +142,20 @@ fn an_upgrade_keeps_credentials_ledger_and_unresolved_actions() {
     assert_eq!(after.unknowns.len(), 1, "未解決actionを失わない");
     assert_eq!(after.withdrawable, 800_000, "残高と予約が保存される");
 
-    // アップグレード後のsweepでも再送しない。
+    // Upgrade preserves the stopped permission: neither POST nor observation
+    // resumes until the owner explicitly requests it.
+    let (stopped, calls): (Result<u32, ErrorCode>, _) =
+        call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |_| {
+            panic!("upgrade must not restart stopped work")
+        })
+        .expect("stopped sweep");
+    assert_eq!(stopped.unwrap(), 0);
+    assert!(calls.is_empty());
+    assert_eq!(
+        pocket_ic_tests::resume_manual_work(&pic, vault, caller, &session, false, "fund"),
+        1
+    );
+    // Explicit resume observes history but never resends the unknown transfer.
     let (swept_again, calls): (Result<u32, ErrorCode>, _) =
         call_with_routed_outcalls(&pic, vault, caller, "test_sweep_now", (), |call| {
             assert!(

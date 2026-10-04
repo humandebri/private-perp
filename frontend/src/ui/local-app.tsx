@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { bytesToHex } from '../client/wallet'
 import { variantName } from '../client/result'
-import type { Fill, OrderSummary, Position } from '../client/candid-codec'
+import type { Fill, OrderSummary, Position, ManualWork } from '../client/candid-codec'
 import type { FundEvent } from '../client/candid/funds_vault.did.js'
 import { useLocalSession } from './local-session'
 import { PriceChart, useMarket } from './market'
@@ -65,8 +65,11 @@ function Workspace({
         </div>
         <div className="session-controls">
           {session.address && (
-            <button disabled={session.busy} onClick={() => void session.refresh()}>
-              Refresh
+            <button
+              disabled={session.busy}
+              onClick={() => void session.run(() => session.gateway.refreshTrading())}
+            >
+              Refresh trading information
             </button>
           )}
           <button
@@ -118,6 +121,7 @@ function Workspace({
           </p>
         </details>
       )}
+      {session.address && <ManualWorkPanel key={session.generation} />}
       {!session.address && !publicContent ? (
         <section className="empty-state">
           <h1>
@@ -137,6 +141,52 @@ function Workspace({
         children
       )}
     </main>
+  )
+}
+
+function ManualWorkPanel() {
+  const { gateway, run, busy, generation, store } = useLocalSession()
+  const [items, setItems] = useState<{ role: 'vault' | 'core'; work: ManualWork }[]>()
+  const load = async () => {
+    const [vault, core] = await Promise.all([
+      gateway.manualWork('vault'),
+      gateway.manualWork('core'),
+    ])
+    if (store.getSnapshot().generation !== generation) return
+    setItems([
+      ...vault.map((work) => ({ role: 'vault' as const, work })),
+      ...core.map((work) => ({ role: 'core' as const, work })),
+    ])
+  }
+  return (
+    <details className="warning-banner account-notice">
+      <summary>Stopped work and manual checks</summary>
+      <p>
+        Failed work stays stopped. Retry failures before sending, or check the result of uncertain
+        transfers and orders without resending.
+      </p>
+      <button disabled={busy} onClick={() => void run(load)}>
+        Check stopped work
+      </button>
+      {items?.length === 0 && <p>No stopped work.</p>}
+      {items?.map(({ role, work }) => (
+        <p key={`${role}:${work[0]}:${bytesToHex(work[1])}`}>
+          {role === 'vault' ? 'Funds' : 'Trading'} · {bytesToHex(work[1]).slice(0, 12)}
+          <button
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                await gateway.resumeManualWork(role, work)
+                if (store.getSnapshot().generation === generation)
+                  setItems((current) => current?.filter((item) => item.work !== work))
+              })
+            }
+          >
+            {work[0] === 'monitor' ? 'Resume monitoring' : 'Retry or check once'}
+          </button>
+        </p>
+      ))}
+    </details>
   )
 }
 
@@ -214,6 +264,10 @@ export function FundsApp() {
   const action = (kind: string) => async () => {
     if (kind === 'seed' && isTestnet) {
       await store.loadFundingInstructions()
+      return
+    }
+    if (kind === 'confirm') {
+      await gateway.confirmDeposit()
       return
     }
     const value = amountMicros(amount)
@@ -296,6 +350,15 @@ export function FundsApp() {
                 >
                   {isTestnet ? 'Show HL testnet deposit address' : 'Deposit to LOCAL MOCK custody'}
                 </button>
+                {isTestnet && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void execute(action('confirm'))}
+                  >
+                    Confirm deposit
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={busy || newFundsStopped}

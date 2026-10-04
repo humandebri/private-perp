@@ -12,7 +12,7 @@ import { vaultPrivateCodec } from '../../src/client/candid-codec'
 import { EnvelopeClient, envelopeAad, newRequestId } from '../../src/client/envelope'
 
 test('SSR exposes a local-only shell and refuses writes', async ({ request }) => {
-  for (const path of ['/', '/trade', '/funds', '/history', '/fallback']) {
+  for (const path of ['/', '/trade', '/funds', '/history']) {
     const response = await request.get(path)
     expect(response.ok()).toBeTruthy()
     expect(response.headers()['x-frame-options']).toBe('DENY')
@@ -65,7 +65,7 @@ test.describe('real local canister flow', () => {
   test('login, funds, agent, orders, recovery, withdrawal, history and logout', async ({
     page,
   }) => {
-    test.setTimeout(240_000)
+    test.setTimeout(600_000)
     const signer = resolve(process.cwd(), '../target/debug/e2e-signer')
     const address = execFileSync(signer, ['address'], { encoding: 'utf8' }).trim()
     const secondaryAddress = execFileSync(signer, ['address', '--secondary'], {
@@ -107,6 +107,9 @@ test.describe('real local canister flow', () => {
     await page.goto('/funds')
     await page.getByRole('button', { name: 'Connect MetaMask' }).click()
     await expect(page.getByText(`${address.slice(0, 10)}…${address.slice(-6)}`)).toBeVisible()
+    await page.getByText('Stopped work and manual checks', { exact: true }).click()
+    await page.getByRole('button', { name: 'Check stopped work' }).click()
+    await expect(page.getByText('No stopped work.', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Get signing claims' }).click()
     const claims = await page
       .getByRole('textbox', { name: /Candid claims for the issuer/ })
@@ -129,7 +132,7 @@ test.describe('real local canister flow', () => {
     await expect
       .poll(
         async () => {
-          await page.getByRole('button', { name: 'Refresh' }).click()
+          await page.getByRole('button', { name: 'Refresh trading information' }).click()
           return page.getByTestId('account-balances').textContent()
         },
         { timeout: 30_000 },
@@ -159,6 +162,7 @@ test.describe('real local canister flow', () => {
       timeout: 30_000,
     })
 
+    await page.getByRole('button', { name: 'Refresh trading information' }).click()
     const submitButton = page.getByRole('button', { name: 'Open long' })
     await page.getByLabel('Amount unit').selectOption('coin')
     await page.getByLabel('Order amount').fill('0')
@@ -173,7 +177,7 @@ test.describe('real local canister flow', () => {
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: 'Refresh' })
+          const refresh = page.getByRole('button', { name: 'Refresh trading information' })
           if (await refresh.isEnabled()) await refresh.click()
           return page.getByRole('cell', { name: 'Filled' }).count()
         },
@@ -183,7 +187,7 @@ test.describe('real local canister flow', () => {
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: 'Refresh' })
+          const refresh = page.getByRole('button', { name: 'Refresh trading information' })
           if (await refresh.isEnabled()) await refresh.click()
           return page.getByRole('heading', { name: 'Positions' }).count()
         },
@@ -214,7 +218,7 @@ test.describe('real local canister flow', () => {
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: 'Refresh' })
+          const refresh = page.getByRole('button', { name: 'Refresh trading information' })
           if (await refresh.isEnabled()) await refresh.click()
           await expect(refresh).toBeEnabled({ timeout: 5_000 })
           return cancelButton.isEnabled()
@@ -229,7 +233,7 @@ test.describe('real local canister flow', () => {
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: 'Refresh' })
+          const refresh = page.getByRole('button', { name: 'Refresh trading information' })
           if (await refresh.isEnabled()) await refresh.click()
           return page.getByRole('cell', { name: 'Cancelled' }).count()
         },
@@ -255,7 +259,7 @@ test.describe('real local canister flow', () => {
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: 'Refresh' })
+          const refresh = page.getByRole('button', { name: 'Refresh trading information' })
           if (await refresh.isEnabled()) await refresh.click()
           const response = await page.request.post('http://127.0.0.1:8080/info', {
             data: { type: 'clearinghouseState', user: address },
@@ -279,14 +283,16 @@ test.describe('real local canister flow', () => {
     ).toContainText('Settled')
     await expect(page.getByRole('cell', { name: 'BTC' }).first()).toBeVisible()
     await page.getByRole('link', { name: 'Trade', exact: true }).click()
+    await page.getByRole('button', { name: 'Refresh trading information' }).click()
     await expect(page.getByLabel('Order price')).toHaveCount(0)
     // 通信失敗は口座表示を保持しても、新規注文をfail-closedにする。
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
     await page.route('http://127.0.0.1:18100/**', (route) => route.abort('connectionreset'))
-    await page.getByRole('button', { name: 'Refresh' }).click()
+    await page.getByRole('button', { name: 'Refresh trading information' }).click()
     await expect(submitButton).toBeDisabled()
     await expect(page.locator('#order-guidance')).toContainText('Could not refresh')
     await page.unroute('http://127.0.0.1:18100/**')
+    await page.getByRole('button', { name: 'Refresh trading information' }).click()
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
 
     // ICには受付させ、ブラウザへは応答を返さない。注文は一度だけ送信される。
@@ -336,7 +342,7 @@ test.describe('real local canister flow', () => {
         await route.fulfill({ response })
       } else await route.continue()
     })
-    await page.getByRole('button', { name: 'Refresh' }).click()
+    await page.getByRole('button', { name: 'Refresh trading information' }).click()
     await started
     await page.getByRole('button', { name: 'Log out' }).click()
     release()

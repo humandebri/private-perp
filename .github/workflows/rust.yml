@@ -72,6 +72,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: PocketIC integration tests
         run: bash scripts/pocket-ic-test.sh --no-fail-fast
+      - name: Production and mock unified canister checks
+        run: PRIVATE_PERP_TEST_TARGET="$PWD/target/test-venue" POCKET_IC_BIN="$PWD/.pocket-ic/pocket-ic" bash scripts/test-single-canister.sh
       - name: PocketIC runner failure propagation
         if: always()
         run: node --test scripts/pocket-ic-runner.test.mjs scripts/fetch-pocket-ic.test.mjs

@@ -2,6 +2,7 @@ import { IDL } from '@icp-sdk/core/candid'
 import type { SessionHandle } from './candid/funds_vault.did.js'
 import type {
   AgentGeneration as AgentGenerationView,
+  ErrorCode as ApiErrorCode,
   FundRequestState,
 } from './candid/funds_vault.did.js'
 import { unwrap } from './result'
@@ -261,7 +262,9 @@ const BadRequestCode = IDL.Variant({
   PriceOutOfRange: IDL.Null,
   UnsupportedAsset: IDL.Null,
 })
+type VariantKeys<T> = T extends unknown ? keyof T : never
 const ErrorCode = IDL.Variant({
+  JournalWriterBusy: IDL.Null,
   Internal: IDL.Record({ code: IDL.Text }),
   DuplicateIgnored: IDL.Record({ request_id: Blob }),
   SigningQueueFull: IDL.Null,
@@ -278,11 +281,10 @@ const ErrorCode = IDL.Variant({
   SessionRevoked: IDL.Null,
   BadRequest: IDL.Record({ code: BadRequestCode, detail: IDL.Text }),
   PolicyUnavailable: IDL.Null,
-  JournalWriterBusy: IDL.Null,
   SessionExpired: IDL.Null,
   InsufficientFunds: IDL.Record({ requested: IDL.Nat64, available: IDL.Nat64 }),
   Unauthenticated: IDL.Record({ reason: IDL.Text }),
-})
+} satisfies Record<VariantKeys<ApiErrorCode>, IDL.Type<unknown>>)
 const AgentGeneration = IDL.Record({
   account_id: Blob,
   generation: IDL.Nat64,
@@ -351,7 +353,12 @@ const BuilderFeeConsent = IDL.Record({ claims: BuilderFeeClaims, eoa_signature: 
 const result = <T>(type: IDL.Type<T>, bytes: Uint8Array): T =>
   unwrap(decode<{ Ok: T } | { Err: unknown }>(IDL.Variant({ Ok: type, Err: ErrorCode }), bytes))
 
+export type ManualWork = [string, Uint8Array | number[], bigint]
 export const vaultPrivateCodec = {
+  manualWork: (bytes: Uint8Array): ManualWork[] =>
+    result(IDL.Vec(IDL.Tuple(IDL.Text, Blob, IDL.Nat64)), bytes) as ManualWork[],
+  resumeWork: (session: SessionHandle, item: ManualWork) =>
+    new Uint8Array(IDL.encode([Session, IDL.Text, Blob, IDL.Nat64], [session, ...item])),
   session: (session: SessionHandle) => encode(Session, session),
   account: (bytes: Uint8Array): Uint8Array => Uint8Array.from(result(Blob, bytes)),
   eligibilitySigningQuery: (session: SessionHandle, expiresAt: bigint) =>
@@ -463,6 +470,8 @@ const wrapCoreArgs = (types: IDL.Type<unknown>[], args: unknown[]) =>
   encode(Blob, new Uint8Array(IDL.encode(types, args)))
 
 export const corePrivateCodec = {
+  resumeWork: (session: SessionHandle, item: ManualWork) =>
+    wrapCoreArgs([Session, IDL.Text, Blob, IDL.Nat64], [session, ...item]),
   submit: (session: SessionHandle, args: unknown) =>
     wrapCoreArgs([Session, SubmitArgs], [session, args]),
   closePosition: (

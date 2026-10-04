@@ -23,6 +23,7 @@ import {
   type Position,
   type Snapshot,
 } from './candid-codec'
+import type { ManualWork } from './candid-codec'
 import { EnvelopeClient, envelopeAad, newRequestId } from './envelope'
 import { createClients, type CanisterClients } from './ic'
 import { CanisterError, SubmissionNotSentError, unwrap } from './result'
@@ -129,39 +130,25 @@ export class LocalGateway {
     address: string,
     generation: number,
   ): Promise<SessionHandle> {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      if (generation !== this.generation) throw new Error('The session was discarded')
-      // open_session consumes its challenge before the journal write. A busy
-      // journal therefore needs a fresh challenge and signature on retry.
-      const challenge = unwrap(
-        await clients.vault.issue_challenge({
-          principal: clients.principal,
-          origin: location.origin,
-          network: clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
-          purpose: { Login: null },
-          eoa_address: hexToBytes(address, 20),
-        }),
-      )
-      const signature = await signTypedData(address, new Uint8Array(challenge.typed_data))
-      if (generation !== this.generation) throw new Error('The session was discarded')
-      try {
-        return unwrap(
-          await clients.vault.open_session({
-            challenge_id: challenge.challenge_id,
-            eoa_signature: signature,
-          }),
-        )
-      } catch (error) {
-        if (
-          !(error instanceof CanisterError) ||
-          error.code !== 'JournalWriterBusy' ||
-          attempt === 3
-        )
-          throw error
-        await new Promise((resolve) => setTimeout(resolve, 150 * 2 ** attempt))
-      }
-    }
-    throw new Error('Could not start the session')
+    if (generation !== this.generation) throw new Error('The session was discarded')
+    const challenge = unwrap(
+      await clients.vault.issue_challenge({
+        principal: clients.principal,
+        origin: location.origin,
+        network: clients.config.stage === 'testnet' ? { Testnet: null } : { Local: null },
+        purpose: { Login: null },
+        eoa_address: hexToBytes(address, 20),
+      }),
+    )
+    const signature = await signTypedData(address, new Uint8Array(challenge.typed_data))
+    if (generation !== this.generation) throw new Error('The session was discarded')
+    // A failed login needs another explicit wallet action and a fresh challenge.
+    return unwrap(
+      await clients.vault.open_session({
+        challenge_id: challenge.challenge_id,
+        eoa_signature: signature,
+      }),
+    )
   }
 
   async logout(): Promise<void> {
@@ -229,6 +216,9 @@ export class LocalGateway {
       | 'approve_agent_generation'
       | 'request_allocation'
       | 'request_withdrawal'
+      | 'confirm_deposit'
+      | 'get_manual_work'
+      | 'resume_manual_work'
       | 'provision_reserve_account'
       | 'prepare_trading_account'
       | 'request_recovery'
@@ -276,7 +266,10 @@ export class LocalGateway {
       | 'close_position'
       | 'close_all'
       | 'request_agent_generation'
-      | 'cancel_all',
+      | 'cancel_all'
+      | 'refresh_trading'
+      | 'get_manual_work'
+      | 'resume_manual_work',
     plaintext: Uint8Array,
     decode: (bytes: Uint8Array) => T,
   ): Promise<T> {
@@ -382,6 +375,46 @@ export class LocalGateway {
   async listFundEvents(cursor?: Uint8Array | number[]): Promise<FundEvents> {
     const { session, clients } = this.require()
     return unwrap(await clients.vault.list_fund_events(session, cursor ? [cursor] : [], 100))
+  }
+
+  async confirmDeposit() {
+    const { session } = this.require()
+    await this.sealedVault(
+      'confirm_deposit',
+      vaultPrivateCodec.session(session),
+      vaultPrivateCodec.empty,
+    )
+  }
+
+  async manualWork(role: 'vault' | 'core'): Promise<ManualWork[]> {
+    const { session } = this.require()
+    const call = role === 'vault' ? this.sealedVault.bind(this) : this.sealedCoreWrite.bind(this)
+    return call(
+      'get_manual_work',
+      role === 'vault' ? vaultPrivateCodec.session(session) : corePrivateCodec.session(session),
+      vaultPrivateCodec.manualWork,
+    )
+  }
+
+  async resumeManualWork(role: 'vault' | 'core', item: ManualWork) {
+    const { session } = this.require()
+    const call = role === 'vault' ? this.sealedVault.bind(this) : this.sealedCoreWrite.bind(this)
+    await call(
+      'resume_manual_work',
+      role === 'vault'
+        ? vaultPrivateCodec.resumeWork(session, item)
+        : corePrivateCodec.resumeWork(session, item),
+      vaultPrivateCodec.empty,
+    )
+  }
+
+  async refreshTrading() {
+    const { session } = this.require()
+    await this.sealedCoreWrite(
+      'refresh_trading',
+      corePrivateCodec.session(session),
+      vaultPrivateCodec.empty,
+    )
   }
 
   async fundingInstructions() {
@@ -490,6 +523,7 @@ export class LocalGateway {
     if (before.unknowns.length || before.recovery_fence.length)
       throw new Error('Reconciling the previous transfer. Check history.')
     await this.seedDeposit(amount)
+    await this.confirmDeposit()
     await waitForFunds(read, (status) => status.withdrawable >= before.withdrawable + value)
   }
 
