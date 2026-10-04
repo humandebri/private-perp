@@ -1,13 +1,18 @@
 name: Frontend verification
 on:
   push:
-    paths: ['frontend/**', '.github/workflows/frontend.yml']
+    branches: [main]
   pull_request:
-    paths: ['frontend/**', '.github/workflows/frontend.yml']
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   verify:
+    name: Frontend verification
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -17,13 +22,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
-      # package.json の packageManager（pnpm@12.4.2）をcorepackで固定して使う。
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm cf:typegen
       - run: pnpm lint && pnpm format:check && pnpm typecheck && pnpm test
-      # e2e は preview の前にビルドを必須にする（playwright.config.ts の webServer が
-      # ビルドを伴わないよう変更した場合は、ここで build を実行しておく）。
       - run: pnpm build
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e

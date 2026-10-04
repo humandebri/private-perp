@@ -142,6 +142,7 @@ export const idlFactory = ({ IDL }) => {
   const Result_7 = IDL.Variant({ Ok: EnvironmentView, Err: ErrorCode })
   const FundActionKind = IDL.Variant({
     AgentRevocation: IDL.Null,
+    SpotDeposit: IDL.Null,
     Recovery: IDL.Null,
     Withdrawal: IDL.Null,
     AgentApproval: IDL.Null,

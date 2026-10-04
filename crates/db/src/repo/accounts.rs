@@ -277,20 +277,50 @@ pub fn fills_due(connection: &Connection, account_id: &[u8; 32], now: u64) -> Re
     Ok(last.is_none_or(|last| now.saturating_sub(last.max(0) as u64) >= interval))
 }
 
-pub fn mark_fills_checked(
-    connection: &mut UpdateConnection<'_>,
-    account_id: &[u8; 32],
-    now: u64,
-) -> Result<(), Error> {
-    connection
-        .execute(
-            "UPDATE account_observations SET last_fills_checked_at = ?2 WHERE account_id = ?1",
-            params![account_id.as_slice(), now as i64],
-        )
-        .map_err(sql)?;
-    crate::cas::ensure_changed(
-        crate::cas::changes(connection)?,
-        "account observation",
-        "missing",
+/// Persist the rewind with oid recovery, before any subsequent external call.
+/// Clearing the check time keeps the missing history due after failures/upgrades.
+pub fn rewind_fills(c: &mut UpdateConnection<'_>, account: &[u8; 32]) -> Result<(), Error> {
+    c.execute(
+        "UPDATE account_observations SET fills_cursor=CASE
+           WHEN fills_cursor IS NULL THEN (SELECT MIN(created_at) FROM orders WHERE account_id=?1)
+           ELSE MIN(fills_cursor, (SELECT MIN(created_at) FROM orders WHERE account_id=?1)) END,
+           last_fills_checked_at=NULL WHERE account_id=?1",
+        params![account.as_slice()],
     )
+    .map_err(sql)?;
+    crate::cas::ensure_changed(crate::cas::changes(c)?, "account observation", "missing")
+}
+
+/// Inclusive durable history cursor.
+pub fn fills_start(c: &Connection, account: &[u8; 32], now: u64) -> Result<u64, Error> {
+    let first = c
+        .query_optional_scalar::<i64>(
+            "SELECT MIN(created_at) FROM orders WHERE account_id=?1 HAVING COUNT(*) > 0",
+            params![account.as_slice()],
+        )
+        .map_err(sql)?
+        .unwrap_or(now as i64);
+    let cursor = c.query_optional_scalar::<i64>("SELECT fills_cursor FROM account_observations WHERE account_id=?1 AND fills_cursor IS NOT NULL", params![account.as_slice()]).map_err(sql)?;
+    u64::try_from(cursor.unwrap_or(first)).map_err(|_| Error::Overflow)
+}
+
+pub fn advance_fills(
+    c: &mut UpdateConnection<'_>,
+    account: &[u8; 32],
+    cursor: u64,
+    now: u64,
+    complete: bool,
+) -> Result<(), Error> {
+    c.execute(
+        "UPDATE account_observations SET fills_cursor=?2,
+       last_fills_checked_at=CASE WHEN ?4 THEN ?3 ELSE NULL END WHERE account_id=?1",
+        params![
+            account.as_slice(),
+            i64::try_from(cursor).map_err(|_| Error::Overflow)?,
+            i64::try_from(now).map_err(|_| Error::Overflow)?,
+            i64::from(complete)
+        ],
+    )
+    .map_err(sql)?;
+    crate::cas::ensure_changed(crate::cas::changes(c)?, "account observation", "missing")
 }

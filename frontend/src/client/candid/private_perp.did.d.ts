@@ -426,6 +426,17 @@ export type journal_RecoveryPayload =
         event_id: Uint8Array | number[]
       }
     }
+  | {
+      DepositCreditWithFee: {
+        fee_micros: bigint
+        observed_at_ms: bigint
+        network: string
+        sender: [] | [Uint8Array | number[]]
+        amount_micros: bigint
+        address: Uint8Array | number[]
+        tx_hash: Uint8Array | number[]
+      }
+    }
   | { Baseline: { state_digest: Uint8Array | number[] } }
   | {
       LedgerPosting: {
@@ -465,6 +476,7 @@ export type journal_RecoveryPayload =
     }
   | {
       DepositCredit: {
+        fee_micros: [] | [bigint]
         observed_at_ms: bigint
         network: string
         sender: [] | [Uint8Array | number[]]
@@ -477,14 +489,16 @@ export interface journal_RecoveryRecord {
   hash: Uint8Array | number[]
   event: journal_RecoveryEvent
   previous_hash: Uint8Array | number[]
+  encoded_payload: [] | [Uint8Array | number[]]
   sequence: bigint
 }
 export type journal_Result = { Ok: journal_JournalHead } | { Err: journal_ErrorCode }
-export type journal_Result_1 = { Ok: [] | [journal_JournalRecord] } | { Err: journal_ErrorCode }
-export type journal_Result_2 = { Ok: Array<journal_JournalRecord> } | { Err: journal_ErrorCode }
-export type journal_Result_3 = { Ok: [] | [journal_RecoveryRecord] } | { Err: journal_ErrorCode }
-export type journal_Result_4 = { Ok: Array<journal_RecoveryRecord> } | { Err: journal_ErrorCode }
-export type journal_Result_5 = { Ok: null } | { Err: journal_ErrorCode }
+export type journal_Result_1 = { Ok: boolean } | { Err: journal_ErrorCode }
+export type journal_Result_2 = { Ok: [] | [journal_JournalRecord] } | { Err: journal_ErrorCode }
+export type journal_Result_3 = { Ok: Array<journal_JournalRecord> } | { Err: journal_ErrorCode }
+export type journal_Result_4 = { Ok: [] | [journal_RecoveryRecord] } | { Err: journal_ErrorCode }
+export type journal_Result_5 = { Ok: Array<journal_RecoveryRecord> } | { Err: journal_ErrorCode }
+export type journal_Result_6 = { Ok: null } | { Err: journal_ErrorCode }
 export interface journal_SendIntent {
   account_id: Uint8Array | number[]
   request_id: Uint8Array | number[]
@@ -681,6 +695,7 @@ export type vault_ErrorCode =
   | { Unauthenticated: { reason: string } }
 export type vault_FundActionKind =
   | { AgentRevocation: null }
+  | { SpotDeposit: null }
   | { Recovery: null }
   | { Withdrawal: null }
   | { AgentApproval: null }
@@ -820,12 +835,15 @@ export interface vault_UnresolvedAction {
 export interface _SERVICE {
   abort_recovery: ActorMethod<[core_RecoveryFenceToken], core_Result>
   append: ActorMethod<[journal_SendIntent], journal_Result>
+  append_prepared: ActorMethod<[journal_SendIntent], journal_Result>
   append_recovery_event: ActorMethod<[journal_RecoveryEvent], journal_Result>
   application_administrator: ActorMethod<[], Principal>
+  authorize_send: ActorMethod<[string, Uint8Array | number[]], journal_Result_1>
   begin_recovery_migration: ActorMethod<[], core_Result>
   builder_fee_mock_status: ActorMethod<[vault_SessionHandle], vault_Result>
   caller_principal: ActorMethod<[], Principal>
   cancel_order: ActorMethod<[core_HpkeRequest], core_Result_1>
+  cancel_prepared_send: ActorMethod<[string, Uint8Array | number[]], journal_Result_1>
   check_eligibility_account_for_core: ActorMethod<
     [Uint8Array | number[], Uint8Array | number[]],
     vault_Result_1
@@ -881,7 +899,7 @@ export interface _SERVICE {
   get_vault_principal: ActorMethod<[], [] | [Principal]>
   head: ActorMethod<[], journal_Result>
   ingest_venue_deposit: ActorMethod<[Uint8Array | number[], bigint, string], vault_Result_13>
-  intent_record: ActorMethod<[string, Uint8Array | number[]], journal_Result_1>
+  intent_record: ActorMethod<[string, Uint8Array | number[]], journal_Result_2>
   issue_challenge: ActorMethod<[vault_ChallengeRequest], vault_Result_15>
   journal_version: ActorMethod<[], string>
   list_fills: ActorMethod<[core_HpkeRequest], core_Result_1>
@@ -898,9 +916,9 @@ export interface _SERVICE {
   policy_version: ActorMethod<[], string>
   prepare_recovery: ActorMethod<[core_PrepareRecovery], core_Result_10>
   reconcile_deposits: ActorMethod<[Uint8Array | number[]], vault_Result_20>
-  records: ActorMethod<[bigint, number], journal_Result_2>
-  recovery_event: ActorMethod<[Uint8Array | number[]], journal_Result_3>
-  recovery_events: ActorMethod<[bigint, number], journal_Result_4>
+  records: ActorMethod<[bigint, number], journal_Result_3>
+  recovery_event: ActorMethod<[Uint8Array | number[]], journal_Result_4>
+  recovery_events: ActorMethod<[bigint, number], journal_Result_5>
   recovery_head: ActorMethod<[], journal_Result>
   recovery_migration_locked: ActorMethod<[], core_Result_11>
   refresh_market: ActorMethod<[], core_Result>
@@ -910,12 +928,15 @@ export interface _SERVICE {
     core_Result
   >
   role_append: ActorMethod<[string, journal_SendIntent], journal_Result>
+  role_append_prepared: ActorMethod<[string, journal_SendIntent], journal_Result>
   role_append_recovery_event: ActorMethod<[string, journal_RecoveryEvent], journal_Result>
+  role_authorize_send: ActorMethod<[string, string, Uint8Array | number[]], journal_Result_1>
+  role_cancel_prepared_send: ActorMethod<[string, string, Uint8Array | number[]], journal_Result_1>
   role_head: ActorMethod<[string], journal_Result>
-  role_intent_record: ActorMethod<[string, string, Uint8Array | number[]], journal_Result_1>
-  role_records: ActorMethod<[string, bigint, number], journal_Result_2>
-  role_recovery_event: ActorMethod<[string, Uint8Array | number[]], journal_Result_3>
-  role_recovery_events: ActorMethod<[string, bigint, number], journal_Result_4>
+  role_intent_record: ActorMethod<[string, string, Uint8Array | number[]], journal_Result_2>
+  role_records: ActorMethod<[string, bigint, number], journal_Result_3>
+  role_recovery_event: ActorMethod<[string, Uint8Array | number[]], journal_Result_4>
+  role_recovery_events: ActorMethod<[string, bigint, number], journal_Result_5>
   role_recovery_head: ActorMethod<[string], journal_Result>
   session_status: ActorMethod<[vault_SessionHandle], vault_Result_22>
   set_emergency_stop: ActorMethod<[], policy_Result>

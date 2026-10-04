@@ -1,107 +1,107 @@
-# プライバシー評価の入力・攻撃者可視情報・合格基準
+# Privacy evaluation inputs, attacker-visible information, and acceptance criteria
 
-- 根拠：`Plan.md` 16.6（U29）、8.3、ロードマップ5章
-- 状態：設計契約。評価はPhase 1（`Implementation.md` 1-11）で実施し、本Phaseでは入力と合格基準を固定する
+- Basis: `Plan.md` 16.6 (U29), 8.3, roadmap section 5
+- Status: design contract. Evaluation is planned for Phase 1 (`Implementation.md` 1-11); this phase fixes inputs and acceptance criteria.
 
-## 1. 目的と限界
+## 1. Goal and limits
 
-- 目的は、資金経路A・B0・B1の公開トレース相関耐性を同一入力で比較し、採用経路を判断できるようにすることである。
-- 本評価の数値は**工学的なスクリーニング基準**であり、匿名性の数学的保証ではない。単独利用・低利用では保証しない。
-- 基本経路Bは安全性検証用の出発点であり、金額・時刻を隠す完成方式ではない。特に「預入直後に同額を配分」するB0は**失敗対照**として残す。この点を隠してプロトタイプをprivacy製品と呼ばない。
-- 合成ユーザーを匿名性の人数として数えない。本番の利用量を合成データで水増ししない。
+- Compare public-trace correlation resistance of A/B0/B1 using identical inputs to choose a funding route.
+- Numbers are **engineering screening criteria**, not mathematical anonymity guarantees. No guarantees for isolated or low usage.
+- Route B starts safety verification; it is not a complete amount/time hiding scheme. Immediate same-amount allocation B0 remains a **failure control**. Do not hide this or call the prototype a privacy product.
+- Do not count synthetic users as an anonymity population or inflate production usage with synthetic data.
 
-## 2. 比較する腕
+## 2. Comparison arms
 
-| 腕 | 内容 | 位置づけ |
+| Arm | Behavior | Role |
 |---|---|---|
-| A | 本人HL口座から取引口座へ直接入金（対照） | 基準線。直接送金のリンクが残る |
-| B0 | 共通保管口座を経由し、預入直後に同額を配分 | 失敗対照。金額・時刻の相関が残る |
-| B1 | 配分タイミングの分離・まとめ処理を試すシミュレーション | 候補。採用アルゴリズムは結果で決める |
+| A | Direct owner HL→trading deposit | Baseline with direct transfer link |
+| B0 | Shared reserve followed immediately by same-amount allocation | Failure control retaining amount/time correlation |
+| B1 | Simulated separation of allocation timing and batching | Candidate; results determine adoption |
 
-B1では他人の資金を無断で貸与しない。残高拘束と裏付けを常に守り、未実証の方式を本番仕様に固定しない。
+B1 must not lend others' funds without consent. Always retain holds/backing and do not fix an unproven scheme as production behavior.
 
-## 3. 入力データ
+## 3. Inputs
 
-| 項目 | 内容 |
+| Item | Requirement |
 |---|---|
-| ユーザー数 | 1 / 5 / 20 / 100（評価群は20人以上を必須とする） |
-| 期間 | 30日相当 |
-| シナリオ | 反復入出金、少額、特徴的金額、部分退出、全退出、損益あり |
-| seed | 固定seed（記録し、再現可能にする） |
-| 分割 | 攻撃調整用と未見評価用を分ける。正解対応表を攻撃入力へ渡さない |
-| 実観測 | testnet往復の実観測で、シミュレーションにない公開情報（手数料、確定時刻、イベント粒度）を追加する |
-| 生成物 | 入力生成器、対応表（評価専用・非公開）、公開トレースのみの評価入力 |
+| Users | 1 / 5 / 20 / 100; acceptance groups require at least 20 |
+| Period | Equivalent to 30 days |
+| Scenarios | Repeated deposits/withdrawals, small amounts, distinctive amounts, partial/full exit, profit/loss |
+| Seed | Fixed, recorded, reproducible |
+| Split | Separate attack tuning and unseen evaluation; do not expose truth mappings to attacks |
+| Real observation | Add testnet round-trip fees, finalization times, and event granularity absent from simulation |
+| Artifacts | Input generator, private evaluation-only mappings, public-trace-only attack inputs |
 
-- 攻撃者は正解対応表にアクセスできない。評価実行時にのみ照合する。
-- 反復イベントを独立標本として精度を水増ししない。ユーザー単位の不確実性区間を報告する。
+- Attackers cannot access truth mappings; compare them only during scoring.
+- Do not inflate accuracy by treating repeated events as independent samples. Report per-user uncertainty intervals.
 
-## 4. 攻撃者可視情報
+## 4. Attacker-visible information
 
-### 4.1 主評価者（公開観察者）
+### 4.1 Primary evaluator: public observer
 
-- 全公開送金グラフ（送金元・宛先・額・時刻）
-- HLの公開口座情報（残高、ポジション、約定、資金移動履歴）
-- 額・手数料・時刻の一致
-- 反復取引パターン
-- PnL
+- Entire public transfer graph: sources, destinations, amounts, times.
+- Public HL account information: balances, positions, fills, transfer history.
+- Matching amounts, fees, and timing.
+- Repeated trading patterns.
+- PnL.
 
-### 4.2 別表で評価する観察者
+### 4.2 Observers evaluated separately
 
-| 観察者 | 見える情報 | 別表で扱う理由 |
+| Observer | Visible information | Reason for separate treatment |
 |---|---|---|
-| Hyperliquid | 口座・注文・資金移動の内容 | サービスがHLを利用する以上、隠せない |
-| 入口事業者（Cloudflare等） | 接続元IP・時刻・配信内容 | UI配信の信頼点。guard猶予の対象外 |
-| TEE・SNS権限者 | 復号後の状態・変更権限 | 信頼仮定として別に扱う |
-| 資金層の変更権限者 | 台帳・対応表 | 侵害時の影響を別に評価する |
+| Hyperliquid | Accounts, orders, fund transfers | Cannot be hidden while using HL |
+| Entry provider such as Cloudflare | Source IP, timing, delivered content | UI delivery trust boundary outside guard delay |
+| TEE/SNS authorities | Decrypted state, upgrade authority | Separate trust assumptions |
+| Fund-layer upgrade authority | Ledger and mappings | Separate compromise-impact assessment |
 
-## 5. 合格基準（開発上の目安）
+## 5. Development acceptance criteria
 
-20人以上の各評価群で次を満たすこと。
+Each group with at least 20 users must meet:
 
-| 指標 | 基準 |
+| Metric | Target |
 |---|---|
-| top-1対応付け成功率 | 20%以下 |
-| A比の成功率削減 | 80%以上減 |
-| 直接一意に辿れる割合 | 5%以下 |
+| Top-1 matching success | ≤20% |
+| Success reduction versus A | ≥80% |
+| Directly unique traceability | ≤5% |
 
-- 平均だけでなく、シナリオ別（反復入出金・少額・特徴的金額・部分退出・全退出・損益あり）に報告する。
-- 独立なユーザー単位の不確実性区間を報告する。
-- 合格基準を満たしても、次の意味は主張しない: 匿名性の数学的保証、単独・低利用での秘匿、HL・入口事業者・権限者からの秘匿、過去のデータの秘匿。
+- Report averages and each repeated/small/distinctive/partial-exit/full-exit/profit-loss scenario.
+- Report independent per-user uncertainty intervals.
+- Passing does not establish mathematical anonymity, privacy under isolated/low usage, secrecy from HL/entry providers/authorities, or secrecy of past data.
 
-## 6. 報告形式
+## 6. Report format
 
-- 腕ごと・ユーザー数群ごと・シナリオごとの成功率表（平均と区間）。
-- 失敗条件（相関が残った条件）の具体的な列挙。特に同額・同時刻・反復・退出時の挙動。
-- testnet実観測で追加された公開情報の一覧と、それがシミュレーション結果をどう変えたか。
-- 未見評価の結果を、攻撃調整に使った入力の結果と分離して記載する。
-- 再現手順（seed、生成器のrevision、実行環境、実観測の取得元と日時）。
+- Success tables by arm, user group, and scenario, with averages/intervals.
+- Concrete failure conditions: matching amount/time, repetition, exit behavior.
+- Public information added through real testnet observations and its effect on simulation results.
+- Separate unseen evaluation results from attack-tuning inputs.
+- Reproduction: seed, generator revision, environment, observation sources/dates.
 
-## 7. 未達時の判断
+## 7. Decisions when criteria fail
 
-| 状況 | 判断 |
+| Condition | Decision |
 |---|---|
-| privacy未達 | 資金配分方式を再設計する。取引口座の合算やAgent-onlyへの切替を無断で行わない |
-| 安全性未達 | 資金接続を止め、状態機械と認可を修正する |
-| 機密基盤未確保 | 通常環境で合成データ・testnet検証のみ継続する |
-| 受付→HL受理p95が5秒超 | 機密性を弱めず、testnetで指値主体の検証と改善を行う |
+| Privacy fails | Redesign allocation; do not silently combine trading accounts or switch to agent-only |
+| Safety fails | Stop fund integration and fix state machines/authorization |
+| Confidential infrastructure unavailable | Continue synthetic/testnet checks in an ordinary environment only |
+| Admission→HL acceptance p95 >5 s | Preserve confidentiality; test limit-order-focused use and improve on testnet |
 
-- 基準を満たせない間は新規の機密預入を開始しない。
-- 既存資金の出金を匿名性達成まで無期限に待たせない。出金で保護が弱まる場合は実行前に知らせる。
-- 最終的な資金経路が未決のまま、その方式専用のUI・本番実装へ大きく投資しない。
+- Do not start new confidential deposits while criteria remain unmet.
+- Do not indefinitely delay existing withdrawals for anonymity. Warn before execution if withdrawal weakens protection.
+- Do not invest heavily in route-specific UI/production implementation while the funding route remains undecided.
 
-## 8. 成果物
+## 8. Deliverables
 
-- 再現可能なシミュレーション（入力生成器・攻撃実装・評価実装）とそのrevision。
-- 公開トレースのみの評価入力と、評価専用の正解対応表（非公開）。
-- testnet実観測の記録。
-- 相関評価レポート（6節の形式）。
-- 採用判断の記録（B1アルゴリズムの採否と、未達時の再設計方針）。
+- Reproducible simulation: input generator, attack, scoring, revisions.
+- Public-trace evaluation inputs and private evaluation-only truth mappings.
+- Real testnet observation records.
+- Correlation report in section 6 format.
+- Adoption decision for B1 and redesign policy after failed criteria.
 
-## 9. 未確定事項
+## 9. Pending decisions
 
-| 項目 | 確定時期 |
+| Item | Timing |
 |---|---|
-| B1の配分アルゴリズム候補 | Phase 1（評価前） |
-| 攻撃手法の実装範囲（グラフ相関・時刻相関・金額指紋） | Phase 1 |
-| testnet観測で追加する公開情報の具体 | Phase 1 |
-| 本番の利用量条件と独立レビューの実施者 | Phase 5 |
+| Candidate B1 algorithms | Phase 1 before evaluation |
+| Attack scope: graph/time/amount fingerprints | Phase 1 |
+| Additional public information from testnet | Phase 1 |
+| Production usage requirements and independent reviewers | Phase 5 |

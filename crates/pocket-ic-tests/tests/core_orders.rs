@@ -1929,8 +1929,7 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         &pic,
         core,
         caller,
-        br#"{"status":"ok","response":{"type":"cancel","data":{"statuses":[{"success":true}]}}}"#
-            .to_vec(),
+        br#"{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}"#.to_vec(),
     )
     .expect("call");
     assert_eq!(swept.expect("cancel sweep").cancels, 1, "取消が送信される");
@@ -1973,8 +1972,7 @@ fn a_cancellation_is_dispatched_to_the_venue() {
         &pic,
         core,
         caller,
-        br#"{"status":"ok","response":{"type":"cancel","data":{"statuses":[{"success":true}]}}}"#
-            .to_vec(),
+        br#"{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}"#.to_vec(),
     )
     .expect("call");
     assert_eq!(swept.expect("cancel sweep").cancels, 1);

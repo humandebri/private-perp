@@ -228,6 +228,17 @@ type RecoveryPayload = variant {
     amount_micros : nat64;
     event_id : blob;
   };
+  DepositCreditWithFee : record {
+    fee_micros : nat64;
+    observed_at_ms : nat64;
+    network : text;
+    // Proven sender of an inbound HL internalTransfer; absent for unattributed deposits.
+    sender : opt blob;
+    // Gross sender debit; the recipient receives amount minus fee.
+    amount_micros : nat64;
+    address : blob;
+    tx_hash : blob;
+  };
   Baseline : record { state_digest : blob };
   LedgerPosting : record {
     account_id : blob;
@@ -264,10 +275,13 @@ type RecoveryPayload = variant {
     accepted : bool;
   };
   DepositCredit : record {
+    // Missing in original journals; present in interim fee-bearing journals.
+    fee_micros : opt nat64;
     observed_at_ms : nat64;
     network : text;
     // Proven sender of an inbound HL internalTransfer; absent for unattributed deposits.
     sender : opt blob;
+    // Credited amount for old records; gross amount when a fee is present.
     amount_micros : nat64;
     address : blob;
     tx_hash : blob;
@@ -277,14 +291,17 @@ type RecoveryRecord = record {
   hash : blob;
   event : RecoveryEvent;
   previous_hash : blob;
+  // Exact bytes hashed when this event was persisted. Optional for old peers.
+  encoded_payload : opt blob;
   sequence : nat64;
 };
 type Result = variant { Ok : JournalHead; Err : ErrorCode };
-type Result_1 = variant { Ok : opt JournalRecord; Err : ErrorCode };
-type Result_2 = variant { Ok : vec JournalRecord; Err : ErrorCode };
-type Result_3 = variant { Ok : opt RecoveryRecord; Err : ErrorCode };
-type Result_4 = variant { Ok : vec RecoveryRecord; Err : ErrorCode };
-type Result_5 = variant { Ok; Err : ErrorCode };
+type Result_1 = variant { Ok : bool; Err : ErrorCode };
+type Result_2 = variant { Ok : opt JournalRecord; Err : ErrorCode };
+type Result_3 = variant { Ok : vec JournalRecord; Err : ErrorCode };
+type Result_4 = variant { Ok : opt RecoveryRecord; Err : ErrorCode };
+type Result_5 = variant { Ok : vec RecoveryRecord; Err : ErrorCode };
+type Result_6 = variant { Ok; Err : ErrorCode };
 type SendIntent = record {
   account_id : blob;
   request_id : blob;
@@ -294,16 +311,19 @@ type SendIntent = record {
 };
 service : () -> {
   append : (SendIntent) -> (Result);
+  append_prepared : (SendIntent) -> (Result);
   append_recovery_event : (RecoveryEvent) -> (Result);
+  authorize_send : (text, blob) -> (Result_1);
+  cancel_prepared_send : (text, blob) -> (Result_1);
   head : () -> (Result);
   // Idempotency lookup for a response lost after the append committed.
-  intent_record : (text, blob) -> (Result_1);
+  intent_record : (text, blob) -> (Result_2);
   // 復元照合用の範囲取得。呼出元自身の記録だけを返す。
-  records : (nat64, nat32) -> (Result_2);
-  recovery_event : (blob) -> (Result_3);
+  records : (nat64, nat32) -> (Result_3);
+  recovery_event : (blob) -> (Result_4);
   // Only the registered worker can read its own private recovery events.
-  recovery_events : (nat64, nat32) -> (Result_4);
+  recovery_events : (nat64, nat32) -> (Result_5);
   recovery_head : () -> (Result);
-  register_worker : (text, principal) -> (Result_5);
+  register_worker : (text, principal) -> (Result_6);
   version : () -> (text) query;
 }

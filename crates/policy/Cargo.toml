@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "policy_registry Canisterの雛形"
+license.workspace = true
+repository.workspace = true
+description = "Canister policy registry"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

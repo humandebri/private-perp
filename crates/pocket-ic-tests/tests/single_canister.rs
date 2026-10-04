@@ -104,6 +104,20 @@ fn one_canister_preserves_authentication_and_journal_recovery() {
         decode_one(&response).expect("journal role response");
     assert!(matches!(result, Err(ErrorCode::Unauthenticated { .. })));
 
+    for method in ["role_authorize_send", "role_cancel_prepared_send"] {
+        for caller in [Principal::anonymous(), admin] {
+            let denial: Result<bool, ErrorCode> = update_args(
+                &pic,
+                canister,
+                caller,
+                method,
+                ("vault".to_string(), "allocation".to_string(), vec![0u8; 32]),
+            )
+            .unwrap();
+            assert!(matches!(denial, Err(ErrorCode::Unauthenticated { .. })));
+        }
+    }
+
     for method in [
         "vault_get_policy_principal",
         "core_get_policy_principal",

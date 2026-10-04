@@ -494,4 +494,19 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 25,
         sql: super::send_journal::REPLAY_VALIDATION_SQL,
     },
+    Migration {
+        version: 26,
+        sql: "CREATE TABLE spot_deposit_conversions (
+            event_id BLOB PRIMARY KEY CHECK(length(event_id)=32),
+            account_id BLOB NOT NULL CHECK(length(account_id)=32),
+            nonce INTEGER NOT NULL CHECK(nonce>0),
+            sender BLOB NOT NULL CHECK(length(sender)=20),
+            amount INTEGER NOT NULL CHECK(amount>0),
+            receipt_hash BLOB UNIQUE CHECK(receipt_hash IS NULL OR length(receipt_hash)=32),
+            created_at INTEGER NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('prepared','dispatching','accepted','rejected','settled'))
+        );
+        CREATE UNIQUE INDEX spot_conversion_pending ON spot_deposit_conversions(account_id) WHERE state <> 'settled';
+        CREATE TABLE spot_deposit_history_cursors (network TEXT NOT NULL,address BLOB NOT NULL,start_time INTEGER NOT NULL,PRIMARY KEY(network,address));",
+    },
 ];

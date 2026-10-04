@@ -1,22 +1,22 @@
-# ローカル品質ゲート（2026-09-23）
+# Local quality gate (2026-09-23)
 
-対象は `617e8f9` に本変更を加えたローカル実装。以下の検証はすべて終了コード0で完了した。リモートCIや本番環境の合格を意味しない。
+Scope: local implementation at `617e8f9` plus this change. All checks below completed with exit code 0. This does not establish remote CI or production acceptance.
 
-## 修正範囲
+## Changes
 
-- 初回のPocketIC全件実行では7ファイル・18件が実口座ID不一致で失敗。正常系fixtureを実IDと明示的な口座観測へ移行した。汎用RPCヘルパでのID補正や本番の認可・鮮度条件の緩和は行っていない。
-- その先にあった旧fixtureも修正した。取消応答のinner success、複数Candid引数、永続化された署名nonce、SL/TP照合時の建玉を現行契約に揃えた。誤口座・未観測・古い観測・許可外銘柄の拒否理由も検証する。
-- runnerはロック取得失敗で停止し、自分が取得したロックだけを解放する。サーバー準備・build・testの失敗を伝播し、成功表示はtest完了後に限定する。本番とtest-venueの出力先を分離し、同一ディレクトリ指定を拒否する。CIも同じrunnerと回帰テストを使う。
-- Canister本番コード、Candid、DB schema、frontendの動作は変更していない。
+- The first full PocketIC run failed 18 tests across seven files because real account IDs did not match. Migrated successful-path fixtures to real IDs and explicit account observations. Did not correct IDs in generic RPC helpers or relax production authorization/freshness requirements.
+- Updated older fixtures subsequently exposed: inner success in cancellation replies, multiple Candid arguments, persisted signing nonces, and positions during SL/TP reconciliation now match current contracts. Also checked rejection reasons for wrong, unobserved, stale, and disallowed-asset accounts.
+- The runner stops on lock acquisition failure and releases only its own lock. It propagates server preparation, build, and test failures and prints success only after tests finish. Production and test-venue outputs are separate; identical directories are rejected. CI uses the same runner and regression tests.
+- Production canister code, Candid, DB schemas, and frontend behavior were unchanged.
 
-## 検証結果
+## Results
 
-- Rust: `cargo fmt --all --check`、CIと同じhost/wasm clippy（`-D warnings`）、hostテスト76件、`check-no-await.sh`、`check-signing-boundary.sh`が成功。
-- PocketIC: `bash scripts/pocket-ic-test.sh --no-fail-fast`。最終版で29ファイル・85件が2回連続成功、失敗0・ignored 0。各回でfeatureなし本番Wasmとtest-venue Wasmを別々にビルドした。
-- runner: `node --test scripts/pocket-ic-runner.test.mjs`、7件成功。正常終了、build失敗、test失敗、サーバー準備失敗、ロック競合、空のサーバーパス、出力先重複を検証した。
-- 本番Wasm: 4 Canisterの成果物にテスト専用メソッドが含まれないことを検査して成功。
-- frontend: `pnpm lint`、`pnpm format:check`、`pnpm typecheck`、`pnpm test`（28件）、`pnpm build`が成功。新規runnerテストも既存Oxfmt設定で整形・検査した。
-- mock HL: `node --test tools/mock-hl/server.test.mjs`、7件成功。
-- 実接続E2E: `bash scripts/local-e2e.sh`、Playwright Chromiumで4件成功、skipなし。ローカルICの `http://localhost:18100/` とmock HLを使用。終了後にnetwork停止と18100・8080・4173番ポートのlistener消滅を確認した。
+- Rust: passed `cargo fmt --all --check`, the CI host/Wasm clippy commands (`-D warnings`), 76 host tests, `check-no-await.sh`, and `check-signing-boundary.sh`.
+- PocketIC: `bash scripts/pocket-ic-test.sh --no-fail-fast`. Final version passed 85 tests across 29 files twice consecutively, with zero failures and zero ignored tests. Each run built feature-free production Wasm separately from test-venue Wasm.
+- Runner: `node --test scripts/pocket-ic-runner.test.mjs`, seven passes covering success, build failure, test failure, server preparation failure, lock contention, empty server path, and duplicate output directories.
+- Production Wasm: passed checks that four canister artifacts contain no test-only methods.
+- Frontend: passed `pnpm lint`, `pnpm format:check`, `pnpm typecheck`, `pnpm test` (28 tests), and `pnpm build`. New runner tests were formatted and checked with existing Oxfmt configuration.
+- Mock HL: `node --test tools/mock-hl/server.test.mjs`, seven passes.
+- Live local E2E: `bash scripts/local-e2e.sh`, four Playwright Chromium passes with no skips, using local IC at `http://localhost:18100/` and mock HL. Verified network shutdown and removal of listeners on ports 18100, 8080, and 4173 after exit.
 
-未検証: リモートCI、実MetaMask、実HL、testnet・mainnet、実資金。frontend buildの既存bundle-size・crypto外部化警告は残る。コミット・push・公開は実施していない。
+Unverified: remote CI, real MetaMask, real HL, testnet/mainnet, and real funds. Existing frontend bundle-size and crypto externalization warnings remain. No commit, push, or publication was performed.

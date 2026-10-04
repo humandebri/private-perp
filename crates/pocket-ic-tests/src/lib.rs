@@ -1000,7 +1000,7 @@ pub fn venue_router(
         let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap_or_default();
         match query.get("type").and_then(|value| value.as_str()) {
             Some("clearinghouseState") => Ok((200, positions.clone())),
-            Some("userFills") => Ok((200, fills.clone())),
+            Some("userFillsByTime") => Ok((200, fills.clone())),
             Some("orderStatus") => Ok((200, status.clone())),
             other => Err((1, format!("unexpected info query: {other:?}"))),
         }
@@ -1022,7 +1022,7 @@ pub fn venue_router_default(
         let query: serde_json::Value = serde_json::from_slice(&call.body).unwrap_or_default();
         match query.get("type").and_then(|value| value.as_str()) {
             Some("clearinghouseState") => Ok((200, EMPTY_POSITIONS.to_vec())),
-            Some("userFills") => Ok((200, NO_FILLS.to_vec())),
+            Some("userFillsByTime") => Ok((200, NO_FILLS.to_vec())),
             Some("orderStatus") => {
                 let oid = query.get("oid").cloned().unwrap_or(serde_json::Value::Null);
                 let body = serde_json::json!({ "status": "open", "order": { "oid": oid } });

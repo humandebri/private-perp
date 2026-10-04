@@ -1,723 +1,726 @@
-# private-perp 実装計画
+# private-perp implementation plan
 
-- 版: v0.5（UI基盤実装・本番未承認）
-- 最終更新: 2026-09-18
-- 対象範囲: 実装アーキテクチャ、リポジトリ構成、永続化設計、注文パイプライン、クライアント設計、検証計画、タスク分解
-- 対象外: 画面仕様、文言、法務判断
+> Historical design record. Dates, decisions, estimates, and verification status refer to the original record. See [implementation status](docs/implementation-status.md) and [single-canister architecture](docs/phase-3/single-canister.md) for later changes.
 
-`Plan.md` が「何を作るか」「誰が何をできるか」を定めるのに対し、この文書は「どう作るか」を定める。両者が衝突する場合、権限モデルと不変条件（`Plan.md` 3.2）は `Plan.md` を優先する。実装上の都合で不変条件を曲げない。
 
-v0.5は `Plan.md` v0.9のB（機密資金層＋ユーザー別HL口座）を実装ベースラインとする。16章の確定仕様に沿ってローカル・testnet実装を開始できる。資金安全性・プライバシー・機密基盤・ガバナンス・法務の本番ゲートは未充足であり、実資金受付やデプロイの承認ではない。frontendは合成デモ、ICPバックエンドは未実装。
+- Version: v0.5 (UI base implementation, not yet approved for production)
+- Last update: 2026-09-18
+- Scope: Implementation architecture, repository configuration, persistence design, order pipeline, client design, validation planning, task decomposition
+- Exclusion: screen specifications, text, legal judgment
+
+`Plan.md` defines what to build and who can perform each operation. This document defines how to implement it. When they conflict, the authority model and invariants in `Plan.md` section 3.2 take precedence. Implementation convenience must not weaken those invariants.
+
+v0.5 implements the B (confidential fund layer + user-specific HL accounts) based on the `Plan.md` v0.9 implementation baseline. Local and testnet implementation can begin in accordance with the finalized specifications in Chapter 16. The production gates for fund safety, privacy, confidential infrastructure, governance, and legal review is not yet fulfilled, and it is not for accepting real funds or approving deployments. The frontend is a synthetic demo, and the ICP backend is unimplemented.
 
 ---
 
-## 0. 決定の記録（追加分）
+## 0. Additional decisions
 
-`Plan.md` の D1〜D8 に加えて、実装方針として次を決定した。
+In addition to D1 to D8 in `Plan.md`, we decided the following as implementation guidelines.
 
-| # | 論点 | 決定 | 影響 |
+| # | the point | Decision | Influence |
 |---|---|---|---|
-| D9 | 署名経路 | 注文はtrading_coreのAgent、資金移動・Agent承認はfunds_vaultのmaster。ブラウザEOAはログイン・預入・出金意図を署名 | 資金鍵をtrading_coreへ渡さず、任意digest署名APIも提供しない |
-| D10 | trading_coreの配置 | Confidential Subnetを維持（D7維持）。遅延を受容する | 署名は毎回 `pzp6e` へのクロスネット呼び出しになる。2章で構造を分析する |
-| D11 | リアルタイム経路 | 公開市況だけブラウザ↔HL WS直結。本人データはCanisterの認可済み暗号化ポーリング | ブラウザIPと取引口座をユーザー系WSで直接結び付けない。HL照合コストと遅延を測る |
-| D12 | 永続化 | `ic-sqlite-vfs` のみ。`StableBTreeMap` は使わない | 実装が単純になる一方、若い依存に全状態を預ける。4.9で緩和策を定める |
+| D9 | signature path | Orders are handled by the trading_core Agent, and fund transfers and Agent approvals are handled by the funds_vault master. The browser EOA is used for login, deposit, and withdrawal intentions. | Do not transfer the funding key to trading_core and do not provide the arbitrary digest-signing API. |
+| D10 | The configuration of trading_core | Maintain Confidential Subnet (D7 maintenance). Accept delays | The signature is a cross-net call to `pzp6e` each time. Analyze the structure in Chapter 2. |
+| D11 | Real-time route | Direct connection between the public market status and the browser↔HL WS. The personal data is encrypted polling authorized by Canister. | Do not directly link the browser IP and trading account to the user-related WS. Measure HL reconciliation costs and delays. |
+| D12 | Persistence | Only `ic-sqlite-vfs`. Do not use `StableBTreeMap` | While the implementation becomes simpler, we entrust all states to young dependence. Establish mitigation measures at 4.9 |
 
-D9 と D10 は組み合わせると「全注文がクロスネット署名待ちになる」ことを意味する。これが本計画で最も強い制約であり、2章で扱う。
+Combining D9 and D10 means that "all orders will be waiting for cross-net signature". This is the strongest restriction in the current plan and will be dealt with in Chapter 2.
 
-D9によりブラウザはHL注文やAgent承認を署名しない。接続EOAの認証、本人HL口座からの預入、出金意図の承認にだけウォレット署名を使う。
+With D9, the browser does not sign HL orders or Agent approvals. It only uses wallet signatures for connecting EOA authentication, deposits from the user's HL account, and approval of withdrawal intentions.
 
-署名場所、通信経路、資金経路は別の設計判断である。「Privacyを提供するためCanister署名しか選べない」とはしない。今回はBの資金・鍵管理に合わせてD9を確定したが、署名をCanisterへ集約しても公開送金のリンクは消えない。
+The location of the signature, communication path, and fund path are different design decisions. We do not say that "we can only choose canister signing to provide privacy." This time, we finalized D9 in accordance with B's fund and key management, but even if we consolidate the signature into Canister, the public transfer link will not disappear.
 
 ---
 
-## 1. 機密資金層＋ユーザー別HL口座のアーキテクチャ
+## 1. confidential fund layer + architecture of user-specific HL accounts
 
-### 1.1 経路図
+### 1.1 Pathway diagram
 
 ```
-[ユーザーのブラウザ]
+[User's browser]
   │
-  ├─(A) 公開市況だけ ──WS直結──▶ Hyperliquid
+  ├─(A) Only public market conditions ──WS directly connected──▶ Hyperliquid
   │       wss://api.hyperliquid.xyz/ws         (D11)
   │
-  ├─(B) 認証・出金意図 ──EOA署名＋暗号化──▶ funds_vault
-  │        └─ 預入は本人HL口座から共通保管口座への本人署名送金
+  ├─(B) authentication/withdrawal intention ──EOA signature + encryption──▶ funds_vault
+  │        └─ Deposit is done by signature transfer from the HL account of the person depositing to the shared reserve account.
   │
-  └─(C) 注文・取消・本人データ ──認証＋暗号化──▶ [trading_core @ Confidential Subnet]
+  └─(C) Order/cancellation/personal data ──authentication + encryption──▶ [trading_core @ Confidential Subnet]
                                                      │
-                                                     ├─ 認可・上限・期限（同期）
-                                                     ├─ ic-sqlite-vfs（同期トランザクション）
+                                                     ├─ authorization, limit, deadline (synchronous)
+                                                     ├─ ic-sqlite-vfs (synchronous transaction)
                                                      ├─ await sign_with_ecdsa ──xnet──▶ [pzp6e]
-                                                     ├─ await 非replicated HTTPS outcall ──▶ Hyperliquid
-                                                     └─ await /info 照合 ──▶ Hyperliquid
+                                                     ├─ await non-replicated HTTPS outcall ──▶ Hyperliquid
+                                                     └─ await /info reconciliation ──▶ Hyperliquid
 ```
 
-### 1.2 経路ごとの責務
+### 1.2 Responsibilities for each route
 
-| 経路 | 何が流れるか | 誰が検証するか |
+| a route | What will flow? | Who will verify it? |
 |---|---|---|
-| (A) | 公開市況のみ | ブラウザ。リスク判断の権威にはしない |
-| (B) | 認証・資金要求・master action・資金照合 | funds_vault、Hyperliquid。Agent承認もfunds_vaultが実行 |
-| (C) | 注文意図、署名済みaction、照合結果、暗号化した本人状態 | trading_core |
+| (A) | Only public market conditions | Browser. Do not be the authority on risk assessment. |
+| (B) | authentication, fund request, master action, fund reconciliation | funds_vault, Hyperliquid. Agent approval is also executed by funds_vault. |
+| (C) | Order intention, signed action, reconciliation result, encrypted identity status | trading_core |
 
-### 1.3 Canisterに通さないもの
+### 1.3 Things that cannot be passed through the canister
 
-- 市況データ。中継すると、レプリケートされたHTTPS outcallとコンセンサスを毎秒回すことになる。7ノード分のoutcall費用とコンセンサス負荷が乗り、レイテンシもHL純正より悪化する。
-- サービス外のブリッジ。本人HL口座にUSDCを用意する操作はユーザーが外部で行う。
+- Market data. When it is transmitted, the replicated HTTPS outcall will rotate consensus every second. The outcall cost and consensus load for 7 nodes will be borne, and latency will also deteriorate compared to HL's original.
+- Bridge outside of the service. The operation of preparing USDC in the user's HL account outside the service is carried out by the user.
 
-本人データと資金移動はCanisterを通す。市況中継を省くことと、口座情報をブラウザから直接照会しないことを両立させる。
+Personal data and fund transfers are conducted through Canister. It balances avoiding market updates and not directly checking account information from the browser.
 
-### 1.4 ICPの役割と設計上の境界
+### 1.4 The role of ICP and design boundaries
 
-BではICPが顧客資金のmaster署名・非公開台帳・Agent署名・復旧を担う。署名APIを呼べるCanisterと変更権限のリスクは残る。鍵の分散だけで非カストディや運営者からの機密性を証明したことにはならない。
+In B, ICP handles the customers' funds' master signing, non-public ledger, agent signing, and recovery. There is still a risk of Canister being able to call the signing API. Proof of confidentiality from non-custodial or operator sources cannot be proven solely by the decentralization of the key.
 
-- 市況だけHLへ直接接続する。本人データはD11、注文・取消はD9の経路を使う。
-- HL標準のSL/TPはHLのtrigger注文を使う。Canisterで価格を監視して同じ仕組みを作り直さない。ユーザー不在時の独自戦略だけが別の実行エンジンを要する。
-- フロントエンド配信はICPが必須ではない。
-- Bは採用済みだが公開の資金移動は残る。相関耐性はPlan 16.6で評価し、Canister保管だけでD13達成としない。
-- Canisterのリスク制限は本サービスの注文にだけ適用される。ユーザー自身・他Agentの直接取引がある口座全体を、ローカルDBだけで厳密に制限することはできない。
+- Connect directly to HL only for market conditions. Personal data is used via D11, and orders and cancellations are processed through D9.
+- HL standard SL/TP uses HL trigger orders. It doesn't monitor prices in a canister and rebuild the same mechanism. Only a unique strategy without users requires a different execution engine.
+- ICP is not required for front-end distribution.
+- B is adopted but public fund transfer remains. Correlation resistance is evaluated in Plan 16.6, and D13 will not be achieved solely through Canister custody.
+- The risk restrictions of Canister are only applicable to orders in this service. It is not possible to strictly restrict the entire account by using only the local DB when there is direct trading by the user himself or other agents.
 
-### 1.5 機密資金層の実装境界
+### 1.5 implementation boundary of confidential fund layer
 
-初期の資金経路はPlan 16.2のHyperCore USDC往復とする。全員のHLポジションを単一口座へまとめず、約定・証拠金・清算はHL標準に委ねる。
+The initial funding route will be the HyperCore USDC cross-back from Plan 16.2. Instead of consolidating everyone's HL positions into a single position, fill, margin, and liquidation will be delegated to the HL standard.
 
-- 機密資金層の共通TreasuryとHL取引口座は別の構成要素である。資金層の採用からomnibus取引を導かない。
-- NEARのTreasury/FAR/IMTは公式仕様で確認できるが、near.com perpsの鍵管理・口座割当は推測である。参考構造を実証済み実装としてコピーしない。
-- 資金層のmaster鍵はfunds_vault、Agent鍵はtrading_coreが保持する。ユーザー単独の資金回収は保証しない。
-- 注文DBと資金DBを別Canisterに置く。資金移動の受付・予約・外部実行・照合を14章の状態機械で分離する。
-- 入出金、Agent承認、口座別WS、API応答、cloid、監査ログを横断してリンクを調べる。金額・時刻の相関への完全耐性は必須としないが、直接の公開リンクを推測リスクと混同しない。
+- The common Treasury and HL trading account of confidential fund layer are separate components. They do not lead to omnibus trading from adopting fund layer.
+- The Treasury/FAR/IMT for NEAR can be confirmed in the official specifications, but the key management and account allocation for near.com perps are speculative. Do not copy the reference structure as an implemented proof.
+- The master key of fund layer is held by funds_vault, and the agent key is held by trading_core. User-independent fund recovery is not guaranteed.
+- Place the order DB and the funds DB in separate Canisters. Separate the state machine for receiving, booking, external execution, and reconciliation of fund transfers in Chapter 14.
+- Cross-reference links across withdrawal, Agent approval, account-specific WS, API responses, cloid, and audit logs. While complete resistance to correlation between amounts and timestamps is not mandatory, do not confuse it with the risk of guessing direct public links.
 
-Plan 16章と本書14章の境界で、資金台帳とmaster actionをtestnet向けに実装する。従来のAgent-only工期はBの見積りに流用しない。
+At the boundary between Chapter 16 of the Plan and Chapter 14 this document, implement the funds ledger and master action for testnet. Do not reuse the B estimate of the traditional Agent-only period.
 
 ---
 
-## 2. レイテンシ設計
+## 2. Latency design
 
-### 2.1 何が遅いのか
+### 2.1 What is the delay?
 
-`Plan.md` で「HFTは対象外」としたのは性能目標の話だったが、D9/D10により**通常の手動注文のUXに直接効く**問題になった。構造は次のとおり。
+The "HFT is not covered" in `Plan.md` was about performance goals, but with D9/D10 it became a problem that **directly affects the UX of normal manual orders**. The structure is as follows.
 
-| 区間 | 内容 | 既知の値 |
+| a section | Content | Known value |
 |---|---|---|
-| ブラウザ → 境界ノード → subnet | ingress | 数百ms |
-| 認可・リスク検証 | 同期・純粋 | 無視できる |
-| sign_with_ecdsa | クロスネット（confidential → pzp6e） | **未実測** |
-| HTTPS outcall POST | 非replicated、TLS | 数百ms |
-| 照合 `/info` | replicated POST＋transform | 数百ms |
+| Browser → Boundary node → subnet | ingress | Hundreds of ms |
+| Authorization and risk verification | Synchronous/pure | Can be ignored |
+| sign_with_ecdsa | Cross net (confidential → pzp6e) | **Not tested** |
+| HTTPS outcall POST | Non-replicated, TLS | Hundreds of ms |
+| reconciliation `/info` | replicated POST＋transform | Hundreds of ms |
 
-DFINITYのエンジニアは「`sign_with_ecdsa` を呼ぶcanisterを署名subnet上に置けばクロスネット遅延を完全に避けられる」と回答している。本番鍵 `key_1` は fiduciary signing subnet `pzp6e`（34ノード）にのみ配備され、テスト鍵は `fuqsr` にある。**D10の構成ではこの回避策を取れない**ため、クロスネット分の遅延を毎回支払う。
+DFINITY engineers responded that if the canister that calls `sign_with_ecdsa` is placed on the signing subnet, cross-network latency can be completely avoided. The production key `key_1` is deployed only to the fiduciary signing subnet `pzp6e` (34 nodes), and the test key is located at `fuqsr`. **Because this workaround cannot be taken in the D10 configuration**, cross-network latency is paid for each time.
 
-参照: [Sign with ECDSA takes 12+ seconds](https://forum.dfinity.org/t/sign-with-ecdsa-takes-12-seconds-and-costs-0-03/58325)、[Chain-key Signing Performance Improvements](https://forum.dfinity.org/t/chain-key-signing-performance-improvements/64672)
+Reference: [Sign with ECDSA takes 12+ seconds](https://forum.dfinity.org/t/sign-with-ecdsa-takes-12-seconds-and-costs-0-03/58325) [Chain-key Signing Performance Improvements](https://forum.dfinity.org/t/chain-key-signing-performance-improvements/64672)
 
-### 2.2 署名subnetの容量制約
+### 2.2 capacity restrictions on signing subnet
 
-- `pzp6e` のtECDSA最大スループットは**サブネット全体で約3.5 sig/s**（pre-signature 100枚が用意されている場合）。これは全ICPアプリで共有される。
-- 問い合わせキュー `ecdsa:Secp256k1:key_1` の `max_queue_size` は20。pre-signatureが十分にあれば動的に最大100並行まで受け付ける。溢れると**署名要求が拒否される**。
-- 現時点でcanister単位の署名レート制限は無い（DFINITY、2026-05）。
-- 署名単価は約26.15B cycles（約$0.035）。値下げは議論中だが未実施。
+- The tECDSA maximum throughput for `pzp6e` is **approximately 3.5 sig/s across the subnet (if 100 pre-signatures are available)**. This is shared across all ICP apps.
+- The `max_queue_size` for the inquiry queue `ecdsa:Secp256k1:key_1` is 20. If the pre-signature is sufficient, it can dynamically accept up to 100 simultaneous requests. If it overflows, **signature requests will be rejected**.
+- As of now, there is no signature rate limit in canister units (DFINITY, 2026-05).
+- The signature price is about 26.15B cycles (about $0.035). The price reduction is under discussion but not performed.
 
-帰結。**1注文1署名の設計は、サブネット共有資源の上で動く。** バースト時はキュー溢れを前提に、失敗を注文の失敗にせず再試行に回す設計が必須（5.5）。バッチ化（1 actionに複数注文）は費用だけでなく署名スロットの節約でもある。
+**One signature per order uses subnet-wide shared resources.** Assume queue overflow during bursts and retry preparation failures without treating them as terminal order failures (5.5). Batching multiple orders in one action saves signing slots as well as cost.
 
-### 2.3 受付と外部実行を分離する
+### 2.3 Separate acceptance and external execution
 
-`submit_order` はcallerとHL口座の所有権、eligibility、入力サイズ、メタデータ、リスク予約を検証する。同じ同期トランザクションでユーザー単位のrequest ID、本文fingerprint、cloid、注文意図を保存し、受付結果を返す。受付はHLの受理でも約定でもない。`raw_rand` は非同期なので同期受付処理に混ぜない。事前補充した安全な乱数からcloidを割り当て、枯渇時は受付を拒否する。
+`submit_order` verifies the ownership, eligibility, input size, metadata, and risk reservation of the caller and HL accounts. It stores user-level request ID, text fingerprint, cloid, and order intent in the same synchronous transaction and returns the receipt result. Receipt is not accepted by HL or filled. `raw_rand` is asynchronous, so it should not be mixed with synchronous receipt processing. It allocates cloid from a pre-supplied secure random number and rejects receipt when the cloid is exhausted.
 
-バックグラウンド処理は次の順序を守る。
+Background processing follows the following order.
 
-1. queuedの注文を取得し、同一口座・Agent世代・network・grouping等の互換な注文だけをactionへまとめる。nonceと不変の署名対象を永続化する。
-2. worker epochを取得してsigningへ進み、署名を要求する。
-3. callbackでepoch・状態を比較し、取消要求、Agent世代、有効期限、kill-switch、policyの鮮度、メタデータ、リスク予約を再検証する。失効したworkerの結果は破棄する。
-4. 署名と正確な送信payloadを保存してsignedへ進む。
-5. 送信直前にも再検証し、同じICメッセージでCASによりdispatchingと送信意図を保存してからPOSTを発行する。この間に別のawaitを置かない。
-6. 応答は照合の手掛かりとして保存する。dispatching以降は照合専用とし、タイムアウトやcallback trapを未送信扱いに戻さない。
-7. HLでactionの結果と各注文のライフサイクルを照合する。cancelも独立した署名actionとして処理する。
+1. Get queued orders and only consolidate them into action for orders that are compatible with the same account, Agent generation, network, grouping, etc. Persist nonce and immutable signing payload.
+2. Get the worker epoch and proceed to signing, requesting the signature.
+3. Compare epoch and state via callback, re-verify cancellation requests, Agent generation, expiration, kill-switch, policy freshness, metadata, and risk reservation. Discard results of expired workers.
+4. Save the signature and the exact transmission payload and proceed to signed.
+5. Re-verify just before sending, save the dispatching and sending intent with the same IC message by CAS, and then issue POST. Do not place another await in between.
+6. Store the response as a reference for reconciliation. After dispatching, it will be dedicated to reconciliation and will not be treated as unsubmitted timeouts or callback traps.
+7. Reconcile the action results and the lifecycle of each order in HL. Also process cancel as an independent signature action.
 
-sweepの起動はグローバルtimerで行い（アップグレードで再arm）、件数・cycles・API予算を制限する。queued/signing/signedはepochを更新して回収できるが、dispatching/unknownは照合のみ。永続状態が正本であり、spawnやtimerの継続を正しさの前提にしない。
+The launch of sweep is done with the global timer (rearmed with an upgrade), and it limits the number of items, cycles, and API budget. Queued/signing/signed can update the epoch and recover, but dispatching/unknown can only do reconciliation. The state is permanent and does not assume the correctness of the spawn or timer continuation.
 
-### 2.4 Phase 1のGo/No-Goゲート（数値）
+### 2.4 Go/No-Go gate (number) of Phase 1
 
-Confidential Subnet（re2t4）上から実測し、次で判定する。
+Measure from the Confidential Subnet (re2t4) and then determine.
 
-| 実測 p95（受付→HL受理確認） | 判定 |
+| Real test p95 (Reception → HL reception confirmation) | judgment |
 |---|---|
-| 2秒未満 | 手動注文として許容。Market注文を既定で有効化 |
-| 2〜5秒 | Limit注文を主導線にする。Market注文はスリッページ警告を必須にする |
-| 5秒超 | 一般利用向けUXは不合格。機密性を自動で弱めず、testnetを指値主体に限定して原因・処理能力を再設計する |
+| Less than 2 seconds | Accept as a manual order. Activate market orders as a default. |
+| 2 to 5 seconds | Use limit orders as the guiding line. Market orders must include a slippage warning. |
+| Over 5 seconds | The UX for general use is unsatisfactory. It does not automatically weaken confidentiality, and it redesigns the cause and processing capabilities by limiting testnet to the designated entity. |
 
-「未実測」の項目を実測せずにPhase 2へ進まない。ここが本計画で最初のGo/No-Goである。
+Do not proceed to Phase 2 without measuring the "untested" item. This is the first Go/No-Go in the original plan.
 
-### 2.5 秘匿性に関する補足
+### 2.5 Supplementary information on confidentiality
 
-クロスネット署名ではactionの平文ではなく32バイトのダイジェストを渡す。ただし署名要求にはkey IDやderivation pathなどのメタデータも含まれるため、「ダイジェストのみ」「何も関連付けられない」とは主張しない。注文本文はクライアント、復号するCanister、執行先のHLで扱われる。D10はCanister内の処理を保護するもので、HL上の注文・ポジションまで隠すものではない。
+In CrossNet signature, instead of plain text for action, a 32byte digest is provided. However, since the signature request also includes metadata such as key ID and derivation path, we do not claim that it only contains a digest or that it cannot be associated with anything. The order text is handled by the client, the decrypting Canister, and the HL of the execution destination. D10 protects the processing within the Canister and does not hide the order and position on the HL.
 
-HTTPS outcallの本文は送信先HLへ開示される。replica・adapter・proxy・TLS終端のどこで本文を扱うかを確認し、全経路がTEE内にあると未検証のまま仮定しない（`Plan.md` 8.3.3）。また、注文をCanister経由にしても経路(A)/(B)からのIP露出は残る。
+The content of HTTPS outcall is disclosed to the destination HL. Verify where the content is handled in replica, adapter, proxy, or TLSterminal, and do not assume that all paths are within TEE until otherwise (`Plan.md` 8.3.3). Also, even if the order is processed through Canister, the IP exposure from path (A)/(B) remains.
 
 ---
 
-## 3. リポジトリ構成
+## 3. Repository configuration
 
 ### 3.1 workspace
 
 ```
 private-perp/
 ├── Cargo.toml                    # workspace
-├── icp.yaml                      # icp-cli 設定
+├── icp.yaml                      # icp-cli settings
 ├── crates/
-│   ├── hl-sign/                  # 純粋・非async。署名とaction構築
-│   ├── hl-types/                 # 共有型（action, meta, order）
-│   ├── db/                       # ic-sqlite-vfs ラッパ。同期のみ
+│   ├── hl-sign/                  # Pure and non-async. Signature and action construction
+│   ├── hl-types/                 # Shared type (action, meta, order)
+│   ├── db/                       # ic-sqlite-vfs Wrapper. Sync only
 │   ├── policy/                   # policy_registry canister
-│   ├── funds-vault/              # master鍵・認証・複式台帳・資金outbox
-│   ├── control-guard/            # SNS経由の変更予約・7日猶予
+│   ├── funds-vault/              # master key, authentication, double-entry ledger, funds outbox
+│   ├── control-guard/            # Change reservation via SNS and 7-day delay
 │   └── trading-core/             # trading_core canister
 ├── frontend/                     # TanStack Start + React + TypeScript / Workers
-├── docs/adr/                     # 採用理由・欠点・再検討条件（6本）
-├── research/                     # 調査記録（実装対象外）
+├── docs/adr/                     # Reasons for hiring, disadvantages, conditions for reconsideration (6 items)
+├── research/                     # Investigation records (not applicable to implementation)
 ├── Plan.md
 └── Implementation.md
 ```
 
-### 3.2 クレートと責務境界
+### 3.2 Creation and responsibility boundaries
 
-| クレート | 責務 | 依存の制約 |
+| Create | duty | Dependency constraints |
 |---|---|---|
-| `hl-sign` | action構築、msgpackエンコード、EIP-712ハッシュ、v復元、数値の正規化 | **`async` を一切含めない。** 純粋関数のみ。テストベクトルを同梱 |
-| `hl-types` | Hyperliquidのリクエスト/レスポンス型、`meta` パース | 純粋 |
-| `db` | スキーマ、Migration、`Db::update` ラッパ、CASヘルパ | **`async` を一切含めない。** `call_perform`/`ic_cdk::call` を含めない |
-| `policy` | 国・規約版・検証鍵・緊急停止・allowlist | 小さい。読み取り失敗はfail-closed |
-| `trading-core` | 注文認可、状態機械、spawn、sweep、outcall、照合 | 取引Agent署名だけを許す |
-| `funds-vault` | 認証、台帳、master署名、出金・配分・照合 | 本人認可を検証。任意hash署名APIは禁止 |
-| `control-guard` | 変更予約、7日猶予、許可したupgrade実行 | SNS governanceからの予約だけを許す。顧客情報を保存しない |
+| `hl-sign` | action construction, msgpack encoding, EIP-712 hash, v recovery, number normalization | **Do not include `async` at all.** Pure functions only. Test vectors included. |
+| `hl-types` | Hyperliquid request/response type, `meta` parsing | purity |
+| `db` | Schema, Migration, `Db::update` wrapper, CAS helper | **Do not include `async` at all.** Do not include `call_perform`/`ic_cdk::call` |
+| `policy` | Country/Terms version/Verification key/Emergency stop/allowlist | Small. Reading failure is fail-closed |
+| `trading-core` | Order authorization, state machine, spawn, sweep, outcall, reconciliation | Only allow trading agent signing |
+| `funds-vault` | authentication, ledger, master signing, withdrawal, allocation, reconciliation | Verify owner authorization. Optional hash signing API is prohibited. |
+| `control-guard` | Change reservation, 7-day grace period, allowed upgrade execution | Only allow reservations from SNS governance. Do not store customer information. |
 
-`hl-sign` と `db` を非asyncに固定するのは、`ic-sqlite-vfs` の制約（トランザクション内で `await` を跨げない）を**型とCIで守る**ためである。`ic-sqlite-vfs` 本体は `scripts/check-no-await.sh` で `src` 配下の `.await`・`async fn`・`call_perform`・`ic_cdk::call`・`call_raw` を拒否している。同じ検査を `hl-sign` と `db` に適用する。
+Fixing `hl-sign` and `db` to be non-async is necessary to **conform to the type and CI constraints of `ic-sqlite-vfs` (not crossing `await` within a transaction)**. The `ic-sqlite-vfs` core rejects `.await`, `async fn`, `call_perform` `ic_cdk::call` `call_raw` under `src` in `scripts/check-no-await.sh`. Apply the same test to `hl-sign` and `db`.
 
-### 3.3 同期・非同期の境界
+### 3.3 Synchronous and asynchronous boundaries
 
-- 非asyncクレート: `hl-sign`、`hl-types`、`db`
-- asyncを持つクレート: `trading-core`、`funds-vault`、`control-guard`、`policy`
-- `trading-core` は `db` の関数を呼ぶとき、必ず「同期ブロックを1つ完結させてから `await` する」順序を守る。
-- レビュー時の確認事項: `Db::update` のクロージャから `await` に到達するパスが無いこと。
+- Non-async crate: `hl-sign`, `hl-types` `db`
+- Clases with async: `trading-core`, `funds-vault`, `control-guard` `policy`
+- `trading-core` always follows the order of "complete 1 sync block and then `await`" when calling the `db` function.
+- Reviewing considerations: There is no path from the `Db::update` closure to `await`.
 
 ---
 
-## 4. 永続化（`ic-sqlite-vfs` のみ）
+## 4. Persistence (`ic-sqlite-vfs`)
 
-### 4.1 採用バージョン
+### 4.1 Selected version
 
-| 項目 | 値 |
+| an item | cost |
 |---|---|
-| クレート | `ic-sqlite-vfs` |
-| バージョン | `2.0.0` を**完全固定**（`=2.0.0`） |
-| 安定レイアウト | v8 |
-| feature | `sqlite-precompiled`（Wasmビルド用） |
-| リポジトリ | https://github.com/humandebri/ic-sqlite-vfs |
+| Create | `ic-sqlite-vfs` |
+| a version | `2.0.0` to **fully fixed** (`=2.0.0`) |
+| Stable layout | v8 |
+| feature | `sqlite-precompiled` (for Wasm build) |
+| Repository | https://github.com/humandebri/ic-sqlite-vfs |
 
-`2.0.0` は破壊的な安定レイアウト変更（v8）である。v6のsegmented page-mapイメージは直接開けない。**import/export/compactはRust facadeにも参照canisterにも公開されていない。** これはrawイメージの標準移行APIの制約であり、SQLによる論理エクスポートが不可能という意味ではない。アプリ固有の整合したバックアップ・復元経路は別途設計・検証する。
+`2.0.0` is a destructive stable layout change (v8). The segmented page-map image in v6 cannot be directly opened. **import/export/compact are not publicly available in the Rust facade or canister.** This is a restriction of the standard migration API for raw images, and it does not mean that logical export via SQL is impossible. App-specific consistent backup and recovery paths will be designed and verified separately.
 
-### 4.2 MemoryId割り当て
+### 4.2 MemoryId allocation
 
-MemoryIdは**デプロイ済みcanisterの寿命の間、変更しない**。255は同梱MemoryManager互換レイアウトが予約しているため、アプリは `0..=254` のみを使う。
+Do not change MemoryId **during the lifespan of the deployed canister**. 255 is reserved by the bundled MemoryManager compatible layout, so the app uses only `0..=254`.
 
-| MemoryId | 用途 | canister |
+| MemoryId | a use | canister |
 |---|---|---|
-| 0 | メインDB（users, agents, orders, order_events, nonces, audit） | trading_core |
-| 1 | 予約（将来の独立イメージ。slot catalogに記録する） | trading_core |
+| 0 | Main DB (users, agents, orders, order_events, nonces, audit) | trading_core |
+| 1 | Reservation (future independent image. Record in slot catalog) | trading_core |
 | 120 | policy DB | policy_registry |
-| 0 | 認証・資金台帳・資金outbox | funds_vault（別Canister） |
-| 0 | 変更予約・実行記録 | control_guard（別Canister） |
+| 0 | authentication, fund ledger, fund outbox | funds_vault (separate Canister) |
+| 0 | Change reservation and execution record | control_guard (separate Canister) |
 
-`MemoryId::new(120)` はic-rusqlite互換の「新品の宛先」慣習に過ぎない。既存のic-rusqliteイメージをこのスロットに向けてはならない。
+`MemoryId::new(120)` is merely an "new destination" convention compatible with ic-rusqlite. Do not point existing ic-rusqlite images to this slot.
 
-`Db::init(memory)` を `#[ic_cdk::init]` と `#[ic_cdk::post_upgrade]` の**両方**で、MigrationやDBアクセスの前に呼ぶ。アップグレードに敏感なコードでは `MemoryManager::init_strict` を使い、非空の異物レイアウトを黙って初期化しない。
+Call `Db::init(memory)` from **both** `#[ic_cdk::init]` and `#[ic_cdk::post_upgrade]`, before migrations or DB access. Use `MemoryManager::init_strict` in upgrade-sensitive code; never silently initialize a nonempty foreign layout.
 
-### 4.3 永続モデルと制約
+### 4.3 Persistence model and constraints
 
-これは実装前の必須データモデルであり、未検証のCREATE TABLEを完成済みmigrationとして扱わない。数量・価格は正規化十進文字列または範囲検証済み整数とし、浮動小数点で保持しない。
+This is the mandatory data model before implementation, and the unverified CREATE TABLE is treated as a completed migration. Quantity and price are stored as normalized decimal strings or range-verified integers, without using floating-point decimal points.
 
-| テーブル | 必須フィールドと制約 |
+| a table | Required fields and restrictions |
 |---|---|
-| users/accounts | user_id、ランダムなaccount_id、HL master、所有権確認時刻、状態。callerとの対応を非公開で保持 |
-| agents | account_id、generation、agent_address、derivation_path、承認/失効/期限/照合時刻。UNIQUE(account_id, generation)、UNIQUE(agent_address)。失効世代は再利用禁止 |
-| requests | user_id、client_request_id、canonical_body_hash、受付結果への参照、created_at。UNIQUE(user_id, client_request_id)。同じIDで本文が異なる場合は競合エラー |
-| actions | action_id、account_id、agent_address、generation、network、nonce、expires_after、canonical_action、署名対象digest、signature、wire_payload、dispatch_state、worker_epoch、lease_until、attempt、policy_version、dispatch_started_at、next_check_at、応答要約。UNIQUE(agent_address, nonce) |
-| orders | order_id、request参照、cloid（16バイト・UNIQUE）、銘柄/asset index、方向、kind、価格、元の数量、reduce_only、trigger条件、venue_state、累積約定量、hl_oid、cancel_requested。発注数量を約定数量で上書きしない |
-| action_orders | action_id、order_id、操作種別、action内の添字。注文・取消・修正の結果を注文単位で関連付ける |
-| nonces | agent_address（PRIMARY KEY）、last_nonce。action生成と同一トランザクションで更新 |
-| risk_reservations | account_id、request/action参照、予約内容、状態。受付・解放を原子的に行う。不確定注文の予約を期限だけで解放しない |
-| order_events | 注文/action参照、時刻、旧新状態、限定した理由コード。平文payloadを複製しない |
-| meta_cache | network/DEX、取得時刻、digest、添字を維持した銘柄/精度/廃止状態の実データ。digestと件数だけでは注文を検証できない |
+| users/accounts | user_id, random account_id, HL master, ownership verification time, status. Maintain caller response information in a private manner. |
+| agents | account_id, generation, agent_address, derivation_path, approval/deactivation/expiration/reconciliation time. UNIQUE(account_id, generation), UNIQUE(agent_address). revocation generation is non-reusable. |
+| requests | user_id, client_request_id, canonical_body_hash, reference to the reception result, created_at. UNIQUE (user_id, client_request_id). If the content is different with the same ID, there will be a conflict error. |
+| actions | action_id, account_id, agent_address, generation, network, nonce, expires_after, canonical_action, signing payloaddigest, signature, wire_payload, dispatch_state, worker_epoch, lease_until, attempt, policy_version, dispatch_started_at, next_check_at, response summary. UNIQUE(agent_address, nonce) |
+| orders | order_id, request reference, cloid (16 bytes UNIQUE), symbol/asset index, direction, kind, price, original quantity, reduce_only, trigger conditions, venue_state, cumulative fill amount, hl_oid, cancel_requested. Do not overwrite the order quantity with the fill quantity. |
+| action_orders | action_id, order_id, operation type, annotation in action. Relate the results of orders, cancellations, and corrections on an order unit. |
+| nonces | agent_address (PRIMARY KEY), last_nonce. Updated in the same transaction as action generation. |
+| risk_reservations | account_id, reference to request/action, reservation content, status. Perform reception and release atomically. Do not release reservations for uncertain orders only based on the deadline. |
+| order_events | Order/action reference, time, old/new status, limited reason code. Do not copy plain payload. |
+| meta_cache | Real-time data of stocks/precision/decommissioned status that maintain network/DEX, acquisition time, digest, and footnotes. Orders cannot be verified by digest and only by the number of items. |
 
-全参照に外部キー、状態にCHECK、worker/照合対象とユーザー一覧に有界検索用indexを設ける。署名対象・署名・送信payloadは機密データとしてアクセス制御する。署名前はsignatureがNULL、dispatching以降は送信payloadとsignatureが必須という不変条件をDB操作層で検査する。注文種別ごとに必須フィールドを検査し、MarketはHLのスリッページ上限付きIOC指値として構築する。
+External keys, CHECK for state, and an index for bounded search for the worker/reconciliation target and user list are set up for all references. The signing payload, signature, and sending payload are accessed as confidential data with access control. The invariant condition that the signature is NULL before the signature and the sending payload and signature are required after dispatching is checked in the DB operation layer. The mandatory fields are checked for each order type, and Market is constructed as an IOC value with a page limit for HL.
 
-注文の終端とactionの照合完了を別々に確認してから、定めた保持期間後にpayloadを削除する。未約定・部分約定・unknownを掃除しない。request IDの再実行防止レコードは保持窓を明示し、古い受付要求の拒否と整合させる。
+After separately confirming the completion of the terminal and action reconciliation for the order, delete the payload after the specified retention period. Do not clean up unfill, partial fill, and unknown entries. The record that prevents re-execution of request IDs clearly indicates the retention window and aligns with the rejection of old acceptance requests.
 
-### 4.4 同期トランザクション境界
+### 4.4 Synchronous transaction boundary
 
-`Db::update` は短い同期トランザクションとし、awaitや外部callを跨がせない。SQLiteのCOMMITとICメッセージの確定は別である。同じICメッセージがtrapすれば、そのメッセージ内でSQL上コミットした変更も巻き戻る。以前に正常終了したICメッセージの状態と、すでに発行済みの外部作用はcallbackのtrapでは取り消されない。
+`Db::update` is a short synchronization transaction that does not cross await or external calls. The commit and completion of SQLite's IC messages are separate. If the same IC message is trapped, the changes committed on SQL within the message will also be rolled back. The state of previously normal-terminated IC messages and external actions that have already been issued are not canceled by the callback trap.
 
-したがってdispatchingをPOST発行前に記録し、callbackでの状態保存が失敗しても照合へ進める。通常のResult::Errが自動的に書き込みを巻き戻すとは仮定しない。
+Therefore, record dispatching before POST issuance and proceed to reconciliation even if state preservation in callback fails. We do not assume that a normal Result::Err automatically rolls back the write.
 
-### 4.5 禁止事項
+### 4.5 Prohibited items
 
-- **SQLiteの `random()` / `randomblob()` を使わない。** このVFSでは決定的であり、同一呼び出しで同一値になる。cloid・トークン等にはmanagement canisterの非同期 `raw_rand` 由来の安全な乱数を用いる。nonceは乱数ではなく時刻と永続カウンタから割り当てる。
-- WAL、`-wal`/`-shm`、mmap、shared-memoryメソッドを使わない（未サポート）。
-- `Db::query` は `query_only`/read-only接続である。queryのクロージャ内で状態を書かない。queryで永続化できると仮定しない。
-- 接続・文・トランザクションをクロージャの外へ持ち出さない（`SQLITE_THREADSAFE=0`）。
-- 任意のSQLを外部入力から組み立てない。値は必ずbindし、識別子を動的生成しない。
-- 公開queryで無制限の `LIKE '%...%'`・全表走査・無制限 `ORDER BY` を出さない。一覧は必ず `LIMIT` と決定的なタイブレーカー付きのカーソルページングにする。
+- **Do not use SQLite's `random()` / `randomblob()` functions.** This VFS is deterministic and produces the same value for the same call. For cloids, tokens, etc., we use secure random numbers derived from the asynchronous `raw_rand` of the management canister. The nonce is assigned from the current time and a persistent counter, not from random numbers.
+- Do not use WAL, `-wal`/`-shm`, mmap, or shared-memory methods (not supported).
+- `Db::query` is a `query_only`/read-only connection. It does not write state within the query's closure. It does not assume that the query can be persisted.
+- Do not move connections, statements, or transactions outside of the closure (`SQLITE_THREADSAFE=0`).
+- Does not construct any arbitrary SQL from external input. Values are always bound and identifiers are not dynamically generated.
+- Do not allow unlimited `LIKE '%...%'` and full table scans and unlimited `ORDER BY` in public queries. The list must be paginated using a cursor page with `LIMIT` and a definitive timer.
 
-### 4.6 CASとfencing
+### 4.6 CAS and fencing
 
-workerは取得時に永続worker_epochを増やす。すべてのawait後の書き込みを `WHERE action_id = ? AND worker_epoch = ? AND dispatch_state = ?` のCASで守り、更新0件なら結果を捨てる。リース期限だけでは、以前の署名callbackが遅れて到着する競合を防げない。
+worker increments the persistent worker_epoch at the time of acquisition. All writes after every await are protected by a CAS with `WHERE action_id = ? AND worker_epoch = ? AND dispatch_state = ?`, and if no updates are made, the result is discarded. The lease expiration alone cannot prevent contention where the previous signing callback arrives late.
 
-署名前の回収は世代を更新できる。dispatching/unknownの回収は照合workerの再開であり、送信権の再取得ではない。取消・kill-switchは未送信actionのepochを無効化する。送信済みの副作用は無効化できないため、別cancel actionとvenue照合が必要になる。
+The recovery before the signature can update the generation. The recovery for dispatching/unknown is the resumption of the reconciliation worker, not the reacquisition of the sending rights. Cancellation and kill-switch invalidate the epoch of unsent actions. Since the side effects of sent actions cannot be invalidated, a separate cancel action and venuereconciliation are required.
 
-### 4.7 マイグレーション
+### 4.7 Migration
 
-- `Migration` のバージョンは厳密に増加させる。`Db::migrate` は `Db::init` の後、fresh-installとpost-upgradeの両方で呼ぶ。
-- 各migration本体は「1つのバージョン付きステップ」であり、`IF NOT EXISTS` による冪等初期化として書かない。
-- migration SQLは静的に保つ。実行時に組み立てない。
-- テーブル再構築・バックフィル・インデックス作成は**本番規模のデータでPocketICで計測**する。1メッセージで終わらない場合は、明示的に再開可能なアプリケーションmigrationに分割する。メッセージを跨ぐSQLiteトランザクションは作らない。
-- アップグレード試験は「実際にデプロイされているWasmと安定レイアウト」から「提案するWasm」への経路で行う。スキーマ版・代表データ・整合性・リソースメタデータを検証する。
+- The `Migration` version will strictly increase. `Db::migrate` is called both with `fresh-install` and `post-upgrade` after `Db::init`.
+- Each migration is one versioned step. Do not implement it as idempotent initialization using `IF NOT EXISTS`.
+- Migration SQL is kept static. It is not assembled at runtime.
+- Table reconstruction, backfill, and index creation are measured in PocketIC using **production scale data**. If it doesn't finish in one message, split it into an explicitly restartable application migration. Do not create SQLite transactions across messages.
+- The upgrade test is performed along the path from “the Wasm that is actually deployed and the stable layout” to “the proposed Wasm”. It validates schema versions, representative data, consistency, and resource metadata.
 
-### 4.8 容量と監視
+### 4.8 Capacity and monitoring
 
-- 論理DBサイズと、選択した安定メモリのハイウォータを**別々に**監視する。安定メモリは縮小しない。
-- v8レイアウトでは、通常のコミットは `db_base_offset` を安定させ、`page_table_bytes` を0に保つ。この2つが増え続ける場合は回帰として扱う。
-- `orphan_bytes_estimate` は観測値であり、回収可能性の証明ではない。
-- 安定メモリの成長失敗は容量インシデントとして扱う。必要なページ数・上限・cycles・操作サイズを確認せずに盲目的に再試行しない。
-- `checksum` は「最後に検証されたチェックサム」であり、コミット境界ではない。通常の書き込みで `checksum_stale` になりうる。
-- チェックサムの再計算はcontroller限定のジョブとして `refresh_checksum_chunk` で**分割して最後まで実行**する。大きなDBを1回の公開updateで走査しない。
-- 整合性チェックとチェックサム保守のエンドポイントはcontrollerまたは明示的な管理者認可に限定する。
+- Monitor the logical DB size and the high water of the selected stable memory **separately**. Stable memory does not shrink.
+- In v8 layout, normal commits stabilize `db_base_offset` and keep `page_table_bytes` at 0. If these two values continue to increase, they will be treated as a regression.
+- `orphan_bytes_estimate` is an observation and not a proof of recovery possibility.
+- Stable memory growth failures are treated as capacity incidents. Do not blindly retry without checking the required number of pages, maximum capacity, cycles, and operation size.
+- `checksum` is the "last verified checksum" and is not a commit boundary. It can become `checksum_stale` with normal writes.
+- The checksum recalculation is **split** into jobs limited to the controller and executed until the end using `refresh_checksum_chunk`. It does not scan large databases in a single public update.
+- The endpoint for integrity checks and checksum maintenance is limited to controller or explicit administrator authorization.
 
-### 4.9 復旧の前提
+### 4.9 Recovery prerequisites
 
-DBは単なるHLの索引ではない。受付済み未送信の意図、署名済みoutbox、nonce、worker世代、所有権対応、リスク予約はHLから完全復元できない。バージョンとlockfileを固定し、次を本番移行ゲートにする。
+DB is not just an HL index. The intent of received and unsubmitted, signatureed outbox, nonce, workergeneration, ownership support, risk reservation cannot be fully recovered from HL. Fix the version and lockfile and make the next one the production migration gate.
 
-- 機密データへの認可・暗号化・整合した時点・サイズ上限を備える論理バックアップ/復元方式を検証する。raw stable-memoryコピーをサポート済みlive backupと呼ばない。
-- 古いバックアップを戻しただけで送信を再開しない。未確定actionを照合し、状態の欠落で安全を証明できない場合は停止する。
-- nonce欠落時に「十分未来のnonce」を選んで復旧しない。有効窓があり、古い署名の再受理リスクもある。funds_vaultが旧Agentを失効させ、新世代を承認した上で口座を再照合する。master署名の資金outbox欠落はAgent変更では解決しないため、別途送金履歴・予約を照合して停止解除を判断する。
-- Agent再生成は公開user_idではなく保存したopaque account_idとgenerationに基づく。対応データの喪失は鍵の自動復元を保証しない。
-- レイアウト変更はデータ移行として検証し、旧Canisterと唯一の原本を保持する。
+- Verify a logical backup/restore method that includes authorization, encryption, a point of integrity, and a size limit for confidential data. It is not called a live backup that supports raw stable-memory copies.
+- Do not resume transmission just by restoring an old backup. Stop if you reconcile undecidedaction and cannot prove safety due to missing state.
+- When the nonce is missing, do not select "sufficient future nonce" and do not restore it. There is a valid window, and there is also a risk of re-accepting an old signature. funds_vault will invalidate the old Agent and approve the new generation before re-reconciling the account. The missing funds outbox of the master signing cannot be resolved by changing the Agent, so transfer history and reservations will be reconciled separately to determine whether to suspend or unSuspend.
+- Agent regeneration is based on the opaque account_id and generation saved, not the public user_id. The loss of corresponding data does not guarantee the automatic recovery of the key.
+- Layout changes are validated as data migration and retain the old Canister and the original only.
 
-## 5. 注文パイプライン
+## 5. Order pipeline
 
-### 5.1 actionと注文の状態を分ける
+### 5.1 distinguish the action and the order status
 
-actionの状態は `queued → signing → signed → dispatching → reconciled / unknown` とする。未送信が保証できるものだけを `aborted` にできる。`reconciled` は各子操作の結果を照合した意味であり、約定完了ではない。
+The state of an action is defined as `queued → signing → signed → dispatching → reconciled / unknown`. Only those that can be guaranteed not to be sent can be set to `aborted`. `reconciled` represents the reconciliation of the results of each child operation and is not equivalent to completion of the fill operation.
 
-注文側は `pending / open / partially_filled / filled / cancelled / rejected / unknown` を区別し、HLの状態と累積約定量を保存する。バッチ全体のHTTP成功を子注文すべての成功と解釈しない。取消要求も約定との競合があるため、取消済みとは別に保持する。
+The order side distinguishes between `pending / open / partially_filled / filled / cancelled / rejected / unknown` and stores the HL state and cumulative fill amount. It does not interpret the HTTP success of the entire batch as the success of all sub-orders. Since cancellation requests also have a conflict with fill, they are stored separately from cancelled ones.
 
-### 5.2 冪等性
+### 5.2 idempotency
 
-- `UNIQUE(user_id, client_request_id)` と正規化本文のfingerprintで受付再送を識別する。同一ID・同一内容なら同じ結果、異なる内容なら拒否する。
-- nonceは署名者単位で `max(now_ms, last_nonce + 1)` を永続確保し、HL有効窓を検証する。1つのactionに1つ割り当て、子注文ごとには割り当てない。
-- 署名再試行は未送信の同一action/digestに限定する。dispatching以降に新nonceや新cloidで自動再注文しない。
-- cloidは照合キーであり、永久のexactly-once保証ではない。nonceの記録保持とAgentの寿命に依存するため、失効・期限切れした鍵を再承認しない。
+- Identify the received resend by using `UNIQUE(user_id, client_request_id)` and the fingerprint of the normalized text. If the same ID and the same content, the same result; if different content, reject.
+- The nonce is permanently secured by the signer as `max(now_ms, last_nonce + 1)` and is used to verify the HL validity window. It is assigned to one action at a time, not to each child order.
+- Signature retry is limited to the same action/digest that has not been sent. It will not automatically reorder with a new nonce or cloid after dispatching.
+- cloid is a reconciliation key and is not a permanent exactly-once guarantee. It does not re-approve keys that have expired or lost validity because it depends on the record of the nonce and the Agent's lifespan.
 
-### 5.3 失敗・期限・取消
+### 5.3 Failure, deadline, cancellation
 
-- 署名拒否は未送信の範囲で有界バックオフする。epoch・期限・policyを再検証する。
-- POSTのタイムアウト、応答解釈不能、callback trap、dispatchingでのupgradeはすべて結果不明として照合する。
-- `orderStatus` が見つからないだけでは未実行を証明しない。保持期間や可視化遅延を考慮し、未解決ならunknownを維持してユーザーへ提示する。
-- `expiresAfter` はactionの受付期限であり、板に残る注文の取消期限ではない。ローカルdeadline超過でcancelled/expiredにしない。
-- 未送信取消はepoch無効化とabortedで完結できる。送信可能性のある注文はHL cancel actionを発行し、その結果・約定量を照合する。
-- kill-switchの新規停止、HL標準scheduleCancelによる未約定注文の取消、建玉の決済は別操作。停止やdead-man's switchで建玉まで自動解消したと表示しない。
-- 結果不明が解消できなければ自動再送せず、予約を保持して安全側に停止する。
+- Signature rejection is bounded backoff within the range of unsubmitted. Re-verify epoch, expiration date, and policy.
+- All POST timeouts, response interpretation failure, callback traps, and upgrades in dispatching are reconciled as unknown outcomes.
+- Just because `orderStatus` is not found does not prove that the request has not been executed. Considering the retention period and visibility delay, if the issue is unresolved, keep it as unknown and present it to the user.
+- `expiresAfter` is the acceptance deadline for action, not the cancellation deadline for orders remaining on the board. It does not cause cancelled/expired status due to local deadline exceeding.
+- Unsent cancellations can be completed with epoch invalidation and aborted. Orders that are possible to send should be issued with the HL cancel action, and the result and fill quantity should be reconciled.
+- New kill-switch suspension, cancellation of unfilled orders via HL standard scheduleCancel, and position settlement are separate operations. It does not display that positions are automatically closed even with suspension or a dead-man's switch.
+- If the unknown outcome cannot be resolved, do not automatically resend, keep the reservation and stop it on the safe side.
 
-### 5.4 HTTPS outcallと照合の信頼
+### 5.4 Trust in HTTPS outcall and reconciliation
 
-状態変更POSTは非replicated outcallを候補とし、選択したCDK・subnetで動作を検証する。単一送信でも外部効果の原子性は得られない。応答サイズ上限は抽出後JSONではなくraw本文とヘッダーを考慮して設定する。料金は採用APIのcost見積もりと実測で決め、replicatedの式を非replicatedにそのまま適用しない。
+The state change POST is selected as a non-replicated outcall and is tested for operation in the selected CDK/subnet. Even a single transmission cannot achieve atomic external effects. The response size limit is set considering the raw body and header rather than JSON after extraction. The cost is determined by the cost estimate and actual measurement of the adopted API, and the replicated formula is not applied directly to the non-replicated one.
 
-非replicatedの読取結果は独立したコンセンサス証明ではない。リスク上限や残高の権威ある入力に採用する場合は応答改ざん・staleを含む信頼モデルを確定する。必要な照合強度が未検証の間は本番を止める。transformで注文別の結果や照合識別子を消さない。本文・署名をログへ出さない。
+Non-replicated read results are not independent consensus proofs. If you adopt risk limits and authoritative inputs for balance, determine a trust model that includes response tampering and stale data. Stop production operations during the required reconciliation strength is unverified. Do not delete order-specific results or reconciliation identifiers using transform. Do not log the text and signature.
 
-### 5.5 バッチと優先順位
+### 5.5 batches and priority
 
-同一口座・署名Agent世代・network・vault・grouping・builder設定・期限方針が互換な注文だけを、件数とpayloadサイズの上限内でまとめる。異なるユーザーの注文を1署名へ混ぜない。バッチ化の待ち時間にも上限を設ける。Cancel Allも件数上限次第では複数actionになる。取消を新規注文より優先する。
+Only orders with compatible settings for the same seat, signatureagent generation, network, vault, grouping, builder, and deadline policy are grouped within the number of orders and payload size limits. Do not mix orders from different users into one signature. Also set a limit on the waiting time for batch processing. Cancel All can also become multiple actions depending on the number of orders limit. Prioritize cancellation over new orders.
 
-## 6. クライアント設計
+## 6. Client design
 
-### 6.1 公開市況だけをHyperliquid WSへ直結（D11）
+### 6.1 Only public market status is directly connected to Hyperliquid WS (D11)
 
-ブラウザは `wss://api.hyperliquid.xyz/ws`（mainnet）/ `wss://api.hyperliquid-testnet.xyz/ws`（testnet）へ直接接続する。Canisterを経由しない。
+The browser connects directly to `wss://api.hyperliquid.xyz/ws` (mainnet) / `wss://api.hyperliquid-testnet.xyz/ws` (testnet). Does not go through the canister.
 
-| 用途 | チャネル |
+| a use | Channel |
 |---|---|
-| 全銘柄の中間価格 | `allMids` |
-| 板 | `l2Book`（`nSigFigs`・`mantissa`、`fast` で5段） |
-| 約定 | `trades` |
-| ローソク | `candle`（1m〜1M） |
-| 最良気配 | `bbo` |
-| 公開銘柄コンテキスト | `activeAssetCtx` |
+| Average price of all stocks | `allMids` |
+| a slab | `l2Book` (5 stages with `nSigFigs`, `mantissa`, `fast`) |
+| fill | `trades` |
+| Candle | `candle`（1m〜1M） |
+| Best gesture | `bbo` |
+| Public stock context | `activeAssetCtx` |
 
-本人の注文・約定・口座状態・資金履歴は認証・暗号化したCanister APIから取得する。ブラウザでユーザー系HLチャネルを購読しない。ブラウザのnetwork検査で取引口座アドレスの送信がないことを試験する。
+The user's order, fill, account status, and fund history are obtained from the authentication and encrypted Canister API. Do not subscribe to user-related HL channels in the browser. Test that there is no transmission of trading account addresses by performing network inspection in the browser.
 
-Canister側照合は取引口座master addressを使い、Agent addressと取り違えない。初期の本人データはポーリングであり、永続WS中継サーバーは追加しない。
+The reconciliation on the Canister side uses the trading account master address and cannot be distinguished from the Agent address. The initial personal data is polling, and no permanent WS relay server will be added.
 
-### 6.2 接続とレート制限
+### 6.2 Connection and rate limits
 
-HyperliquidのIP単位の制限。
+Limit on IP units of Hyperliquid.
 
-| 制限 | 値 |
+| limitation | cost |
 |---|---|
-| WS接続数 | 10 / IP |
-| 新規WS接続 | 30 / 分 |
-| サブスクリプション数 | 1,000 |
-| **ユーザー系サブスクのユニークユーザー数** | **10 / IP** |
-| 送信メッセージ | 2,000 / 分（全接続合計） |
-| REST | 1,200 weight / 分（`l2Book`・`allMids`・`clearinghouseState`・`orderStatus` は weight 2） |
+| WS connection number | 10 / IP |
+| New WS connection | 30 / minutes |
+| Number of subscribers | 1,000 |
+| **Unique number of users of user-related subscriptions** | **10 / IP** |
+| Sent message | 2,000 / minutes (total connections) |
+| REST | 1,200 weight / minutes (`l2Book`, `allMids`, `clearinghouseState`, `orderStatus` are weight 2) |
 
-クライアント側の設計上の帰結。
+The design consequences on the client's side.
 
-- **タブごとに接続を作らない。** 複数タブで1つの接続を共有する（`BroadcastChannel` + leader election）。10接続/IPは複数タブで容易に尽きる。
-- 60秒間サーバーからメッセージが無いと切断される。`{"method":"ping"}` を定期的に送る。
-- 再接続時はスナップショット（`isSnapshot: true`）を検出して状態を置き換える。差分として適用しない。
-- 本人データはCanister照合結果のrevisionと観測時刻で更新する。キャッシュ表示と最新のHL状態を区別し、公開市況から約定を推測して確定しない。
-- チャネルは必要になった時点で購読し、画面を離れたら解除する。1,000サブスクは全銘柄で容易に超える。
-- 履歴ローソクは5,000本が上限である。長い履歴が要る画面は自前で保持するか、外部ソースを使う。
+- **Do not establish connections per tab.** Share one connection across multiple tabs (`BroadcastChannel` + leader election). 10 connections per IP can easily run out across multiple tabs.
+- The connection will be severed if there are no messages from the server for 60 seconds. Send `{"method":"ping"}` periodically.
+- When reconnecting, it detects a snapshot (`isSnapshot: true`) and replaces the state. It does not apply as a difference.
+- The real data is updated with the revision and observation time of the Canisterreconciliation result. It distinguishes between the cache display and the latest HL state and does not determine the fill from the public market.
+- Subscribe to the channel when you need it and unsubscribe when you leave the screen. 1,000 subscriptions can easily exceed all stocks.
+- The history candle has a limit of 5,000. For screens that require long history, keep it yourself or use external sources.
 
-### 6.3 pending表示（D9のUX補償）
+### 6.3 pending display (D9 UX compensation)
 
-D9とD10により、注文がHLに届くまでに秒単位の遅延がある。ブラウザはCanisterから確認済み状態を取得する。受付とHL受理を区別して表示する。
+Due to D9 and D10, there is a delay in seconds until the order reaches HL. The browser gets the status of confirmed from Canister. It displays the difference between receipt and HL acceptance.
 
-1. ユーザーが送信 → ブラウザは即座にローカルの `pending` 行を注文一覧に出す（`client_request_id` をキーにする）。
-2. `submit_order` の受付応答（`queued`）で `cloid` と `order_id` を受け取り、pending行に紐づける。
-3. 暗号化した本人データのポーリングでHL受理の照合結果を取得し、request ID/cloidに対応するpending行を更新する。受付完了を約定と表示しない。
-4. `submit_order` の受付が拒否された場合はpending行を取り消し、理由を表示する。
-5. 一定時間（例: 15秒）届かない場合は「送信状況を確認中」に遷移し、取消要求の導線を出す。ただし送信前の中止とHL上の取消を分け、確認前は取消済みと表示しない。
+1. User sends → The browser immediately displays the local `pending` line in the order list (using `client_request_id` as the key).
+2. Receive `cloid` and `order_id` in the `submit_order` reception response (`queued`) and link them to the `pending` line.
+3. Obtain the reconciliation result for HL acceptance by polling the encrypted personal data, and update the pending lines corresponding to the request ID/cloid. Do not display the acceptance completion as fill.
+4. If the `submit_order` reception is rejected, delete the pending line and display the reason.
+5. If it does not arrive within a certain time (e.g., 15 seconds), move to "Checking sending status" and provide a cancellation request link. However, separate the suspension before sending and cancellation on the HL, and do not display cancellation completed before confirmation.
 
-「送信したように見せる」のではなく「受付済みで送信中であることを正しく表示する」。ここを偽ると、実際には通っていない注文を約定済みに見せる事故になる。
+Instead of "showing as sent", it should "show as received and in process". If you fake this, you will end up showing a filled order that actually hasn't been processed.
 
-### 6.4 OSSスタックとライセンス
+### 6.4 OSS stack and license
 
-| 層 | 採用 | ライセンス | 根拠 |
+| Layer | adoption | license | Rationale |
 |---|---|---|---|
-| 注文の構築・HL型・WS/REST | `@nktkas/hyperliquid` | MIT | 署名・`approveAgent`・31サブスク・batch注文を網羅。TS |
-| チャート | `lightweight-charts` | Apache-2.0 | 商用クローズド可。`Plan.md` の性能要件に十分 |
-| UI基盤 | `shadcn/ui` + Tailwind | MIT | 一般的 |
-| 表 | TanStack Table | MIT | ポジション・注文一覧 |
-| 先行実装の参照 | `vipineth/hypeterminal` | MIT | 板・注文チケット・WS信頼性の実装を参照 |
-| Rust側の参照 | `infinitefield/hypersdk` | MPL-2.0 | MPLファイルを改変しなければクローズド可。参照のみ |
+| Order construction, HL type, WS/REST | `@nktkas/hyperliquid` | MIT | Includes signature, `approveAgent`, 31 subscriptions, and batch orders. TS |
+| a chart | `lightweight-charts` | Apache-2.0 | Commercial closed allowed. Sufficient for the performance requirements of `Plan.md`. |
+| UI foundation | `shadcn/ui` + Tailwind | MIT | General |
+| a list | TanStack Table | MIT | List of positions and orders |
+| Reference to the pre-implementation | `vipineth/hypeterminal` | MIT | Refer to the implementation of board, order ticket, and WS reliability. |
+| Reference on the Rust side | `infinitefield/hypersdk` | MPL-2.0 | Closed only if MPL files are not modified. |
 
-**採用しないもの。**
+**Do not hire.**
 
-| 対象 | 理由 |
+| a target | Reason |
 |---|---|
-| TradingView Advanced Charts / Trading Platform | 今回不採用。企業向け公開サービスとソース非公開は別条件。採用する場合は公開形態・attribution・ライセンスを確認する |
-| `kline-orderbook-chart` | 商用プロプライエタリ。license feeが必要 |
-| `suenot/profitmaker` | MIT + Commons Clause。「Sell the Software」を禁止 |
-| GPL-3.0 / AGPL-3.0 のプロジェクト（freqtrade、freqUI、OctoBot、nofx） | コピーレフト。特にAGPLはネットワーク条項がホスト型サービスと衝突する |
-| 無ライセンスのリポジトリ | 全ての権利留保。**公式の `hyperliquid-dex/order_book_server` も無ライセンス** |
-| `nomed/hyperliquid`（npm） | npmメタデータはMITを主張するが、リポジトリのLICENSEが404。法的に不明確 |
+| TradingView Advanced Charts / Trading Platform | Not selected this time. Public services for enterprises and source confidentiality are subject to separate conditions. If you are selected, please check the public form, attribution, and license. |
+| `kline-orderbook-chart` | Commercial proprietary. License fee required. |
+| `suenot/profitmaker` | MIT + Commons Clause. Prohibit "Sell the Software" |
+| GPL-3.0 / AGPL-3.0 projects (freqtrade, freqUI, OctoBot,nofx) | Copyleft. Especially AGPL clashes with network terms with host-type services. |
+| Unlicensed repositories | All rights reserved. **The official `hyperliquid-dex/order_book_server` is also unlicensed** |
+| `nomed/hyperliquid`（npm） | npm metadata claims to be MIT, but the repository's LICENSE is 404. Legally unclear. |
 
-チャートはLightweight Chartsを採用する。「Advanced Chartsは商用クローズドでは使えない」という旧記述は撤回する。[公式の比較・提供条件](https://www.tradingview.com/free-charting-libraries/)を基準に、必要になった時点で用途と契約を確認する。
+Charts will use Lightweight Charts. The old description that "Advanced Charts cannot be used in commercial closed systems" will be withdrawn. Based on the official comparison and terms of service (https://www.tradingview.com/free-charting-libraries/), check the usage and contract when needed.
 
-### 6.5 Rust側
+### 6.5 Rust side
 
-- 公式 `hyperliquid-rust-sdk` はMITだが2025-10-21から停滞している。**署名実装は公式SDKに依存せず自前で書き**、公式SDKはテストベクトルの生成元としてのみ使う（`Plan.md` 8.8）。
-- `hypersdk`（MPL-2.0、活発）はEIP-712署名とbatch注文を持つが、agent承認の対応が未確認である。参照に留める。
+- The official `hyperliquid-rust-sdk` is MIT-licensed but has been stagnant since 2025-10-21. **Signature implementation is written in-house without relying on the official SDK**, and the official SDK is used only as a source for test vectors (`Plan.md` 8.8).
+- `hypersdk` (MPL-2.0, active) has EIP-712 signature and batch orders, but agent approval support is not yet confirmed. Please refer to it for reference.
 
 ---
 
-## 7. Agent承認フロー
+## 7. Agent approval flow
 
-1. Plan 16.1のEOA challengeでセッションを認証する。funds_vaultがランダム口座IDとmaster公開鍵を生成し、本人IDへ束縛する。ユーザーが任意のHL口座アドレスを申告する方式にはしない。
-2. 認可されたupdateで新しいAgent世代を作り、management callで公開鍵を取得し保存する。queryは保存済みの本人のアドレスを返すだけにする。
-3. funds_vaultが取引口座masterでapproveAgentに署名する。登録済みtrading_core caller、口座、生成世代、導出公開鍵を照合し、任意のAgentアドレスの承認依頼を拒否する。
-4. HLの承認状態を独立に照合してactiveにする。要求中に世代・所有権が変わったcallbackは捨てる。
-5. builder feeを使うなら、別途master署名によるapproveBuilderFeeと上限確認を行う。Agent承認は手数料承認を兼ねない。
+1. Authenticate the session in the EOA challenge of Plan 16.1. The funds_vault generates a random account ID and a masterpublic key and binds it to the user's identity ID. It does not allow the user to declare any HL account address.
+2. Create a new agent generation with an authorized update and obtain and store the public key with a management call. The query will only return the stored owner's address.
+3. funds_vault approvesAgent in trading account master. Reconciles registered trading_core caller, account, generation, and public key, and rejects approval requests for any Agent address.
+4. Reconcile the HL approval status independently and make it active. Ignore callbacks that have changed generation or ownership during the request.
+5. If you use the builder fee, you must separately confirm the approveBuilderFee and the limit with master signing. Agent approval does not constitute fee approval.
 
-アドレス、用途、権限、期限をUIへ明示する。期限・失効後の再利用は禁止し、opaque account_idとgenerationから新しい鍵を導出する。導出結果は世代ごとにキャッシュする。30日有効・27日目切替をtestnetで検証する。停止・失効要求はCanisterが実行し、ユーザー自身によるHL直接解除・直接出金を保証しない。
+Explicitly specify the address, purpose, permissions, and expiration date in the UI. Reusing the account after the expiration or loss of validity is prohibited, and a new key is derived from the opaque account_id and generation. The derived results are cached for each generation. Verify the planned 30-day validity and switching from day 27 on testnet. Requests to halt or lose validity are executed by Canister, and HL direct unbinding and direct withdrawal are not guaranteed by the user themselves.
 
-## 8. フロントエンドの配信
+## 8. Front-end distribution
 
-主配信はTanStack Start＋ReactをCloudflare Workers＋Static Assetsへ載せる。公開ページはSSR、取引・資金・履歴はクライアント描画。本人残高・注文本文・ウォレット署名・口座対応表はSSR、server function、Workersログへ渡さない。実装状態はdocs/implementation-status.mdを参照する。
+The main distribution is to deploy TanStack Start + React to Cloudflare Workers + Static Assets. The public page is SSR, trading, funds and history are drawn by the client. The balance of the person in charge, the order text, the wallet signature, the account support table are not passed to SSR, server function, Workers log. Please refer to docs/implementation-status.md for the implementation status.
 
-Workersは取引APIを代理しない。資金・署名・注文状態・本人認可はICPに残す。D1/KV/R2/DO、Hono/Express、独自WS中継を追加しない。現UIは外部通信なしの合成デモであり、実際のHL市況とICPには未接続である。
+Workers does not act as an intermediary for the trading API. Funds, signatures, order status, and owner authorization are retained on ICP. D1/KV/R2/DO, Hono/Express, and custom WS relaying are not added. The current UI is a synthetic demo with no external communication, and it is not connected to the actual HL market data and ICP.
 
-### 8.1 旧ICP配信の参考値（現在の採用構成ではない）
+### 8.1 Reference values for old ICP distribution (not the currently selected architecture)
 
-静的フロントエンドの配信はcycles的にはほぼ無料である。
+The delivery of static front-end is almost free in terms of cycles.
 
-| 項目 | コスト |
+| an item | cost |
 |---|---|
-| query call | **無料**（単一ノード、コンセンサスなし） |
-| ストレージ | 127,000 cycles/GiB/秒（13ノード）≒ **$0.45/GiB/月**。34ノードは332,153 ≒ $1.18/GiB/月 |
-| 応答バイト | 課金項目が存在しない |
-| ingress受信 | 1,200,000 cycles/メッセージ + 2,000 cycles/バイト（13ノード） |
+| query call | **Free** (single node, no consensus) |
+| Storage | 127,000 cycles/GiB/sec (13 nodes) ≈ **$0.45/GiB/month**. 34 nodes are 332,153 ≒ $1.18/GiB/month. |
+| Response byte | There are no billing items |
+| ingress reception | 1,200,000 cycles/message + 2,000 cycles/byte (13 nodes) |
 
-上記は静的配信だけの旧参考試算であり、現在の価格保証ではない。本人データの照合・暗号化ポーリング、資金台帳、署名のコストは含まない。公開市況の中継は省くが、B全体の費用はPhase 1で再計測する。
+The above is an old reference calculation for static distribution only and is not a price guarantee at present. It does not include the cost of reconciliation and encryption polling of personal data, fund ledger, and signatures. The relay of public market conditions is omitted, but the total cost of the B will be re-measured in Phase 1.
 
-### 8.2 旧ICP配信の制限メモ（Workersへ適用しない）
+### 8.2 Old ICP delivery restrictions memo (Not applicable to Workers)
 
-| 制限 | 値 |
+| limitation | cost |
 |---|---|
-| ingressペイロード | 2 MiB |
-| query応答 | 3 MiB |
-| update応答 | 2 MiB |
+| ingress payload | 2 MiB |
+| query response | 3 MiB |
+| update response | 2 MiB |
 | stable memory | 500 GiB / canister |
 | wasm | 100 MiB |
-| query実行スレッド | 2 / canister |
-| update実行スレッド | 1 / canister |
+| query execution thread | 2 / canister |
+| update execution thread | 1 / canister |
 
-asset canisterは2 MiBを超えるアップロードを自動でチャンクする。3 MiBを超える応答は認定済み `206 Partial Content` に分割され、ゲートウェイが再構成する。
+The asset canister automatically chunks uploads exceeding 2 MiB. Responses exceeding 3 MiB are certified as `206 Partial Content` and are reconfigured by the gateway.
 
-**実務上の制約は query実行スレッドが2本/canisterであること。** 同時接続ユーザー数が増えたとき、ここが先に詰まる。境界ノードのRPS上限（DFINITYスタッフの発言で約1k rps/client、超過で数分のban）は、1Hzポーリング程度では問題にならない。
+**Practical constraints are that there are two query execution threads per canister.** When the number of simultaneous connected users increases, this will become the bottleneck first. The RPS limit for boundary nodes (according to statements from DFINITY staff, approximately 1k rps/client; exceeding this results in a few minutes of ban) is not a problem with a polling rate of about 1Hz.
 
-### 8.3 境界ノードの信頼について（訂正）
+### 8.3 About the reliability of boundary nodes (Correction)
 
-以下はICP配信を検討した際の信頼境界メモであり、現Workers配信の検証ではない。現構成ではCloudflare・配信権限者によるJavaScript変更が信頼点になる。guardの7日猶予はUI配信に適用されない。依存固定、配信権限分離、リリースレビューと本番のCSP/connect-src設計を必須とする。入口の地域制限だけではCanister直接呼出しを制限できない。
+The following is a trust boundary memo regarding ICP delivery, not a verification of current Workers delivery. In the current configuration, Cloudflare and the delivery authority's JavaScript changes become the trust point. The 7-day guard period does not apply to UI delivery. Dependency fixed, delivery authority separation, and mandatory release reviews and production CSP/connect-src design are required. Only regional restrictions at the entry point cannot restrict direct Canister calls.
 
-前回の説明を訂正する。「query応答はcertified dataで検証されるため境界ノードは偽の応答を作れない」は**主体が誤っていた**。
+Correcting the previous explanation. "Since query responses are verified by certified data, boundary nodes cannot generate fake responses," is **incorrect on the part of the entity**.
 
-- ゲートウェイが偽の応答を作って検証側に受理させることはできない（ICPルート鍵に連鎖し、部分署名にはsubnetノードの2/3以上が必要）。
-- しかし**ブラウザ経路では検証するのはゲートウェイであり、ブラウザではない**。公式ドキュメントは「ブラウザはIC証明書を自分で検証できないので、その検査を委譲する。どのゲートウェイを選ぶかが信頼の決定そのものである」と述べている。
-- ゲートウェイは**検証しないという選択**ができる。`raw` ホスト（`<canister-id>.raw.icp.net`）は証明書を破棄する。
-- 自分で検証できるのは、HTTPゲートウェイを介さず**canisterと直接話すクライアント**（agent。`read_state` を使う）だけである。
+- The gateway cannot generate a fake response and accept it on the verification side (it is chained to ICP route key, and a part of signature requires more than 2/3 of subnet nodes).
+- However, **it is a gateway, not a browser, that verifies the browser path**. The official documentation states, "Because the browser cannot verify its own IC certificate, it delegates that verification to a gateway. The choice of which gateway is trusted is the decision of trust."
+- The gateway can choose to **not verify**. `raw` hosts (`<canister-id>.raw.icp.net`) will discard the certificate.
+- Only the client that can directly talk to **canister** (agent using `read_state`) without using an HTTP gateway can verify it.
 
-運用上の帰結。certified応答を自分で検証したい場合、フロントエンドは境界ノード任せにせず、重要な値（残高・ポジション・リスク上限）をagent経由で検証してから表示する。自己ホストのゲートウェイも可能である（`dfinity/ic-gateway`、Apache-2.0、活発に保守）。自己ホストは「どのゲートウェイを信頼するか」を自分で決めるという意味であり、経路からゲートウェイが消えるわけではない。
+Operational implications. If you want to verify certified responses yourself, the frontend does not leave the boundary node to be trusted; it verifies important values (balance, position, risk limit) through the agent before displaying them. Self-hosted gateways are also possible (`dfinity/ic-gateway`, Apache-2.0, actively maintained). Self-hosted gateways mean that you decide “which gateway to trust” yourself, and the gateway does not disappear from the path.
 
 ---
 
-## 9. 検証計画
+## 9. Verification plan
 
-### 9.1 署名のテストベクトル（最初にやる）
+### 9.1 signature test vector (first one)
 
-`hl-sign` は次を満たさなければ先へ進めない。
+`hl-sign` will not proceed unless it satisfies the following conditions.
 
-1. 公式SDKと同一入力のdigest・符号化が一致する。固定秘密鍵を使う決定的なローカルベクトルと、tECDSAの実署名検証を分ける。tECDSAでは署名の検証と復元アドレス一致を要求し、r/sのバイト一致は要求しない。
-2. actionのフィールド順・msgpackの整数表現・十進の正規化が一致する。
-3. agent署名時のラッピング（phantom agent相当）とEIP-712 domain/typeが一致する。
-4. tECDSA署名から `v` を復元できる（threshold署名の応答に `v` は含まれないため、候補を試して公開鍵と一致するものを選ぶ）。
-5. 上記を回帰テストとして固定し、常時実行する。
+1. The digest and encoding of the same input as the official SDK are consistent. It separates the deterministic local vector using a fixed private key and the actual signature verification of tECDSA. tECDSA requires signature verification and address consistency, and does not require byte consistency of r/s.
+2. The field order of action, the integer representation of msgpack, and the normalization of decimal are consistent.
+3. The wrapping (equivalent to phantom agent) at agentsignature matches EIP-712 domain/type.
+4. Can recover `v` from tECDSAsignature (since `v` is not included in the response of thresholdsignature, try candidates and choose the one that matches the public key).
+5. Fix the above as a regression test and run it continuously.
 
-テストベクトルはリポジトリに固定し、生成元のSDKバージョンを記録する。
+Test vectors are fixed in the repository and record the SDK version of the generator.
 
 ### 9.2 PocketIC
 
-- fresh-install、update/query、失敗時のロールバック、アップグレードの4系統。
-- 空・代表・上限近傍・不正入力・trap・migration失敗・post-upgradeの各ケース。
-- trading_coreに出金署名・資金鍵がなく、funds_vaultの出金actionが本人認可・残高・宛先・一回性を必須とすることを試験する。
-- `universe` 全件を走査するasset indexのコンフォーマンステスト。廃止銘柄・未知添字・allowlist外の拒否を含む。
-- 受付再送の冪等性、dispatching以降の自動再送禁止、Agent世代の非再利用を検証する。
-- POST応答を破棄した状態からの照合による復元。
+- Four systems: fresh-install, update/query, rollback in case of failure, and upgrade.
+- Each case of empty, representative, near-limit, incorrect input, trap, migration failure, and post-upgrade.
+- Test that trading_core does not have a withdrawalsignature and fundskey, and that the withdrawalaction in funds_vault requires owner authorization, balance, destination, and uniqueness.
+- `universe` Conformity test of the asset index that scans all assets. Includes discontinued stocks, unknown tickers, and refusals outside the allowlist.
+- Verify the idempotency of the receive resend, automatic resend prohibition after dispatching, and non-reuse of Agent generation.
+- Recovery by reconciliation from a state where POST response has been discarded.
 
-### 9.2.1 プライバシーと資金権限の検証
+### 9.2.1 Verification of privacy and funding rights
 
-- 接続用ウォレットからHL口座まで、送金・承認・API・cloidの公開情報だけで直接辿れる経路を列挙する。Aでは直接送金のリンクが残ることを結果に記録し、D13の達成と取り違えない。
-- 本人以外が注文・約定・cloid・口座対応を取得できないことを確認する。queryを公開しないだけでなく、応答・ログ・履歴へのアクセス制御を検証する。
-- 口座別WSとAgent承認のブラウザ通信でHLへ渡る情報を確認し、U25の受容範囲と照合する。
-- 資金層の本人認可、裏付け、二重仕訳、不確定送金、アップグレード、停止・復旧を試験する。Agent-onlyの「出金コード不在」試験で代用しない。Plan 16.6のA/B0/B1評価も必須とする。
+- List the pathways that can be directly traced from the connection wallet to the HL account using only public information such as transfer, approval, API, and cloid. In A, the result will record that the transfer link remains directly, ensuring that the achievement of D13 cannot be disputed.
+- Confirm that no one other than the owner can obtain order, fill, cloid, and account support. Not only does it not disclose queries, but it also verifies access control to responses, logs, and history.
+- Verify information transferred to HL via the WS per account and browser communication with Agent approval, and reconcile with the U25 acceptance range.
+- Test fund layer owner authorization, backing up, double-entry, uncertain transfers, upgrades, and suspension/recovery. Do not use the "withdrawal code not present" test for agent-only purposes. A/B0/B1 evaluation for Plan 16.6 is also mandatory.
 
-### 9.3 Phase 1で実測する値
+### 9.3 Values measured in Phase 1
 
-| 項目 | なぜ必要か |
+| an item | Why is it necessary? |
 |---|---|
-| re2t4からの `sign_with_ecdsa` p50/p95 | 2.4のGo/No-Goゲート |
-| 受付→HL受理確認 のp50/p95 | 同上 |
-| `sign_with_ecdsa` のキュー溢れ発生率 | 再試行設計の妥当性 |
-| re2t4でのHTTPS outcallの成否と所要時間 | Confidential Subnet上でのoutcall動作は未回答の公開論点 |
-| 7ノードsubnetの課金基準 | re2t4が13ノード基準で課金されるか未回答 |
-| nonceの有効窓と衝突時の挙動 | `Plan.md` U8 |
-| Agentの有効期限の実仕様 | `Plan.md` U7 |
-| 本人データの暗号化ポーリングとHL照合予算 | 6.1、Plan 16.5 |
-| Confidential Subnetでのupgrade・状態復旧 | `Plan.md` 8.3.3の前提条件 |
+| `sign_with_ecdsa` p50/p95 from re2t4 | Go/No-Go gate of 2.4 |
+| Reception→HL reception confirmation p50/p95 | a ditto ～s |
+| `sign_with_ecdsa` queue overflow rate | The validity of re-design |
+| Success and time required for HTTPS outcall on re2t4 | Outcall operation on Confidential Subnet is an unanswered public point of discussion |
+| Charging criteria for 7-node subnet | Whether re2t4 is charged based on the 13-node standard is not answered yet. |
+| The valid window of nonce and the behavior when there is a collision | `Plan.md` U8 |
+| The actual specifications of the Agent's expiration date | `Plan.md` U7 |
+| Encryption polling of personal data and HL reconciliation budget | 6.1、Plan 16.5 |
+| Upgrade and state recovery in Confidential Subnet | `Plan.md` prerequisites for 8.3.3 |
 
-### 9.4 障害注入
+### 9.4 Fault injection
 
-- 署名キュー溢れ、署名エラー、POSTタイムアウト、POSTエラー応答、`/info` 不一致。
-- queued/signing/signed/dispatching/unknownでのupgrade、POST直後のcallback trap、リース失効後の旧callback、署名中のkill-switch・取消を注入する。
-- unknownのdeadline超過でも取消済みにしないこと、部分約定後取消、バッチ内の部分拒否、同じrequest IDで異なる本文の拒否を検証する。
-- Hyperliquid API停止中の新規注文停止と、cancel-onlyモードでの取消の成功。
-- 安定メモリ成長失敗、`ZeroExtentLimitExceeded`。
-- 二重ingress（同一 `client_request_id` の同時送信）。
+- Signature queue overflow, signature error, POST timeout, POST error response, `/info` mismatch.
+- Inject a kill-switch and cancellation in the signature, a callback trap after POST, and an old callback after lease expiration for upgrades in queued/signing/signed/dispatching/unknown.
+- Even if the deadline of unknown is exceeded, do not cancel it, cancel after partial filling, partial rejection in the batch, and verify the rejection of different contents with the same request ID.
+- New order suspension during Hyperliquid API outage and successful cancellation in cancel-only mode.
+- Stable memory growth failed, `ZeroExtentLimitExceeded`.
+- Double ingress (concurrent transmission of the same `client_request_id`).
 
 ---
 
-## 10. タスク分解
+## 10. Task breakdown
 
-### 確定仕様の実装（Phase 0〜1）
+### Implementation of the final specifications (Phase 0~1)
 
-- Plan 16章の資金経路、master鍵、認証、guardを採用する。資金往復とprivacy評価を注文UIより先に実装する。
-- EOA認証、HPKE、複式台帳、資金outbox、照合adapter、master/Agent権限分離を実装する。
-- immutable guardの予約・猶予・SNS認可・迂回防止と、停止/unknownからの回復をtest環境で試験する。
-- 以下の旧工期は無効。Bの実測後に再見積りする。
+- Adopt the funding pathway, master key, authentication, and guard in Chapter 16 of the Plan. Implement the funding exchange and privacy evaluation before the order UI.
+- Implement EOAauthentication, HPKE, double-entry ledger, funds outbox, reconciliationadapter, master/Agent permission separation.
+- Test the reservation, deferral, SNS authorization, bypass prevention, and recovery from stop/unknown of immutable guard in the test environment.
+- The following old work period is invalid. We will re-estimate after the actual measurement of B.
 
-### Phase 1（資金往復・署名・privacyスパイク、期間は再見積り）
+### Phase 1 (fund transfer, signature, privacy spike, the period will be re-quoted)
 
-| # | タスク | 完了条件 |
+| # | a task | Completion conditions |
 |---|---|---|
-| 1-1 | `hl-sign` の実装（action構築・msgpack・EIP-712・v復元） | 公式SDKとテストベクトル一致 |
-| 1-2 | tECDSA署名（re2t4から） | vが復元でき、testnetで注文が通る |
-| 1-3 | レイテンシ実測 | 9.3の表の主要項目が埋まる |
-| 1-4 | Agent承認・有効期限・失効 | testnetで実測し仕様を確定 |
-| 1-5 | cloidによる冪等性 | request IDの冪等性・nonce/Agent寿命の制約を確認 |
-| 1-6 | Confidential Subnet上のoutcall・upgrade・復旧 | 動作する |
-| 1-7 | `ic-sqlite-vfs` 2.0.0 の疎通 | update/query/upgrade/migrationがPocketICで通る |
-| 1-8 | 市況WSと本人データの分離 | ブラウザがHLへ取引口座を送らず、本人状態を暗号化取得できる |
-| 1-9 | 共通保管・独立master口座・USDC往復 | 二重計上なく預入から出金まで照合できる |
-| 1-10 | guardと資金回復 | 猶予迂回を拒否し、取消・退出・停止時の制約を確認できる |
-| 1-11 | A/B0/B1相関評価 | Plan 16.6の成功率と失敗条件を記録できる。未達なら再設計 |
+| 1-1 | Implementation of `hl-sign` (action construction, msgpack, EIP-712, v restoration) | Official SDK and test vector consistency |
+| 1-2 | tECDSAsignature (from re2t4) | v can be restored and orders can pass on testnet |
+| 1-3 | Latency measurement | The main items in the table of 9.3 are filled in. |
+| 1-4 | Agent approval, expiration date, and cancellation | Testnet to verify and confirm the specifications |
+| 1-5 | idempotency by cloid | Check the idempotency, nonce/Agent lifespan restrictions of request ID |
+| 1-6 | Outcall, upgrade, and recovery on Confidential Subnet | Work |
+| 1-7 | `ic-sqlite-vfs` 2.0.0 interoperability | update/query/upgrade/migration pass through PocketIC |
+| 1-8 | Separation of market conditions WS and personal data | The browser does not send the trading account to HL and can obtain the identity status in encrypted form. |
+| 1-9 | Common custody account, independent master account, USDC transfers | Reconciliation can be done from deposit to withdrawal without double counting. |
+| 1-10 | Guard and fund recovery | You can refuse to defer the waiver and check the restrictions when canceling, withdrawing, or stopping. |
+| 1-11 | A/B0/B1 correlation evaluation | You can record the success rate and failure conditions of Plan 16.6. If not met, redesign. |
 
-**Go/No-Go**: 署名・資金往復・認可・状態機械の合格が単一ユーザーtestnetへの条件。2.4の性能基準とPlan 16.6のprivacy基準未達は明示し、privacy製品・本番へ進めない。
+**Go/No-Go**: signature, fund transfer, authorization, and state machine pass are the conditions for a single user testnet. We explicitly state that the performance standards of 2.4 and the privacy standards of Plan 16.6 are not met, and we will not proceed with the privacy product or the live version.
 
-### Phase 2（single-user testnet MVP、期間は再見積り）
+### Phase 2 (single-user testnet MVP, period will be re-estimated)
 
-| # | タスク |
+| # | a task |
 |---|---|
-| 2-1 | スキーマとMigrationの確定、PocketICでのアップグレード試験 |
-| 2-2 | `submit_order`（受付・検証・CAS・spawn） |
-| 2-3 | `process` と `sweep` の実装、障害注入 |
-| 2-4 | Market/Limit/Cancel/Cancel All/Close、SL/TP（groupingの確定） |
-| 2-5 | クライアント: WS接続共有、pending表示、注文一覧 |
-| 2-6 | Agent承認フロー（導出・承認・照合・期限表示） |
-| 2-7 | 出金本人認可、資金台帳、二重出金・異なるユーザーへの流用拒否の試験 |
-| 2-8 | cancel-onlyモード、dead-man's switch、緊急全取消 |
+| 2-1 | Skyscanner and Migration confirmation, PocketIC upgrade test |
+| 2-2 | `submit_order` (receipt, verification, CAS, spawn) |
+| 2-3 | Implementation of `process` and `sweep`, intrusion attacks |
+| 2-4 | Market/Limit/Cancel/Cancel All/Close, SL/TP (confirmation of grouping) |
+| 2-5 | Client: WS connection sharing, pending display, order list |
+| 2-6 | Agent approval flow (extraction, approval, reconciliation, deadline display) |
+| 2-7 | withdrawalowner authorization, fund ledger, duplicate withdrawal and test for refusal of misappropriation to different users |
+| 2-8 | cancel-only mode, dead-man's switch, emergency full cancellation |
 
-### Phase 3（multi-user testnet closed beta、期間は再見積り）
+### Phase 3 (multi-user testnet closed beta, the period will be re-estimated)
 
-| # | タスク |
+| # | a task |
 |---|---|
-| 3-1 | ユーザー別derivation path、鍵導出のキャッシュ |
-| 3-2 | 注文内容の暗号化方式の実装（`Plan.md` U5で決定済みの方式） |
-| 3-3 | レート制限、ポジション上限、銘柄allowlistと流動性基準（`Plan.md` 6.3.1） |
-| 3-4 | `universe` 全件のコンフォーマンステスト、廃止銘柄の建玉導線 |
-| 3-5 | eligibility tokenの検証 |
-| 3-6 | builder feeの実装と採算の実測 |
-| 3-7 | 監査ログ、平文が出ないことの検査 |
-| 3-8 | 照合のREST weight予算の実装と検証 |
+| 3-1 | User-specific derivation path, key derivation cache |
+| 3-2 | Implementation of the encryption method for order contents (method determined in `Plan.md` U5) |
+| 3-3 | Rate limits, position limits, ticker allowlist and liquidity criteria (`Plan.md` 6.3.1) |
+| 3-4 | `universe` Conformity test for all items, positions guide for discontinued stocks |
+| 3-5 | Verification of eligibility token |
+| 3-6 | Implementation of the builder fee and cost estimation |
+| 3-7 | Audit log inspection for the absence of plain text |
+| 3-8 | Implementation and validation of the REST weight budget for reconciliation |
 
 ---
 
-## 11. REST weight 予算（見落としやすい制約）
+## 11. REST weight Budget (constraints that are easy to overlook)
 
-Canister自身がHyperliquidのRESTを叩く。制限は**IP単位で1,200 weight/分**で、`clearinghouseState`・`orderStatus`・`l2Book`・`allMids` は weight 2である。
+Canister itself hits Hyperliquid's REST. The limit is **1,200 weight/minute per IP unit**, and `clearinghouseState`, `orderStatus`, `l2Book`, and `allMids` are weight 2.
 
-概算。
+Approximate.
 
-| 用途 | weight | 件数/分の上限 |
+| a use | weight | Limit on number of items/minutes |
 |---|---|---|
-| 注文1件の照合（`orderStatus` 2回） | 4 | 300 注文/分 |
-| 全ユーザーの状態ポーリング（`clearinghouseState`） | 2/ユーザー | 600 ユーザー/分 |
+| Reconciliation for 1 order (`orderStatus` 2 times) | 4 | 300 orders/minute |
+| Status polling for all users (`clearinghouseState`) | 2/User | 600 users/minute |
 
-つまり**この頻度で全ユーザーを一律にポーリングする設計は予算を超える**。1,000ユーザーを30秒ごとにポーリングすると 2,000リクエスト/分 × 2 = 4,000 weight/分で、上限の3倍を超える。
+In other words, **the design of polling all users uniformly at this frequency exceeds the budget**. Polling 1,000 users every 30 seconds results in 2,000 requests/minute × 2 = 4,000 weight/minute, which exceeds the maximum limit by three times.
 
-したがってイベント通知と、稼働口座・open/unknown注文への有界な定期照合を併用する。
+Therefore, we combine event notifications with a limited periodic reconciliation for active accounts and open/unknown orders.
 
-- 注文は送信直後、unknown解決時、open/部分約定の追跡時に照合する。バックオフと共有予算で負荷を制限する。
-- ポジション再同期はセッション開始、注文照合、稼働口座の有界タイマーで行う。ブラウザの`notify_fill`は初期実装しない。公開市況WSを見ても本人の約定は確定できない。
-- 全件走査は低頻度・分割とするが、稼働口座を1日古い状態のままリスク判断しない。ブラウザ通知は認可・レート制限されたヒントに限定し、通知がなくても照合を継続する。
-- 状態が古い場合はリスクを増やす注文を停止する。受付時の予約によりサービス内の並行注文を数え、他Agentや直接取引を含む口座全体の厳密な上限保証とは区別する。
+- Orders are reconciled immediately after dispatch, when unknown is resolved, and when tracking open/partial fill. It limits load with backoffs and shared budgets.
+- Position re-synchronization is performed at the start of the session, order reconciliation, and with the limit timer of the active account. The browser's `notify_fill` is not implemented initially. Even when viewing the public market data WS, the user's fill cannot be confirmed.
+- All transactions are scanned at a low frequency and in batches, but the operating account is not risk-evaluated as long as it remains in a state one day older. Browser notifications are limited to hints with authorization and rate restrictions, and reconciliation continues even if no notification is received.
+- If the condition is old, stop placing orders that increase the risk. Count parallel orders within the service based on the reservation at the time of reception, and distinguish them from the strict upper limit guarantee of the entire account, including other agents and direct trading.
 
-この予算はcanisterのIPがどう数えられるかに依存する。replicated outcallは各ノードが個別に送るため、subnetのノード数だけIPが分かれる可能性がある。**正確な帰属はPhase 1で実測する。** 実測までは保守的に「1つの予算を共有する」として設計する。
+This budget depends on how the IP of the canister is counted. Since replicated outcalls are sent individually by each node, the IP may be split only by the number of nodes in the subnet. **Exact attribution is measured in Phase 1.** Until it is measured, it is conservatively designed to "share one budget".
 
 ---
 
-## 12. 実装判断と実測待ち事項
+## 12. Implementation judgment and waiting for actual measurement
 
-| # | 決定・残件 | 次の確認時点 |
+| # | Decision/Remaining items | Next verification point |
 |---|---|---|
-| U16 | HPKE採用、Plan 16.5。実装ライブラリと鍵認証を試験する | 選択済み、Phase 1検証 |
-| U17 | 5秒超は一般UX不合格。機密性を自動降格せずtestnet指値主体で改善 | 決定済み |
-| U18 | 建玉単位のpositionTpsl、reduce-only。複雑なbracketは後回し | 決定済み |
-| U19 | 公開市況WSをBroadcastChannel＋leader electionで共有 | 決定済み |
-| U20 | REST weightのIP帰属（subnetのノードごとか、集約されるか） | Phase 1 |
-| U21 | =2.0.0/v8固定。更新は実データmigration試験を必須とし、自動追従しない。新Canisterは鍵IDも変えるため単純移設しない | 方針決定、各更新で検証 |
-| U22 | notify_fillは不採用。Canisterの有界定期照合＋注文/セッションイベント | 決定済み |
+| U16 | HPKE recruitment, Plan 16.5. Testing implementation library and key authentication | Selected, Phase 1 verification |
+| U17 | Over 5 seconds is considered a general UX failure. Confidentiality is not automatically downgraded; it is improved by the testnet testnet entity. | Decided |
+| U18 | positionTpsl and reduce-only in positions unit. Complex brackets are postponed. | Decided |
+| U19 | Share the public market status WS on BroadcastChannel+leader election | Decided |
+| U20 | IP assignment for REST weight (whether it is per subnet node or aggregated) | Phase 1 |
+| U21 | =2.0.0/v8 fixed. Updates require a real data migration test and do not follow automatically. New Canisters do not simply migrate because they also change the keyID. | Policy decision, verification at each update |
+| U22 | notify_fill is not adopted. Canister bounded periodic reconciliation + order/session event | Decided |
 
-資金経路・鍵・口座別通信はPlan 16章で確定した。U20等の外部環境の実測値は未確認のまま数字を埋めない。
+The communication by fund pathway, key, and account has been confirmed in Chapter 16 of the Plan. The numbers are not filled in until the actual values of external environments such as U20 are confirmed.
 
 ---
 
-## 13. 参考資料
+## 13. reference materials
 
-- [Hyperliquid nonceとAgentの失効・再利用制約](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets)
-- [Exchange endpoint：expiresAfter・取消・builder承認](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint)
+- [Hyperliquid nonce and Agent expiration and reuse restrictions](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets)
+- [Exchange endpoint: expiresAfter, cancellation, builder approval](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint)
 
-`Plan.md` 15章に加えて。
+`Plan.md` in addition to Chapter 15.
 
-- [IC HTTPS interface（5エンドポイント。WebSocketなし）](https://docs.internetcomputer.org/references/ic-interface-spec/https-interface/)
-- [IC エッジインフラ（ブラウザ→ゲートウェイ→境界ノード→replica）](https://docs.internetcomputer.org/concepts/edge-infrastructure/)
-- [静的サイトの仕組み（「どのゲートウェイを選ぶかが信頼の決定」）](https://docs.internetcomputer.org/guides/frontends/static-site/how-it-works/)
-- [Certification（raw ホストは証明書を破棄する）](https://docs.internetcomputer.org/guides/frontends/certification/)
-- [Canister migration（canister IDを保つfull migrationでtECDSA鍵が維持される）](https://docs.internetcomputer.org/guides/canister-management/canister-migration/)
+- [IC HTTPS interface (5 endpoints. No WebSocket)](https://docs.internetcomputer.org/references/ic-interface-spec/https-interface/)
+- [IC Edge Infrastructure (Browser → Gateway → Boundary Node → replica)](https://docs.internetcomputer.org/concepts/edge-infrastructure/)
+- [How Static Sites Work ( "The decision of trust depends on which gateway you choose")](https://docs.internetcomputer.org/guides/frontends/static-site/how-it-works/)
+- [Certification (raw Host discards certificate)](https://docs.internetcomputer.org/guides/frontends/certification/)
+- [Canister migration (tECDSA key is retained with a full migration that preserves the canister ID)](https://docs.internetcomputer.org/guides/canister-management/canister-migration/)
 - [IC Resource limits](https://docs.internetcomputer.org/references/resource-limits/)
 - [Hyperliquid WebSocket](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket) / [Subscriptions](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions) / [Timeouts and heartbeats](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/timeouts-and-heartbeats) / [Rate limits](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits)
-- [ic-sqlite-vfs API安定性契約](https://github.com/humandebri/ic-sqlite-vfs/blob/main/docs/API_STABILITY.md) / [運用](https://github.com/humandebri/ic-sqlite-vfs/blob/main/docs/OPERATIONS.md)
-- 調査記録: `research/icp-realtime-static-frontend.md`、`research/hyperliquid-oss-research.md`
+- [ic-sqlite-vfs API Stability Agreement](https://github.com/humandebri/ic-sqlite-vfs/blob/main/docs/API_STABILITY.md) / [Operations](https://github.com/humandebri/ic-sqlite-vfs/blob/main/docs/OPERATIONS.md)
+- Investigation records: `research/icp-realtime-static-frontend.md`, `research/hyperliquid-oss-research.md`
 
-### 未検証として残した項目
+### Items left as unverified
 
-- ユーザー系WSサブスクに署名が不要であること（スキーマからの推論。公式の明示文なし）
-- `pzp6e` の3.5 sig/s は2026-02時点のDFINITY発表値。現在値は変動しうる
-- Confidential Subnet（re2t4）の現在のノード数・稼働状況と課金基準
-- HyperliquidのAPI利用規約・商標ポリシー（公式ドキュメント索引からは見つからなかった）
-- 公式SDKの `approveAgent`・batch注文の対応範囲（Rust版は未確認）
+- The user-related WS subscription does not require signature (inference from schema. No official explicit statement)
+- The 3.5 sig/s for `pzp6e` is the DFINITY announcement value as of 2026-02. The current value may fluctuate.
+- Current number of nodes, operational status and billing criteria for Confidential Subnet (re2t4)
+- Hyperliquid API Terms of Use and Trademark Policy (not found in the official document index)
+- Scope of support for `approveAgent` and batch orders in the official SDK (Rust version is not confirmed)
 
 ---
 
-## 14. 資金層・認証・guardの実装契約
+## 14. implementation contract for fund layer, authentication, guard
 
-### 14.1 funds_vaultの永続データ
+### 14.1 persistent data of funds_vault
 
-各Canisterは別DBを持つ。funds_vaultのMemoryId 0を注文DBと混同しない。VFSのversion/layoutを固定し、4章と同じinit/post_upgrade・同期トランザクション規則を適用する。WALや通常ファイルシステムのbackup APIを前提にしない。現時点ではCargo.lockも実装もなく、依存の実APIは最初のコンパイル時に固定版ソースと照合する。
+Each Canister has its own separate DB. Do not mix the MemoryId 0 of funds_vault with the order DB. Set the version/layout of VFS and apply the init/post_upgrade and synchronization transaction rules as the same as chapter 4. Do not assume WAL or the normal file system backup API. At present, Cargo.lock is not implemented, and the actual API of dependencies is reconciled with the fixed version source at the first compilation.
 
-| テーブル群 | 必須の制約 |
+| Table group | Mandatory restrictions |
 |---|---|
-| identities / sessions / challenges | EOAとランダムuser_idの一意対応。challenge nonce一回性、Principal・origin・用途・期限・失効を検証 |
-| custody_accounts | reserve/tradingの用途、opaque account_id、導出path、master address、network。reserveに取引Agentを承認しない |
-| journals / postings | journalごとに借方貸方が同額、資産・単位一致。整数overflow拒否。外部イベント・要求からの重複仕訳を一意制約で拒否 |
-| fund_requests / reservations | 本人、request ID、本文hash、金額、確定宛先、EOA intent署名、期限。残高不足・二重拘束・他人への付替えを拒否 |
-| fund_actions / master_nonces | canonical action、digest、署名、wire payload、dispatch state、epoch、lease、照合予定。masterごとのnonceを同一同期コミットで割当て |
-| external_events / reconciliation | 外部の安定ID、network、口座、相手先、資産、金額、時刻、種別、証拠参照。公開APIの欠落・競合はunknownとして保持 |
-| key_registry / audit | HPKE key ID・期限、Agent世代承認、限定した理由コード。平文intentや対応表を公開ログへ出さない |
+| identities / sessions / challenges | Consistent with EOA and random user_id. Challenge nonce is one-time, and Principal, origin, purpose, expiration, and revocation are verified. |
+| custody_accounts | Purpose of reserve/trading, opaque account_id, derivation path, master address, network. Do not approve trading agent in reserve. |
+| journals / postings | Debit and credit amounts per journal are equal, and assets and units match. Integer overflow is rejected. Duplicate journal entries from external events or requests are rejected with a strict constraint. |
+| fund_requests / reservations | Identity, request ID, text hash, amount, destination of confirmation, EOA intentsignature, expiration date. Refusal to accept insufficient balance, double binding, or substitution for others. |
+| fund_actions / master_nonces | Canonical action, digest, signature, wire payload, dispatch state, epoch, lease, reconciliation scheduled. Each master assigns a nonce via a synchronized commit. |
+| external_events / reconciliation | External stable ID, network, account, recipient, asset, amount, time, type, proof reference. Missing or competing public APIs are retained as unknown. |
+| key_registry / audit | HPKE key ID, expiration date, agent generation approval, limited reason code. Do not publish plain text intent or response tables to the public log. |
 
-残高は仕訳から導けるようにし、キャッシュ残高を更新する場合は仕訳と同一トランザクションで更新する。未配分資産と取引口座equityは別勘定とし、共通reserveの現金を複数ユーザーへ重複配分しない。
+Make sure that the balance can be derived from the transaction records, and when updating the cash balance, update it with the same transaction as the transaction record. unallocatedasset and trading account equity are treated as separate accounts, and the cash of the common reserve is not duplicated allocation to multiple users.
 
-### 14.2 資金状態機械と外部照合
+### 14.2 Fund-state machines and external reconciliation
 
-資金要求は`accepted → reserved → executing → settled`、または`rejected/unknown`。複数の外部移動を1つの原子的操作と扱わず、配分・回収・払出しを個別のfund_actionへ分ける。各actionは注文と同じ`queued/signing/signed/dispatching/reconciled/unknown/aborted`を使い、dispatching永続化後にだけ外部送信する。
+The fund request is `accepted → reserved → executing → settled` or `rejected/unknown`. Instead of treating multiple external transfers as a single atomic operation, allocation, recovery, and payment are separated into individual fund_actions. Each action uses the same `queued/signing/signed/dispatching/reconciled/unknown/aborted` as the order, and only sends external messages after dispatching is permanent.
 
-- 入金はブラウザ提示のhashや成功表示では計上しない。HLで宛先、認証済み送金元、資産、金額、安定イベントIDを検証する。新しい入金の額・時刻だけから本人を推定しない。
-- 出金予約後、ユーザー別口座の出金可能額を確認して回収し、回収の確定後にreserveから本人へ払う。途中の応答喪失は別送金に置き換えず照合する。共通reserveに資金があっても、未確認の回収や未確定PnLを先払いしない。
-- 新規発注と回収を口座ごとの資金移動ロック・世代で調整する。coreはvaultからの認証済み配分状態を確認し、移動中の証拠金を利用可能として数えない。取消・reduce-onlyを不必要に妨げない。
-- 非replicated POSTを選び、外部送信はDBのawait外で行う。資金・リスク判断に使う`/info`の読取は料金方式v2のreplicated outcallとする。単一ノードによる応答改変を残高計上やunknown解消へ取り込まない。transformは意味のある金額・宛先・IDを消さない。不一致や安定IDを取得できないケースは計上しない。
-- replicated読取でもHLの嘘・履歴欠落を暗号学的に排除できない。HTTPS/APIの信頼とICP内の合意を区別する。送金ごとの一意な確定根拠が得られることをPhase 1で確認し、得られなければ実資金の実装を有効化しない。
-- master nonce/outboxの巻戻しは特に危険である。復元後は送信停止から開始し、外部履歴・全予約・残高を照合する。旧署名の期限とHLの受理条件を確認できない資金actionを自動再署名しない。
+- deposit is not counted in the hash displayed in the browser or the success message. In HL, the destination, authenticated transfer source, asset, amount, and stable event ID are verified. The identity is not estimated only from the amount and time of the new deposit.
+- After withdrawal reservation, check the withdrawable amount of each user's account and recover it, and pay the amount to the person in charge from the reserve after the recovery is confirmed. Do not replace the loss of response in the middle with another transfer, but reconcile it. Even if there is funds in the common reserve, do not pay the unconfirmed recovery or undecidedPnL in advance.
+- Adjust new orders and recovery with account-specific fund transfer lock and generation. core checks the authenticated allocation status from vault and does not count in transit margin as available. It does not unnecessarily interfere with cancellation or reduce-only.
+- Select non-replicated POSTs, and external transmissions will be performed outside the DB's await. The reading of `/info` for capital and risk assessment will be treated as a replicated outcall under fee scheme v2. Response modifications by a single node will not be incorporated into balance accounting or the elimination of unknown entries. transform will not delete meaningful amounts, recipients, or IDs. Cases where discrepancies or the inability to obtain a stable ID will not be recorded.
+- Even with replicated reading, the false HL and missing history cannot be cryptographically eliminated. We distinguish between the trust of HTTPS/API and the agreement within ICP. We will confirm in Phase 1 that each transfer has a unique definitive basis, and if it does not, we will not activate the implementation of real funds.
+- Reversing the master nonce/outbox is especially dangerous. After recovery, start from a send stop and reconcile external history, all reservations, and balance. Do not automatically re-sign funds that cannot verify the expiration date of the old signature and the acceptance conditions of the HL.
 
-### 14.3 API境界
+### 14.3 API boundaries
 
-初期インターフェースは以下の操作に限定する。名称は設計上の名前であり、実装済みCandidではない。
+The initial interface is limited to the following operations. The name is a design name and is not an implemented Candid.
 
 - vault: `issue_challenge`、`open_session`、`revoke_session`、`get_funding_instructions`、`request_allocation`、`request_withdrawal`、`get_fund_status`、`request_agent_revocation`。
-- core: `submit_order`、`cancel_order`、`cancel_all`、`get_account_snapshot`。closeはreduce-only注文として扱う。
-- guard: `schedule_upgrade`、`cancel_upgrade`、`execute_upgrade`、`get_upgrade_status`。予約内容・実行時刻の変更では新しい7日猶予を開始する。
+- core: `submit_order`, `cancel_order`, `cancel_all`, `get_account_snapshot`. close is treated as a reduce-only order.
+- guard: `schedule_upgrade`, `cancel_upgrade`, `execute_upgrade`, `get_upgrade_status`. A new 7-day grace period will start when the reservation content or execution time is changed.
 
-queryでも本人認可を省かない。vaultの認証結果をcoreが利用する場合、登録済みvault callerから配布された期限・失効世代付きセッションだけを受け入れる。ユーザーの入力にある`caller`を信用しない。失効伝達が未確認のセッションは資金要求・新規リスク受付に使わない。Canister間の呼出し元ID、対象口座、用途、世代、request IDを検証し、callbackの再入・古い応答をfencingする。
+Even in queries, owner authorization is not omitted. When core uses the vault authentication results, it only accepts sessions with expiration dates and revocation generation distributed by registered vault callers. It does not trust the `caller` in the user's input. Sessions with unconfirmed expiration notifications are not used for fund requests or new risk acceptance. It verifies the caller ID, target account, purpose, generation, and request ID between canisters, and fences re-entry of callbacks and old responses.
 
-HPKE鍵は用途別に生成・更新し、暗号化秘密鍵を公開queryへ出さない。受理前の最大payloadは16 KiB、口座あたり未送信注文は100件、資金移動は1件を初期上限とする。上限はDoS試験で調整する。失効鍵で新規受付しないが、受付済みの照合に必要なデータを期限だけで破棄しない。
+HPKEkey is generated and updated according to the purpose, and does not disclose the encrypted private key to the query. The maximum payload before acceptance is 16 KiB, the maximum number of unsubmitted orders per account is 100, and the maximum number of fund transfers is 1. The upper limit is adjusted during the DoS test. New acceptance is not possible with expired keys, but the data required for accepted reconciliation is not discarded only by the deadline.
 
-### 14.4 変更猶予と障害試験
+### 14.4 Change reservations and fault testing
 
-guardは顧客資金を署名しない。対象Canisterの権限拡大、認証鍵・登録Canister・出金規則・危険なpolicy変更も、管理API経由で猶予を迂回できない設計にする。緊急停止は即時でも、解除や制限緩和は記録したSNS経路で行う。SNS自体のupgradeで呼出し主体が悪意を持つ場合にも、guard側の7日猶予は省略できないことを試験する。
+guard does not sign customer funds. The expansion of permissions for the target Canister, authentication key, registered Canister, withdrawal rules, and dangerous policy changes will also be designed so that they cannot be circumvented by bypassing the delay through the management API. Even if an emergency stop is immediate, unblocking or relaxing restrictions will be carried out via the recorded SNS channel. Even if the caller entity itself is malicious due to an upgrade of the SNS, the 7-day delay on the guard side cannot be omitted, as it will be tested.
 
-合格が必要な失敗試験:
+Failed exam requiring qualification:
 
-- 偽のEOA、別Principal、期限切れ、challenge再使用、宛先差替え、別networkのintent。
-- 入金イベント重複、仕訳不均衡、並行出金、回収中の発注、送金成功後の応答喪失。
-- master/Agent取り違え、coreからの任意出金署名依頼、失効世代のcallback。
-- guardへの非SNS予約、早期実行、WASM/引数差替え、controller/reinstall/stop/deleteによる迂回。
-- cycles不足、HL停止、Canister upgrade、古いDB復元、HPKE鍵更新中の受付・照合。
-- 平文ログ、他人のquery、ブラウザからの取引口座送信、公開proposalへの機密情報混入。
+- Fake EOA, different Principal, expired, challenge reuse, destination change, intent of different network.
+- duplicate deposit events, inconsistent accounting, simultaneous withdrawal, orders during recovery, loss of response after transfer success.
+- master/Agent misidentification, arbitrary withdrawal signature requests from core, revocation generation callback.
+- Non-SNS reservation to guard, early execution, WASM/index substitution, bypass by controller/reinstall/stop/delete.
+- Receiving and reconciling requests for insufficient cycles, HL suspension, Canister upgrade, DB restoration, and HPKEkey updates.
+- Plain text logs, queries from others, trading account transmission from the browser, confidential information infiltration into public proposals.
 
-これらは今後実装する試験仕様であり、この文書改訂で実行済みにはなっていない。
+These are the test specifications that will be implemented in the future, and they have not been executed in this document revision.
 
-## 変更履歴
+## Change history
 
-| 版 | 日付 | 変更 |
+| Edition | Date | change |
 |---|---|---|
-| v0.1 | 2026-09-18 | 初版。D9〜D12を決定し、確定アーキテクチャ、レイテンシ設計、リポジトリ構成、`ic-sqlite-vfs`のみの永続化、注文パイプライン、クライアント設計、検証計画、タスク分解を整理 |
-| v0.2 | 2026-09-18 | Plan v0.4と整合。Agent-onlyの実装ベースラインを明示し、機密資金層とHL口座を分離する検討境界・依存実装ゲート・検証項目を追加。D9は維持し、D11のIP/口座露出とtECDSA/outcallの保護範囲を明記 |
-| v0.3 | 2026-09-18 | action/注文の分離、送信前永続化、fencing、期限・取消・Agent世代、所有権確認、復旧とリスク照合の設計を修正。資金プライバシーと署名経路の境界を明確化 |
-| v0.4 | 2026-09-18 | Plan v0.8のBへ整合。vault master/取引Agent、EOA認証、本人データのCanister経由、資金DB・状態機械、immutable guard、開発と本番のゲートを決定。Agent-onlyの出金禁止・直接退出・旧工期を撤回 |
-| v0.5 | 2026-09-18 | Workers主配信とStart＋Reactの合成UI基盤、固定依存・lint・型・テストを追加。ADR 6本を記録。旧ICP配信試算を参考扱いに変更し、TradingViewの過度な断定を撤回。実ICP APIは存在せず接続工程は保留 |
+| v0.1 | 2026-09-18 | First version. Determine D9~D12, consolidate the final architecture, latency design, repository configuration, only `ic-sqlite-vfs` persistence, order pipeline, client design, verification plan, task decomposition |
+| v0.2 | 2026-09-18 | Compatible with Plan v0.4. Clearly define the implementation baseline for agent-only, add consideration boundaries, dependency implementation gates, and verification items to separate the confidential fund layer and HL accounts. Maintain D9, and explicitly specify the IP/account exposure and tECDSA/outcall protection scope for D11. |
+| v0.3 | 2026-09-18 | Design and revise the separation of actions/orders, pre-transmission persistence, fencing, deadlines/cancellation/Agent generation, ownership verification, recovery, and risk reconciliation. Clarify the boundaries between fund privacy and signature pathways. |
+| v0.4 | 2026-09-18 | Consolidated with Plan v0.8 B. Vault master/trading agent, EOA authentication, identity data via Canister, funds DB and state machines, immutable guard, and the decision on development and live gate. Retracted the Agent-only withdrawal prohibition, direct-exit guarantee, and old development schedule. |
+| v0.5 | 2026-09-18 | Added fixed dependencies, linting, type checking, and testing to the composite UI foundation for Workers main distribution and Start+React. Recorded 6 ADRs. Changed the reference to the old ICP distribution estimate and retracted TradingView's overly definitive conclusions. There is no actual ICP API, and the connection process is pending. |

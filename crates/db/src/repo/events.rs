@@ -123,17 +123,17 @@ pub fn find_external_event(
     .transpose()
 }
 
-/// 資金履歴（LIMIT付き。カーソルは直前の `at`）。
+/// 資金履歴（LIMIT付き。カーソルは直前の `(updated_at, client_request_id)`）。
 pub fn list_fund_events(
     connection: &Connection,
     user_id: &[u8; 32],
     limit: u32,
-    cursor: Option<u64>,
+    cursor: Option<(u64, Vec<u8>)>,
 ) -> Result<Vec<FundEventRow>, Error> {
     let limit = i64::from(limit.clamp(1, 100));
-    let cursor_value = match cursor {
-        Some(value) => {
-            ic_sqlite_vfs::db::Value::Integer(i64::try_from(value).map_err(|_| Error::Overflow)?)
+    let cursor_value = match &cursor {
+        Some((value, _)) => {
+            ic_sqlite_vfs::db::Value::Integer(i64::try_from(*value).map_err(|_| Error::Overflow)?)
         }
         None => ic_sqlite_vfs::db::Value::Null,
     };
@@ -141,10 +141,10 @@ pub fn list_fund_events(
         .query_all(
             "SELECT client_request_id, kind, state, amount, updated_at
                FROM fund_requests
-              WHERE user_id = ?1 AND (?2 IS NULL OR updated_at < ?2)
+              WHERE user_id = ?1 AND (?2 IS NULL OR updated_at < ?2 OR (updated_at = ?2 AND client_request_id < ?4))
               ORDER BY updated_at DESC, client_request_id DESC
               LIMIT ?3",
-            params![user_id.as_slice(), cursor_value, limit],
+            params![user_id.as_slice(), cursor_value, limit, cursor.as_ref().map(|(_, id)| ic_sqlite_vfs::db::Value::Blob(id.as_slice())).unwrap_or(ic_sqlite_vfs::db::Value::Null)],
             |row| {
                 Ok((
                     row.get::<Vec<u8>>(0)?,

@@ -35,7 +35,7 @@ export type SessionState = {
 }
 const message = (cause: unknown) => {
   if (cause instanceof CanisterError && cause.code === 'VenueRateLimited')
-    return '共有REST予算の空きを待っています。取消・決済・出金は引き続き操作できます。'
+    return 'Waiting for shared REST capacity. Cancellation, closes and withdrawals remain available.'
   return cause instanceof Error ? cause.message : String(cause)
 }
 const expired = (cause: unknown) =>
@@ -52,38 +52,38 @@ export function orderBlockReason(
   wallNow = Date.now(),
 ): string | undefined {
   const data = state.data
-  if (!state.address) return 'MetaMaskで接続してください'
+  if (!state.address) return 'Connect MetaMask'
   if (state.refreshError || !data?.snapshot || !data.orders || !data.agent)
-    return '口座・注文・Agent情報を更新できません。接続を確認してください。'
+    return 'Could not refresh account, order or agent data. Check your connection.'
   if (!data.vaultJournal || !data.coreJournal)
-    return '送信ジャーナルの状態を確認できません。新規注文を停止中です。'
+    return 'Could not verify the dispatch journal. New orders are paused.'
   if (data.vaultJournal[0] || data.coreJournal[0])
     return data.vaultJournal[1] || data.coreJournal[1]
-      ? '復元した記録を照合中です。注文送信を停止しています。'
-      : '送信ジャーナルの確認待ちです。注文送信を停止しています。'
+      ? 'Reconciling restored records. Order dispatch is paused.'
+      : 'Waiting for journal verification. Order dispatch is paused.'
   if (!data.agent.current[0] || variantName(data.agent.current[0].state) !== 'Active')
-    return 'Agentを承認してください'
+    return 'Approve the agent'
   if (!data.eligibility?.eligible)
-    return '受付資格が未登録か期限切れです。取消・決済・回収・出金は利用できます。'
+    return 'Eligibility is missing or expired. Cancellation, closes, recovery and withdrawals remain available.'
   if (
     !data.vaultCycles ||
     !data.coreCycles ||
     data.vaultCycles.new_risk_stopped ||
     data.coreCycles.new_risk_stopped
   )
-    return 'cycles残量または消費下限の設定により新規受付を停止中です。'
+    return 'New actions are paused due to the cycles balance or configured burn floor.'
   if (
     !data.btcMarket ||
     !data.ethMarket ||
     !data.btcMarket.eligible_for_new_risk ||
     !data.ethMarket.eligible_for_new_risk
   )
-    return '市場観測または流動性の条件を満たしていません。取消・決済は利用できます。'
+    return 'Market observation or liquidity requirements are not met. Cancellation and closes remain available.'
   if (data.agent.current[0].expires_at[0] && data.agent.current[0].expires_at[0] <= BigInt(wallNow))
-    return 'Agentの承認期限が切れています。新しい世代を承認してください。'
+    return 'Agent approval has expired. Approve a new generation.'
   if (data.funds.recovery_fence.length)
-    return '回収フェンス中です。取消・reduce-only決済を利用できます。'
-  if (!data.snapshot.account_id.length) return '取引口座を観測できません'
+    return 'Recovery is fenced. Cancellation and reduce-only closes remain available.'
+  if (!data.snapshot.account_id.length) return 'Could not observe the trading account'
   if (
     state.orders.some((order) => ['sending', 'unknown'].includes(order.state)) ||
     [
@@ -91,8 +91,9 @@ export function orderBlockReason(
       ...state.orders.flatMap((order) => (order.order ? [order.order] : [])),
     ].some((order) => variantName(order.state) === 'Unknown')
   )
-    return '結果不明の注文を照合中です。再送・再読込はしないでください。'
-  if (effectiveAge(state, now) > 10_000) return '口座状態が古いため新規注文を停止中です'
+    return 'Reconciling an unknown order outcome. Do not resubmit or reload.'
+  if (effectiveAge(state, now) > 10_000)
+    return 'New orders are paused because account data is stale'
 }
 
 /** 非同期処理は世代を跨いで状態を書き戻さない。取得は世代内で直列化する。 */
@@ -198,7 +199,7 @@ export class SessionStore {
             await this.logout()
             return
           }
-          this.patchOrder(item.id, { message: `照合未完了: ${message(cause)}` })
+          this.patchOrder(item.id, { message: `Reconciliation incomplete: ${message(cause)}` })
         }
       }
     } catch (cause) {
@@ -257,7 +258,7 @@ export class SessionStore {
           (input.slippageBps ?? 50) > 0xffffffff))
     ) {
       this.publish({
-        error: '数量・価格・倍率・スリッページの入力を確認してください。注文は送信していません。',
+        error: 'Check quantity, price, leverage and slippage. No order was sent.',
       })
       return
     }
@@ -273,7 +274,7 @@ export class SessionStore {
           result.order_id.length !== 32 ||
           result.cloid.length !== 16
         )
-          throw new Error('受付応答request_idが一致しません')
+          throw new Error('Acceptance response request_id does not match')
         this.patchOrder(id, {
           state: 'accepted',
           orderId: bytesToHex(new Uint8Array(result.order_id)),

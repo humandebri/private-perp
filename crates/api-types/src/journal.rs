@@ -98,7 +98,21 @@ pub enum RecoveryPayload {
         tx_hash: Blob,
         network: String,
         address: Blob,
+        /// Credited amount for old records; gross amount when a fee is present.
         amount_micros: u64,
+        /// Missing in original journals; present in interim fee-bearing journals.
+        fee_micros: Option<u64>,
+        observed_at_ms: u64,
+    },
+    DepositCreditWithFee {
+        /// Proven sender of an inbound HL internalTransfer; absent for unattributed deposits.
+        sender: Option<Blob>,
+        tx_hash: Blob,
+        network: String,
+        address: Blob,
+        /// Gross sender debit; the recipient receives amount minus fee.
+        amount_micros: u64,
+        fee_micros: u64,
         observed_at_ms: u64,
     },
     DepositClaim {
@@ -246,8 +260,146 @@ pub struct RecoveryEvent {
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryRecord {
+    /// Exact bytes hashed when this event was persisted. Optional for old peers.
+    pub encoded_payload: Option<Blob>,
     pub sequence: u64,
     pub previous_hash: Blob,
     pub hash: Blob,
     pub event: RecoveryEvent,
+}
+
+impl RecoveryPayload {
+    /// Normalize legacy credited amounts for replay without changing stored bytes.
+    pub fn into_fee_aware(self) -> Self {
+        match self {
+            Self::DepositCredit {
+                sender,
+                tx_hash,
+                network,
+                address,
+                amount_micros,
+                fee_micros,
+                observed_at_ms,
+            } => Self::DepositCreditWithFee {
+                sender,
+                tx_hash,
+                network,
+                address,
+                amount_micros,
+                fee_micros: fee_micros.unwrap_or(0),
+                observed_at_ms,
+            },
+            other => other,
+        }
+    }
+}
+
+impl RecoveryRecord {
+    /// Verify the typed event corresponds to the original hash-chain payload.
+    pub fn payload_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        let bytes = match &self.encoded_payload {
+            Some(bytes) => bytes.as_ref().to_vec(),
+            None => {
+                candid::encode_one(&self.event.payload).map_err(|_| "invalid recovery payload")?
+            }
+        };
+        if bytes.is_empty() || bytes.len() > 4096 {
+            return Err("invalid recovery payload length");
+        }
+        let decoded: RecoveryPayload =
+            candid::decode_one(&bytes).map_err(|_| "invalid recovery payload")?;
+        if decoded != self.event.payload {
+            return Err("recovery payload does not match event");
+        }
+        Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // An independently encoded old sender type lacks the new fee-bearing variant.
+    #[derive(CandidType, Serialize)]
+    enum LegacyPayload {
+        DepositCredit {
+            sender: Option<Blob>,
+            tx_hash: Blob,
+            network: String,
+            address: Blob,
+            amount_micros: u64,
+            observed_at_ms: u64,
+        },
+    }
+
+    #[derive(CandidType, Serialize)]
+    enum InterimPayload {
+        DepositCredit {
+            sender: Option<Blob>,
+            tx_hash: Blob,
+            network: String,
+            address: Blob,
+            amount_micros: u64,
+            fee_micros: u64,
+            observed_at_ms: u64,
+        },
+    }
+
+    #[test]
+    fn interim_deposits_keep_their_recorded_fee() {
+        let bytes = candid::encode_one(InterimPayload::DepositCredit {
+            sender: None,
+            tx_hash: vec![1; 32].into(),
+            network: "local".into(),
+            address: vec![2; 20].into(),
+            amount_micros: 10_000_000,
+            fee_micros: 1_000_000,
+            observed_at_ms: 123,
+        })
+        .unwrap();
+        let payload: RecoveryPayload = candid::decode_one(&bytes).unwrap();
+        assert!(matches!(
+            payload.into_fee_aware(),
+            RecoveryPayload::DepositCreditWithFee {
+                fee_micros: 1_000_000,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_deposits_decode_and_keep_original_hash_bytes() {
+        let bytes = candid::encode_one(LegacyPayload::DepositCredit {
+            sender: None,
+            tx_hash: vec![1; 32].into(),
+            network: "local".into(),
+            address: vec![2; 20].into(),
+            amount_micros: 10_000_000,
+            observed_at_ms: 123,
+        })
+        .unwrap();
+        let payload: RecoveryPayload = candid::decode_one(&bytes).unwrap();
+        assert!(matches!(payload, RecoveryPayload::DepositCredit { .. }));
+        assert_ne!(candid::encode_one(&payload).unwrap(), bytes);
+        let mut record = RecoveryRecord {
+            encoded_payload: Some(bytes.clone().into()),
+            sequence: 1,
+            previous_hash: vec![0; 32].into(),
+            hash: vec![3; 32].into(),
+            event: RecoveryEvent {
+                version: 1,
+                logical_id: vec![4; 32].into(),
+                payload,
+            },
+        };
+        assert_eq!(record.payload_bytes().unwrap(), bytes);
+        assert!(matches!(
+            record.event.payload.clone().into_fee_aware(),
+            RecoveryPayload::DepositCreditWithFee { fee_micros: 0, .. }
+        ));
+        record.event.payload = RecoveryPayload::Baseline {
+            state_digest: vec![5; 32].into(),
+        };
+        assert!(record.payload_bytes().is_err());
+    }
 }

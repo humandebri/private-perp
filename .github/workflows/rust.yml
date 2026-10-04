@@ -1,55 +1,38 @@
 name: Rust verification
-# Rust workspace と統合 Canister のデプロイ成果物を検証する。
 on:
   push:
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'icp.yaml'
-      - 'scripts/**'
-      - 'tools/**'
-      - '.github/workflows/rust.yml'
+    branches: [main]
   pull_request:
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'icp.yaml'
-      - 'scripts/**'
-      - 'tools/**'
-      - '.github/workflows/rust.yml'
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   verify:
+    name: Rust verification
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master（1.97.0を下で固定）
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # Toolchain version pinned below
         with:
-          # rust-toolchain.toml と同じ版に固定する。
           toolchain: '1.97.0'
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - name: Format
         run: cargo fmt --all --check
       - name: Lint (host, pure crates and test harness)
-        # 既定メンバーだけでは crates/pocket-ic-tests が漏れるため --workspace を使う。
-        # Canisterとjournal-clientはwasm専用SQLiteへ依存するため除外し、
-        # wasmターゲットのlintステップで別途検査する。
         run: cargo clippy --locked --workspace --all-targets --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy --exclude send-journal --exclude journal-client --exclude private-perp -- -D warnings
       - name: Test (host, pure crates and test harness)
-        # ホストでビルドできるメンバーだけを対象にする。既定メンバーの固定ではなく除外指定に
-        # することで、純粋クレートを追加したときに自動で対象になる。
         run: cargo test --locked --workspace --exclude pocket-ic-tests --exclude funds-vault --exclude trading-core --exclude control-guard --exclude policy --exclude send-journal --exclude journal-client --exclude private-perp
       - name: Forbid async in hl-sign and db
         run: bash scripts/check-no-await.sh
+      - name: Test close price precision
+        run: bash scripts/test-close-price.sh
       - name: Forbid raw-key signing in canister crates
         run: bash scripts/check-signing-boundary.sh
-      # 統合 crate の embedded feature が旧単体 Wasm に混入しないよう別プロセスで検査する。
       - name: Lint (standalone wasm canisters)
         run: cargo clippy --locked --all-targets --target wasm32-unknown-unknown -p policy -p funds-vault -p control-guard -p trading-core -p send-journal -p db -- -D warnings
       - name: Lint (unified wasm canister)
@@ -59,7 +42,6 @@ jobs:
       - name: Build unified canister wasm
         run: cargo build --locked --release --target wasm32-unknown-unknown -p private-perp
       - name: Check the deployable wasm has no test-only entry points
-        # test-venue 付きのビルドが本番成果物へ混ざっていないことを検査する。
         run: |
           set -euo pipefail
           for wasm in target/wasm32-unknown-unknown/release/policy.wasm \
@@ -70,30 +52,28 @@ jobs:
             test -f "$wasm"
             for method in test_credit_deposit test_corrupt_action_digest test_hpke_seal \
                           test_hpke_open test_ecdsa_roundtrip test_sweep_now test_ingest_fills \
-                          test_apply_order_status test_sign_order_action; do
+                          test_apply_order_status test_sign_order_action \
+                          test_set_outbox_fault test_outbox_atomicity_snapshot; do
               if grep -q "$method" "$wasm"; then
-                echo "$wasm にテスト専用メソッド $method が含まれています" >&2
+                echo "$wasm contains test-only method $method" >&2
                 exit 1
               fi
             done
           done
   pocket-ic:
+    name: PocketIC integration
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master（1.97.0を下で固定）
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # Toolchain version pinned below
         with:
           toolchain: '1.97.0'
           targets: wasm32-unknown-unknown
-      # PocketICサーバ（pocket-ic-x86_64-linux.gz）を取得し、
-      # wasmビルド → crates/pocket-ic-tests の試験を実行する。
-      # 取得時の完全性検証はプラットフォーム別checksumで行う（fetch-pocket-ic.sh）。
       - name: PocketIC integration tests
         run: bash scripts/pocket-ic-test.sh --no-fail-fast
       - name: PocketIC runner failure propagation
         if: always()
-        run: node --test scripts/pocket-ic-runner.test.mjs
-      # 公式SDKのfixtureはコミット済み。生成器はネットワークとpnpmを要するため
-      # CIでは再生成せず、固定したfixtureとの一致だけを検証する。
+        run: node --test scripts/pocket-ic-runner.test.mjs scripts/fetch-pocket-ic.test.mjs
       - name: Official SDK fixture comparison
         run: cargo test --locked -p hl-sign --test fixtures

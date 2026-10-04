@@ -98,18 +98,19 @@ verify() {
 
 if [[ -x "$dest" ]]; then
   verify "$dest" || exit 1
-  echo "fetch-pocket-ic: 取得済み $dest"
+  echo "fetch-pocket-ic: cached $dest" >&2
   echo "$dest"
   exit 0
 fi
 
 mkdir -p "$dest_dir"
 url="https://github.com/dfinity/ic/releases/download/${POCKET_IC_RELEASE}/${asset}"
-echo "fetch-pocket-ic: $url"
+echo "fetch-pocket-ic: $url" >&2
 curl -fsSL "$url" -o "$dest_dir/pocket-ic.gz"
 gunzip -f "$dest_dir/pocket-ic.gz"
 chmod +x "$dest"
 
 verify "$dest" || exit 1
 
-echo "fetch-pocket-ic: $dest"
+# stdout is a machine-readable path on both download and cached execution.
+echo "$dest"

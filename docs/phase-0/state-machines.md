@@ -1,188 +1,190 @@
-# 状態遷移：action・資金要求・注文
+# State transition: action, fund request, order
 
-- 根拠：`Implementation.md` 2.3、4.4、4.6、5章、14.2、`Plan.md` 3.2、16.2
-- 状態：設計契約。実装はPhase 1以降
+> Historical Phase 0 state-machine contract. Later phase reports and the checked-in code describe subsequent implementation changes.
 
-## 1. 3つの状態機械の関係
+- Basis: `Implementation.md` chapters 2.3, 4.4, 4.6, 5, 14.2, `Plan.md` chapters 3.2, 16.2
+- Status: Design contract. Implementation after Phase 1
 
-| 状態機械 | 単位 | 目的 |
+## 1. The relationship between the three state machines
+
+| State machine | Unit | Purpose |
 |---|---|---|
-| action状態 | 署名・送信する1操作 | 署名・送信・照合の責務を分離する |
-| 資金要求状態 | ユーザーの1要求（配分・回収・払出し） | 予約・移動中・確定を区別する |
-| 注文ライフサイクル | 1注文 | HL上の状態と累積約定量を保持する |
+| action state | One signing/sending operation | Separate the responsibilities of signature, sending, and reconciliation. |
+| fund request status | User's 1 request (allocation, recovery, disbursement) | Distinguish between reservation, in transit, and confirmation |
+| Order lifecycle | 1 order | Maintain the state on HL and the cumulative fill amount |
 
-1つの資金要求・注文は、複数のaction（署名・送信の単位）を持ち得る。1つのactionは複数の子注文を持ち得る（バッチ）。**actionの照合完了は約定完了でも出金完了でもない。**
+One fund request or order can have multiple actions (signature and transmission units). One action can have multiple child orders (batches). **The completion of action reconciliation does not mean the completion of fill or withdrawal.**
 
-正準の状態名は英語の識別子とする。表示文言は8節の表で固定する。
+The correct state name shall be an English identifier. The display text shall be fixed in an table in Section 8.
 
-## 2. action状態
+## 2. action state
 
 ```text
 queued ──▶ signing ──▶ signed ──▶ dispatching ──▶ reconciled
    │           │           │            │
    └───────────┴───────────┘            └────────▶ unknown
-              aborted（未送信が保証できる場合のみ）
+              aborted (only if it can be guaranteed not to be sent)
 ```
 
-| 状態 | 意味 | DB不変条件 |
+| State | Meaning | DB invariant conditions |
 |---|---|---|
-| `queued` | 受付済み・未署名 | `signature IS NULL`、payload未確定、`worker_epoch`あり |
-| `signing` | 署名要求中 | `signature IS NULL`、`lease_until`設定、`worker_epoch`増加済み |
-| `signed` | 署名済み | `signature`必須、署名対象digest・wire payload保存済み、未送信 |
-| `dispatching` | 送信権を取得済み | `signature`と正確な送信payloadが必須。POST前にCASで保存 |
-| `reconciled` | 各子操作の結果を照合済み | 子注文ごとの結果と照合根拠を保持 |
-| `unknown` | 外部効果が不明 | 予約を解放しない。照合workerの対象として保持 |
-| `aborted` | 未送信を保証して取消 | 署名・送信が発生していないactionのみ |
+| `queued` | Accepted/Not signed | `signature IS NULL`, payload not yet fixed, `worker_epoch` present |
+| `signing` | Signature requested | `signature IS NULL`, `lease_until` setting increased, `worker_epoch` increased |
+| `signed` | Signature completed | `signature` required, signing payload digest and wire payload saved, not sent |
+| `dispatching` | You have obtained the sending rights | `signature` and the exact transmission payload are required. Saved by CAS before POST. |
+| `reconciled` | The results of each child's operation are reconciled. | Keep the results and reconciliation reasons for each child order |
+| `unknown` | External effects are unknown | Do not release the reservation. Keep it as a target for reconciliation worker. |
+| `aborted` | Guarantee that it has not been sent, cancellation | Only actions that did not generate a signature or send |
 
-許可遷移:
+Allowed transitions:
 
-| From | To | 条件 |
+| From | To | Condition |
 |---|---|---|
-| `queued` | `signing` | 互換な注文のみをバッチ化し、nonceと不変の署名対象を同一トランザクションで永続化した |
-| `queued` | `aborted` | epoch無効化、kill-switch、受付期限切れ、リスク予約の解放が同一トランザクションで完了した |
-| `signing` | `signed` | 署名応答を受領し、epoch・状態・取消要求・Agent世代・期限・kill-switch・policy鮮度・リスク予約を再検証した |
-| `signing` | `queued` | 署名拒否で有界バックオフ。epochを更新して再取得させる |
-| `signing` | `aborted` | 署名が成立していないことを確認できた |
-| `signed` | `dispatching` | 送信直前の再検証後、同じICメッセージ内でCASにより`dispatching`と送信意図を保存した（間に`await`を置かない） |
-| `signed` | `aborted` | 取消・kill-switch・期限切れで未送信を保証できた |
-| `dispatching` | `reconciled` | HLの結果と各子注文のライフサイクルを照合した |
-| `dispatching` | `unknown` | タイムアウト、応答解釈不能、callback trap、dispatching中のupgrade、照合不能 |
+| `queued` | `signing` | Batch only compatible orders and permanently combine nonce and immutable signing payload into the same transaction. |
+| `queued` | `aborted` | Epoch invalidation, kill-switch, acceptance expired, and risk reservation release were completed in the same transaction. |
+| `signing` | `signed` | Received the signature response and re-verified epoch, state, cancellation requests, Agent generation, deadlines, kill-switch, policy freshness, and risk reservation. |
+| `signing` | `queued` | Bounded backoff with signature rejection. Update epoch and retry retrieval. |
+| `signing` | `aborted` | Confirmed that no signature was created. |
+| `signed` | `dispatching` | After re-verification right before sending, save the `dispatching` and sending intent by CAS within the same IC message (without placing `await` in between) |
+| `signed` | `aborted` | It was guaranteed that it would not be sent with cancellation, kill-switch, and expired. |
+| `dispatching` | `reconciled` | Reconciled the HL results and the lifecycle of each child's orders. |
+| `dispatching` | `unknown` | Timeout, response interpretation failure, callback trap, upgrade in dispatching, reconciliation failure |
 
-禁止遷移と理由:
+Prohibited transitions and reasons:
 
-- `dispatching` → `aborted`。送信済みの外部効果は無効化できない。
-- `dispatching`・`unknown` → `queued`/`signing`（自動再署名）。新しいnonce・cloidでの自動再注文を禁止する。
-- `unknown` → `rejected`／`cancelled`。時間経過と`orderStatus`不在だけでは未実行を証明できない。
-- `reconciled` → 任意状態。照合後に新たな外部効果が必要な場合は新しいactionを作る。
+- `dispatching` → `aborted`. The external effects that have been dispatched cannot be invalidated.
+- `dispatching` and `unknown` → `queued`/`signing` (automatic re-signature). Prohibit automatic re-ordering with new nonce and cloid.
+- `unknown` → `rejected`/`cancelled`. It cannot prove that it has not been executed only by the passage of time and the absence of `orderStatus`.
+- `reconciled` → Any other state. If a new external effect is needed after reconciliation, create a new action.
 
-epoch・lease・CAS（`Implementation.md` 4.6）:
+epoch, lease, CAS (`Implementation.md` 4.6):
 
-- action取得時に永続`worker_epoch`を増やす。
-- 注文・取消workerのリースは30秒。POST前に失敗した処理だけを5秒後に再取得でき、nonceは再取得後も変えない。
-- `await`後の書き込みは `WHERE action_id = ? AND worker_epoch = ? AND dispatch_state = ?` で守り、更新0件なら結果を破棄する。
-- リース期限だけでは、遅延した旧署名callbackの競合を防げない。
-- 署名前の回収は世代更新で可能。`dispatching`/`unknown`の回収は照合workerの再開であり、送信権の再取得ではない。
+- Increase the permanent `worker_epoch` when getting an action.
+- The order and cancellation worker lease is 30 seconds. Only the failed processing before POST can be reobtained after 5 seconds, and the nonce cannot be changed after re-obtaining.
+- Writes after `await` are protected by `WHERE action_id = ? AND worker_epoch = ? AND dispatch_state = ?`, and if no updates are made, the result is discarded.
+- The lease deadline alone cannot prevent the competition of delayed old signing callback.
+- Recovery before signature is possible with generation updates. Recovery for `dispatching`/`unknown` is a restart of reconciliation worker and not a reacquisition of send permissions.
 
-## 3. 資金要求状態
+## 3. fund request status
 
 ```text
 accepted ──▶ reserved ──▶ executing ──▶ settled
     │            │             │
-    └────────────┴─────────────┴──▶ rejected（成立していないことを確認できた場合）
-                                 └──▶ unknown（外部効果が不明）
+    └────────────┴─────────────┴──▶ rejected (if you can confirm that it did not occur)
+                                 └──▶ unknown (external effects are unknown)
 ```
 
-| 状態 | 意味 | 制約 |
+| State | Meaning | restriction |
 |---|---|---|
-| `accepted` | 要求を受付し、冪等性キーを確定した | 残高・宛先・本人認可は未検証でもよい。受付は資金移動の開始ではない |
-| `reserved` | 残高を拘束し、資金移動nonceと操作IDを永続化した | 二重拘束・他人への付替えを拒否。未確定の収益を収益計上しない |
-| `executing` | 対応するactionが`signing`〜`dispatching` | 口座単位の資金移動ロックと世代で、新規発注・回収の順序を調整する |
-| `settled` | 外部イベントを照合し、仕訳が確定した | 仕訳の借方貸方が同額。確定根拠の外部イベントIDを保持 |
-| `rejected` | 実行されていないと確認できた | 解放は同一トランザクション。応答喪失を理由に`rejected`にしない |
-| `unknown` | 外部効果が不明 | 時間経過だけで解放・再送しない。ユーザーへ提示し続ける |
+| `accepted` | Received the request and determined the idempotency key | Balance, recipient, and owner authorization can be unverified. The receipt does not indicate the start of fund transfer. |
+| `reserved` | Constrained the balance and permanently established the fund transfer nonce and operation ID. | Refuse double confinement and substitution with others. Do not credit unconfirmed profits. |
+| `executing` | The corresponding action is `signing`~`dispatching` | With account-unit fund transfer lock and generation, adjust the order of new orders and recovery. |
+| `settled` | External events were reconciled, and the accounting has been finalized. | The debit and credit of the accounting entries are the same amount. Maintain the external event ID for the definitive basis. |
+| `rejected` | It was confirmed that it was not executed. | Release is the same transaction. Do not set `rejected` due to response loss. |
+| `unknown` | External effects are unknown | It will not be released or resend just by passing time. It will continue to be presented to the user. |
 
-初期資金経路（`Plan.md` 16.2）:
+Initial funding path (`Plan.md` 16.2):
 
 ```text
-本人HL口座 →(本人署名)→ 共通保管口座 →(master署名)→ ユーザー別HL取引口座
-                                    ←(master署名)←
-共通保管口座 →(master署名)→ 本人HL口座
+Personal HL account →(personal signature)→ shared reserve account →(master signature)→ user-specific HL trading account
+                                    ←(master signature)←
+shared reserve account →(master signature)→ personal HL account
 ```
 
-- 配分・回収・払出しを個別のfund_actionに分ける。複数の外部移動を1つの原子的操作として扱わない。
-- 出金予約後、ユーザー別口座の出金可能額を確認して回収し、回収の確定後にreserveから本人へ払う。共通reserveに資金があっても、未確認の回収や未確定PnLを先払いしない。
-- 入金はブラウザ提示のhashや成功表示で計上しない。HLで宛先、認証済み送金元、資産、金額、安定イベントIDを検証する。
-- 未配分残高・出金予約・移動中資産・ユーザー別equityを別勘定とする。共通保管資産とユーザー別口座資産を二重計上しない。
-- 台帳差異または鮮度不足では新規配分とリスク増加を停止する。安全に裏付け・本人認可を確認できる出金まで一律停止しないが、不明な資金を支払わない。
+- Allocate, recover, and withdraw are separated into individual fund_actions. Do not treat multiple external transfers as a single atomic operation.
+- After withdrawal reservation, check the withdrawable amount of the user's account and recover it, and pay the amount to the person from the reserve after the recovery is confirmed. Even if there is funds in the shared reserve, do not pay the unconfirmed recovery or unconfirmed PnL in advance.
+- Deposit is not counted by the hash displayed in the browser or the success message. In HL, the destination, authenticated transfer source, asset, amount, and stable event ID are verified.
+- unallocated balance, withdrawal reservation, in transit asset, and user-specific equity are treated separately. Do not double count shared custody assets and user-specific account assets.
+- If there are ledger discrepancies or insufficient liquidity, the new allocation and risk increase will be stopped. Withdrawals will not be stopped uniformly until they can be securely backed and verified by owner authorization, but we will not pay for unknown funds.
 
-## 4. 注文ライフサイクル
+## 4. Order lifecycle
 
-正準状態: `pending` / `open` / `partially_filled` / `filled` / `cancelled` / `rejected` / `unknown`
+Valid state: `pending` / `open` / `partially_filled` / `filled` / `cancelled` / `rejected` / `unknown`
 
-| 状態 | 意味 | 備考 |
+| State | Meaning | Notes |
 |---|---|---|
-| `pending` | ローカル受付（`queued`〜`dispatching`） | ブラウザは`client_request_id`で即時表示する。HLには未到達の可能性がある |
-| `open` | HL受理済み・未約定 | `hl_oid`を保持 |
-| `partially_filled` | 一部約定 | 累積約定量を保持。発注数量を上書きしない |
-| `filled` | 全量約定 | 累積約定量 = 発注数量 |
-| `cancelled` | 取消済み | 取消actionの照合根拠を保持 |
-| `rejected` | HLが拒否 | 理由コードを保持 |
-| `unknown` | 結果不明 | 再発注を促さない |
+| `pending` | Local reception (`queued`~`dispatching`) | The browser displays it immediately with `client_request_id`. It may not be reached in HL. |
+| `open` | HL accepted/not filled | Keep `hl_oid` |
+| `partially_filled` | Partially filled | Maintain the cumulative fill amount. Do not overwrite the order quantity. |
+| `filled` | Fully filled | Cumulative fill amount = Order quantity |
+| `cancelled` | Cancellation completed | Maintain the reconciliation basis of cancellation action |
+| `rejected` | HL rejected | Keep the reason code |
+| `unknown` | unknown outcome | Do not encourage re-ordering |
 
-- HTTP成功を注文成功と解釈せず、応答内の注文statusを個別に分類する。現在の実装は1 action = 1注文で、未使用だった`action_orders`はMigrationで除去する。
-- `cancel_requested`は状態と別に保持する。取消要求中の約定は`partially_filled`／`filled`として反映し、`cancelled`にしない（取消と約定の競合）。
-- Cancel Allも件数上限次第で複数actionになる。取消を新規注文より優先する。
-- `expires_after`はactionの受付・送信期限である。期限超過を受付時とPOST直前に検査し、未送信なら`rejected`として予約を解放する。板に残った注文の取消期限には使わない。
-- 未約定・部分約定・`unknown`を掃除しない。解決済み終端注文のpayload・署名は24時間後、約定明細は30日後に、1 sweepあたり各100件まで削除する。
+- Do not interpret HTTP success as order success and classify the order status in the response individually. The current implementation is 1 action = 1 order, and unused `action_orders` will be removed in Migration.
+- `cancel_requested` is kept separately from the state. The fill during cancellation requests is reflected as `partially_filled`/`filled` and not as `cancelled` (conflict between cancellation and fill).
+- Cancel All will also become multiple actions depending on the number of items. We prioritize cancellation over new orders.
+- `expires_after` is the acceptance and sending deadline for action. It is checked when receiving expired and immediately before POST, and if not sent, the reservation is released as `rejected`. It is not used for the cancellation deadline of orders left on the board.
+- Do not purge open, partially filled, or `unknown` orders. The payload and signature of resolved terminal orders are eligible for deletion after 24 hours, and fill details after 30 days, up to 100 items per sweep.
 
-## 5. 照合規則
+## 5. reconciliation rules
 
-| 事象 | 扱い |
+| Event | handling |
 |---|---|
-| POSTタイムアウト | `unknown`。照合workerがHL履歴を確認する |
-| 応答は届いたが解釈不能 | `unknown`。生応答を照合の手掛かりとして保存する |
-| callback trap | `unknown`。`dispatching`はPOST発行前に永続化済みのため照合へ進める |
-| `dispatching`中のupgrade | `unknown`。アップグレード後に照合から再開する |
-| `orderStatus`が見つからない | 未実行の証明ではない。保持期間・可視化遅延を考慮し、未解決なら`unknown`を維持する |
-| 安定イベントIDが取得できない入金 | 計上しない |
-| 非replicated読取の結果 | 単一ノードの応答だけでは資金計上・`unknown`解消の独立証明にならない。HLイベントの識別子・口座・金額・履歴の完全性と信頼条件を実測し、本番での確定条件を別途承認する |
-| 照合で取消済みと判明 | `cancelled`へ遷移し、取消actionの照合根拠を残す |
-| 照合で部分約定と判明 | `partially_filled`。リスク予約は約定分だけ消費する |
+| POST TIMEOUT | `unknown`. reconciliation worker checks HL history |
+| The response has arrived but cannot be interpreted | `unknown`. Save the raw response as a reconciliation reference |
+| callback trap | `unknown`. `dispatching` is already persisted before POST dispatch, so we proceed to reconciliation. |
+| upgrade in `dispatching` | `unknown`. Resume from reconciliation after upgrade. |
+| `orderStatus` cannot be found | It is not a proof of unexecution. Considering the retention period and visibility delay, if it is unresolved, keep it as `unknown`. |
+| Deposit that cannot obtain an stable event ID | Do not credit it |
+| Non-replicated reading results | The response of a single node alone does not constitute independent proof of fund entry or resolution of `unknown`. We measure the completeness and reliability conditions of the HL event identifier, account, amount, and history, and separately approve the conditions for finalization in the live event. |
+| It was found that cancellation was already made in reconciliation. | Transition to `cancelled` and leave the reconciliation basis for cancellation action |
+| Partial fill identified in reconciliation | `partially_filled`. Risk reservation consumes only fill amount. |
 
-- sweepの起動はグローバルtimer（5秒間隔。`init`／`post_upgrade`で再armする）で行い、件数・cycles・API予算を制限する。失敗はCanisterログへ記録する。永続状態が正本であり、timer・spawnの継続を正しさの前提にしない（停止時は手動`sweep`で再開する）。
-- 結果不明が解消できなければ自動再送せず、予約を保持して安全側に停止する。
-- 障害時は新規リスク増加停止、照合継続、可能な取消・reduce-only・確認済み出金を優先する。
+- The sweep is initiated by the global timer (with a 5-second interval. It is rearmed using `init` or `post_upgrade`). It limits the number of items, cycles, and API budget. Failures are recorded in the Canister log. The state is persistent and does not rely on the correctness of the timer and spawn (it is restarted manually with a `sweep` when stopped).
+- If the unknown outcome cannot be resolved, do not automatically resend, keep the reservation and stop it on the safe side.
+- During a failure, prioritize the cessation of new risk increase, the continuation of reconciliation, and the possible cancellation, reduce-only, and confirmed withdrawal.
 
-### 5.1 停止操作の分離
+### 5.1 Separation of stop operation
 
-| 操作 | 効果 | 効果がないもの |
+| operation | Effect | Things that have no effect |
 |---|---|---|
-| kill-switch（新規停止） | 新規のリスク増加を止める | 建玉の自動決済、既存取引所注文の取消 |
-| HL標準`scheduleCancel`による未約定注文の取消 | 板に残る注文を取り消す | 保護用SL/TPが消える可能性がある（UIで明示） |
-| 建玉の決済 | reduce-only注文を発行する | 自動成行決済はしない |
+| kill-switch (new stop) | Stop the increase in new risks | Automatic settlement of positions, cancellation of existing trading exchange orders |
+| Cancellation of unfilled orders by HL standard `scheduleCancel` | Cancel the order remaining on the board | Protection SL/TP may be deleted (explicitly shown in UI) |
+| Closing positions | Issue a reduce-only order | Do not automatically market-close positions. |
 
-緊急停止やdead-man's switchで建玉まで自動解消したと表示しない。dead-man's switchは既定OFF。
+It does not display that positions are automatically resolved even with emergency stop or dead-man's switch. The dead-man's switch is set to OFF by default.
 
-## 6. fencing・再入・古いcallback
+## 6. fencing, re-entry, old callback
 
-- すべての`await`後の書き込みを`worker_epoch`のCASで守る。
-- callbackではepoch・状態・取消要求・Agent世代・有効期限・kill-switch・policy鮮度・メタデータ・リスク予約を再検証する。失効したworkerの結果は破棄する。
-- Canister間呼び出しでは、呼出元ID・対象口座・用途・世代・request IDを検証する。
-- 失効伝達が未確認のセッションを資金要求・新規リスク受付に使わない。
-- 二重ingress（同一`client_request_id`の同時送信）は、`UNIQUE(user_id, client_request_id)`により1件だけが受付を確定する。
+- All writes after `await` are protected by the CAS of `worker_epoch`.
+- In callback, epoch, state, cancellation request, Agent generation, validity period, kill-switch, policy freshness, metadata, and risk reservation are re-verified. The results of expired workers are discarded.
+- In Canister inter-calling, the caller ID, target account, purpose, generation, and request ID are verified.
+- Do not use sessions with unconfirmed revocation propagation for fund requests or new risk acceptance.
+- Double ingress (concurrent transmission of the same `client_request_id`) only confirms one request by `UNIQUE(user_id, client_request_id)`.
 
-## 7. 復旧
+## 7. restoration
 
-- 古いbackupを戻しただけで送信を再開しない。送信停止から開始し、外部履歴・全予約・残高を照合する。
-- master nonce/outboxの巻戻しは特に危険である。旧署名の期限とHLの受理条件を確認できない資金actionを自動再署名しない。master署名outboxの欠落はAgent変更では解決しない。
-- nonce欠落時に「十分未来のnonce」を選んで復旧しない。`funds_vault`が旧Agentを失効させ、新世代を承認した上で口座を再照合する。
-- Agent再生成は公開`user_id`ではなく保存したopaque `account_id`と`generation`に基づく。対応データの喪失は鍵の自動復元を保証しない。
-- 状態の欠落で安全を証明できない場合は停止する。
+- It will not restart the transmission just by restoring the old backup. Start from transmission suspension and reconcile external history, all reservations, and balance.
+- Reversing the master nonce/outbox is especially dangerous. Do not automatically re-sign fund actions if the validity of their previous signatures and HL acceptance conditions cannot be established. A missing master-signing outbox cannot be resolved by changing the Agent.
+- Do not restore by selecting "sufficient future nonce" when nonce is missing. `funds_vault` will invalidate the old Agent and re-reconcile the account after approving the new generation.
+- Agent regeneration is based on the stored opaque `account_id` and `generation` rather than the public `user_id`. The loss of corresponding data does not guarantee the automatic recovery of the key.
+- Stop if you cannot prove safety due to a missing condition.
 
-## 8. 表示文言の対応（正準 → UI）
+## 8. Corresponding display text (standard → UI)
 
-`ui-spec.md` 5節と `Implementation.md` 6.3に基づく。
+Based on sections 5 of `ui-spec.md` and 6.3 of `Implementation.md`.
 
-| 正準 | UI表示 | 現行デモ（`frontend/src/domain/demo.ts`） |
+| Canonical state | UI display | Current demo (`frontend/src/domain/demo.ts`) |
 |---|---|---|
-| （ローカル送信直後） | 受付確認中 | 未実装（`queued`で代用） |
-| `pending`（action `queued`） | 受付済み・送信準備中 | `queued`（「受付済み・送信準備中」） |
-| `pending`（action `signed`/`dispatching`） | 送信済み・確認中 | 未実装 |
-| `open` | HL受理 | `open`（「HL受理（模擬）」） |
-| `partially_filled` | 部分約定 | `partial`（**別名。Phase 2で正準名へ寄せる**） |
-| `filled` | 約定 | `filled` |
-| `cancelled`（`cancel_requested`中） | 取消確認中 | 未実装 |
-| `cancelled` | 取消済み | `cancelled` |
-| `rejected` | 拒否 | `rejected` |
-| `unknown` | 結果不明（再送しない） | `unknown` |
+| (Immediately after local transmission) | Processing confirmation | unimplemented (replaced with `queued`) |
+| `pending` (action `queued`) | Received and in preparation for sending | `queued` ( "Received and in preparation for sending") |
+| `pending` (action `signed`/`dispatching`) | Sent/Under review | Unimplemented |
+| `open` | HL acceptance | `open` (HL acceptance (simulation)) |
+| `partially_filled` | Partial fill | `partial` (**Alternative name. Move to the proper name in Phase 2**) |
+| `filled` | fill | `filled` |
+| `cancelled` (in `cancel_requested`) | Cancellation confirmation in progress | Unimplemented |
+| `cancelled` | Cancellation completed | `cancelled` |
+| `rejected` | refusal | `rejected` |
+| `unknown` | unknown outcome (do not resend) | `unknown` |
 
-現行デモはローカルの受付確認中と`pending`を区別せず、取消確認中を持たない。この差はPhase 2で解消する（Phase 0ではコードを変更しない）。
+The current demo does not distinguish between `pending` and local reception confirmation, and does not have cancellation confirmation. This difference will be resolved in Phase 2 (no code changes in Phase 0).
 
-## 9. 未確定事項
+## 9. Undecided matters
 
-| 項目 | 確定時期 |
+| Item | Fixed period |
 |---|---|
-| バッチ化の互換条件と待ち時間上限 | Phase 1（1-1〜1-5） |
-| 照合の周期・バックオフ・共有予算配分 | Phase 1（11章のweight予算実測） |
-| `unknown`を解消できない場合の運用手順 | Phase 3（復旧試験と同時） |
-| 保持期間の具体値 | Phase 2-1（スキーマ確定時） |
+| Batching compatibility conditions and waiting time limit | Phase 1 (1-1–1-5) |
+| Reconciliation interval, backoff, and shared budget allocation | Phase 1 (Weight budget real-test in Chapter 11) |
+| Operational procedures when `unknown` cannot be resolved | Phase 3 (at the same time as the recovery exam) |
+| Specific value of the retention period | Phase 2-1 (when the schema is confirmed) |

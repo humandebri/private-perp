@@ -16,8 +16,8 @@ use ic_cdk_management_canister::{
 
 /// `/exchange`の応答本文の上限（生の本文+ヘッダを見込む）。
 const MAX_EXCHANGE_RESPONSE_BYTES: u64 = 8 * 1024;
-/// `userFills`の応答上限。
-const MAX_FILLS_RESPONSE_BYTES: u64 = 32 * 1024;
+/// `userFillsByTime`の応答上限。
+const MAX_FILLS_RESPONSE_BYTES: u64 = 1024 * 1024;
 /// `clearinghouseState`の応答上限。
 const MAX_STATE_RESPONSE_BYTES: u64 = 16 * 1024;
 /// `orderStatus`の応答上限。
@@ -118,8 +118,8 @@ fn classify_ok_response(action_type: &str, value: &serde_json::Value) -> Option<
     }
     if matches!(action_type, "cancel" | "cancelByCloid") {
         return status
-            .get("success")
-            .is_some()
+            .as_str()
+            .is_some_and(|value| value == "success")
             .then_some(ExchangeOutcome::Accepted {
                 oid: None,
                 filled: false,
@@ -143,9 +143,9 @@ fn classify_ok_response(action_type: &str, value: &serde_json::Value) -> Option<
 }
 
 /// 本人の約定を取得する（replicated＋変換）。
-pub async fn user_fills(user: &str) -> Result<String, ErrorCode> {
+pub async fn user_fills(user: &str, start: u64, end: u64) -> Result<String, ErrorCode> {
     fetch_info(
-        serde_json::json!({ "type": "userFills", "user": user }),
+        serde_json::json!({ "type": "userFillsByTime", "user": user, "startTime": start, "endTime": end }),
         MAX_FILLS_RESPONSE_BYTES,
     )
     .await
@@ -199,11 +199,11 @@ async fn fetch_info(
     query: serde_json::Value,
     max_response_bytes: u64,
 ) -> Result<String, ErrorCode> {
-    // userFills can return 2000 rows: 20 base + at most 100 row units.
+    // userFillsByTime can return 2000 rows: 20 base + at most 100 row units.
     // There is no refund when fewer rows are returned.
     let weight = match query.get("type").and_then(|value| value.as_str()) {
         Some("clearinghouseState" | "orderStatus") => 2,
-        Some("userFills") => 120,
+        Some("userFillsByTime") => 120,
         Some("openOrders") => 20,
         Some("metaAndAssetCtxs") => 20,
         Some("l2Book") => 2,

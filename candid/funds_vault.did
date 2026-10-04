@@ -126,6 +126,7 @@ type ErrorCode = variant {
 };
 type FundActionKind = variant {
   AgentRevocation;
+  SpotDeposit;
   Recovery;
   Withdrawal;
   AgentApproval;

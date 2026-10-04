@@ -1,324 +1,327 @@
-# private-perp：Phase別実装・UI計画
+# private-perp: Phase-by-phase implementation and UI planning
 
-- 作成日：2026-09-18
-- 版：v1.1
-- 状態：実装計画。実装・実機検証・監査は未完了
-- 基準文書：Plan.md v0.9、Implementation.md v0.5
+> Historical design record. Dates, decisions, estimates, and verification status refer to the original record. See [implementation status](docs/implementation-status.md) and [single-canister architecture](docs/phase-3/single-canister.md) for later changes.
 
-今回の進捗：ADR 6本、Start＋React/Workers基盤、4画面の合成UI、注文・資金操作のデモ試験を追加した。ICPコード・Candid・接続先がないため、認証・HPKE・testnet接続は未実装。詳細はdocs/implementation-status.mdを正とし、Phase全体を完了と数えない。
 
-## 1. 目指すもの
+- Date of creation: 2026-09-18
+- Version: v1.1
+- Status: Implementation plan. Implementation, real-world verification, and audit are not completed.
+- Reference documents: Plan.md v0.9, Implementation.md v0.5
 
-MetaMaskを入口に、機密Canisterが資金を管理し、ユーザー別のHyperliquid（HL）口座で取引するサービスを作る。HL標準の約定・証拠金・清算を利用し、接続ウォレットと取引口座の公開リンクを減らす。
+Progress this time: 6 ADRs, Start + React/Workers foundation, 4-screen composite UI, and added demo testing for order and fund operations. Since there is no ICP code, Candid, or connection point, authentication, HPKE, and testnet connections are unimplemented. For details, refer to docs/implementation-status.md and do not count the completion of the entire Phase as a success.
 
-UIの目標は「HL利用者が違和感なく使える、機能を絞った高品質な取引画面」。簡易な売買フォームだけにはせず、HL全機能の再現も目指さない。見た目、入力の分かりやすさ、状態表示の正確さは初期から重視する。
+## 1. What you aim for
 
-画面の滑らかさと注文執行の速さは別である。Canister署名・照合の遅延は実測し、HL純正と同じ執行速度を約束しない。資金の共通保管やTEEだけで匿名性が得られるとも扱わない。
+MetaMask as the gateway, confidential canister manages funds and provides a service for trading on user-specific Hyperliquid (HL) accounts. Utilizes HL standard fill, margin, and liquidation to reduce the public links between connected wallets and trading accounts.
 
-### 文書の使い分け
+The goal of the UI is "a high-quality trading screen with a limited set of functions that HL users can use without any discomfort". The UI should offer more than a basic trading form without trying to reproduce every HL feature. We emphasize appearance, ease of input, and accuracy of state display from the beginning.
 
-| 文書 | 役割 |
+Screen smoothness and order execution speed are separate. We have measured delays in canister signing and reconciliation and do not promise the same execution speed as HL's official. We do not consider anonymity achievable only through shared custody of funds or TEE.
+
+### Usage of documents
+
+| a document | Role |
 |---|---|
-| Plan.md | 要件・資金と鍵の権限・禁止事項・本番条件 |
-| Implementation.md | 技術構成・DB・署名・状態機械・API境界 |
-| 本書 | 実装順序・Phase別成果物・完了条件・UIの段階導入 |
+| Plan.md | Requirements, funds, key permissions, prohibited items, and live conditions |
+| Implementation.md | Technical configuration, DB, signature, state machine, API boundary |
+| this document | Implementation order, results by Phase, completion conditions, UI phase introduction |
 
-本書は既存の権限モデルを変更しない。既存文書のPhase説明に古い未決表現が残る場合、Plan 16章とImplementation v0.5の確定事項を基準にする。新しい方式が必要になった場合は、基準文書へ判断を戻す。
+This document does not change the existing authority model. If older phase descriptions still contain unresolved wording, follow the finalized decisions in Plan chapter 16 and Implementation v0.5. Record any new architecture decision in the governing design document.
 
-## 2. 初期スコープ
+## 2. Initial scope
 
-### 採用するもの
+### Included features
 
-- MetaMask等のEOA認証。出金時は本人の追加署名を必須にする。
-- HyperCore上のUSDC。本人HL口座からの預入と、同じ本人HL口座への払出し。
-- 共通保管口座とユーザー別の独立したHL取引口座。
-- funds_vaultによるmaster鍵管理、trading_coreによる取引Agent管理。
-- BTC・ETH perps、Market / Limit / Cancel / Cancel All / Close / SL / TP。
-- HL標準の建玉単位SL/TP、reduce-only。独自清算は作らない。
-- 公開市況だけブラウザからHLへ直結。本人データは認証・暗号化してCanister経由で取得する。
-- SNSによる統治と、control_guardによる変更予約・7日間の実行猶予。
+- EOA authentication such as MetaMask. When withdrawing, it is necessary to add the signature of the person.
+- USDC on HyperCore. Deposits from the user's HL account and withdrawals to the same user's HL account.
+- Shared reserve account and independent HL trading account for each user.
+- master key management by funds_vault, trading agent management by trading_core.
+- BTC/ETH perps, Market / Limit / Cancel / Cancel All / Close / SL / TP.
+- HL standard positions unit SL/TP, reduce-only. Do not create independent settlement.
+- Only the public status is directly connected from the browser to HL. The personal data is authenticated and encrypted and obtained through Canister.
+- Control by SNS and change reservation and 7-day execution delay by control_guard.
 
-### 初期には作らないもの
+### Excluded from the initial scope
 
-- spot、HIP-3、全銘柄一括対応、portfolio margin、unified account。
-- 他チェーンからの自動入金、独自ブリッジ、第三者宛出金。
-- 自動戦略、TWAP、コピー取引、ランキング、紹介機能。
-- 複雑なbracket注文、チャート上のドラッグ発注、自由な複数チャート配置。
-- ネイティブアプリ、EOA紛失時の運営者リセット。
-- 全員のポジションを単一HL口座にまとめる方式。
+- spot, HIP-3, all securities consolidated treatment, portfolio margin, unified account.
+- Automatic deposit from other chains, unique bridges, withdrawal to third parties.
+- Automatic strategies, TWAP, copy trading, ranking, referral function.
+- Complex bracket orders, drag orders on charts, free multiple chart layouts.
+- Native app, operator reset in case of EOA loss.
+- A method of consolidating all players' positions into a single HL account.
 
-初期のレバレッジ、スリッページ、Agent期限、保持期間等の値はPlan 16章に従う。実装中に暗黙に変更しない。
+The values of initial leverage, slippage, Agent expiration, holding period, etc. are in accordance with Chapter 16 of Plan. Do not change them implicitly during implementation.
 
-## 3. Phaseと依存関係
+## 3. Phases and dependencies
 
-| Phase | 主目的 | 動くもの・成果物 | 次へ進む条件 |
+| Phase | Main purpose | Working features and deliverables | Conditions to proceed next |
 |---|---|---|---|
-| 0 | 実装契約と画面構成を固定 | API・状態遷移・テスト仕様・画面仕様 | 実装時の責務と失敗時挙動が明確 |
-| 1 | 技術と機密性の成立性を調べる | 資金往復スパイク・計測・UIモック | 安全性合格。未達項目を識別し、接続範囲を決める |
-| 2 | 1人で取引を完結させる | 単一ユーザーtestnetアプリ | 預入から出金まで画面上で完了 |
-| 3 | 複数人でも分離・復旧できる | 複数ユーザーtestnet・負荷試験 | 資金分離・障害回復・性能を検証 |
-| 4 | 本番条件と運用を揃える | 機密基盤の証跡・退出演習・移管手順 | 未充足の本番条件がない、またはPhase 5監査に明示的に引継ぎ |
-| 5 | 監査を経て限定公開する | 監査済みリリース候補・運用記録 | 全本番ゲート合格と別途の実行承認 |
+| 0 | Fix installation contract and screen configuration | API, state transition, test specifications, screen specifications | Clear responsibilities during implementation and behavior in case of failure |
+| 1 | Check the validity of technology and confidentiality | Fund transfer spike measurement and UI mock | Safety compliance. Identify the not met item and determine the connection range. |
+| 2 | Complete the trading by yourself | Single user testnet app | Complete from deposit to withdrawal on the screen |
+| 3 | Can be separated and restored even for multiple people | Multiple user testnet and load test | Verify fund separation, recovery of obstacles, and performance |
+| 4 | Match the actual conditions and operation | Confidential basis evidence, rehearsal for withdrawal, transfer procedure | No unfulfilled operational conditions, or explicitly transferred to Phase 5 audit |
+| 5 | It will be released for limited time after audit | Audit-approved release candidates and operational records | Full-game gate pass and separate execution approval |
 
-基盤開発とUIモックは並行できる。ただしUIが完成しても、安全性やプライバシーが未達なら本番へ進まない。
+Foundation development and UI mock can be done in parallel. However, even if the UI is completed, if the safety and privacy are not met, we will not proceed to the production stage.
 
-## 4. Phase 0：実装契約・画面仕様
+## 4. Phase 0: Implementation contract and screen specifications
 
-2026-09-19：契約と画面仕様、Rust workspace雛形を用意した（**実装は未着手**）。成果物は `docs/phase-0/` に置く。以下のチェックは「契約を固定した」ことを示し、Canisterの実装・検証完了を意味しない。
+2026-09-19: Contract and screen specifications, and a Rust workspace template prepared (**implementation not yet completed**). The results will be placed in `docs/phase-0/`. The following checks indicate that the contract has been fixed, but do not mean that the Canister implementation and verification are complete.
 
-### 実装前に固定するもの
+### Contracts to define before implementation
 
-- [x] 各Canisterの責務、許可caller、署名できるactionを表にする。（`docs/phase-0/authority-matrix.md`）
-- [x] 認証・注文・資金・変更予約のAPIとエラー型を定義する。（`docs/phase-0/api-contract.md`）
-- [x] 出金予約、移動中資金、unknown、注文取消の状態遷移を固定する。（`docs/phase-0/state-machines.md`）
-- [x] 金額の整数単位、丸め、最大値、重複イベントの扱いを定義する。（`docs/phase-0/money-and-units.md`）
-- [x] ローカル・testnet・mainnetのID、鍵、endpoint、mock issuerを分離する。（`docs/phase-0/environments.md`。実値はPhase 1で確定）
-- [x] 脅威と試験を対応付ける。二重送金、認可迂回、古いcallback、悪意あるupgradeを含める。（`docs/phase-0/threat-test-matrix.md`。試験は未実行）
-- [x] プライバシー比較の入力、攻撃者に渡す情報、合格基準を固定する。（`docs/phase-0/privacy-evaluation.md`）
+- [x] Represent the responsibilities, permission callers, and actions that can be signed for each Canister. (`docs/phase-0/authority-matrix.md`).
+- [x] define the API and error types for authentication, orders, funds, and change reservation. (`docs/phase-0/api-contract.md`)
+- [x] Fix the state transition of withdrawal reservation, in transit funds, unknown, and order cancellation. (`docs/phase-0/state-machines.md`)
+- [x] Defines the integer units of money, rounding, maximum value, and handling of duplicate events. (`docs/phase-0/money-and-units.md`)
+- [x] Separate the ID, key, endpoint, and mock issuer for local testnet and mainnet. (`docs/phase-0/environments.md`. The real values are finalized in Phase 1.)
+- [x] Address threats and tests. Include duplicate transfer, authorization bypass, old callbacks, and malicious upgrades. (`docs/phase-0/threat-test-matrix.md`. Tests are not executed yet)
+- [x] Input privacy comparison, information to be passed to the attacker, and set the pass criteria. (`docs/phase-0/privacy-evaluation.md`).
 
-### UI設計
+### UI design
 
-- [x] デスクトップの取引画面、資金画面、履歴画面の構成を決める。（`docs/phase-0/ui-spec.md` 2〜4節）
-- [x] 正常時だけでなく、未接続、残高不足、送信中、結果不明、データ遅延、停止中の画面を定義する。（同5節）
-- [x] 「保管残高」「取引口座equity」「出金可能額」を別の値として扱う。（同6節）
-- [x] 機密性の説明、Canister保管、EOA紛失、停止時の回収制約の文言を作る。（同7節）
-- [x] チャートの必要機能と利用条件を確認し、採用候補を絞る。（同8節。Lightweight Chartsを継続、Advanced Chartsは未評価の残件）
+- [x] Decide the layout of the desktop trading screen, fund screen, and history screen. (`docs/phase-0/ui-spec.md` sections 2-4)
+- [x] Define not connected, balance insufficient, in transit, unknown outcome, data delay, and screen paused not only in normal conditions (see paragraph 5).
+- [x] Treat "custody balance", "trading account equity", and "withdrawable amount" as different values. (See paragraph 6)
+- [x] Explain the confidentiality, create the wording for Canistercustody, EOA loss, and the recovery restrictions during suspension. (See paragraph 7)
+- [x] Check the necessary functions of the chart and the usage conditions, and narrow down the candidates for recruitment. (Same as paragraph 8. Continue using Lightweight Charts, and the remaining unevaluated items are Advanced Charts.)
 
-### 成果物・完了条件
+### Results and completion conditions
 
-成果物はAPI契約、状態遷移、権限表、試験一覧、画面仕様。別の実装者が見ても、成功・失敗・再試行の責務を判断できることを完了条件とする。
+The output includes an API contract, state transitions, permission tables, test list, and screen specifications. It must also include a completion condition that allows another implementer to determine whether the responsibility for success, failure, or retry is theirs.
 
-運営主体、対象国、規約適合性、SNS配分の調査は並行して開始する。これらが未確定でも合成データ開発はできるが、実顧客の募集・受付を許可したことにはならない。
+The investigation of the operating entity, target country, compliance with the terms and conditions, and SNS allocation will be conducted concurrently. Although synthetic data development can be carried out even if these are undecided, it does not permit the recruitment and acceptance of actual customers.
 
-## 5. Phase 1：資金往復・署名・プライバシー検証
+## 5. Phase 1: Fund transfer, signature, privacy verification
 
-2026-09-19：実装順序1（Rustのaction構築・署名対象hash・署名検証と公式SDKとの比較試験）を完了した（`docs/phase-1/README.md`）。PocketIC基盤も成立確認済み。**他の項目は未着手**であり、下表の必須検証は1件も実行していない。
+2026-09-19: Implementation order 1 (Rust action construction, signing payloadhash, signature verification, and comparison test with the official SDK) completed (`docs/phase-1/README.md`). The PocketIC foundation has also been confirmed to be established. **Other items are not yet completed**, and no mandatory verification is being executed for the items listed below.
 
-### 実装順序
+### Implementation order
 
-1. Rustの純粋なaction構築・署名対象hash・署名検証と、公式SDKとの比較試験。
-2. EOA challenge、短命セッション、HPKE要求・応答、認証済み公開鍵取得。
-3. 整数の複式台帳、資金予約、永続outbox、nonce、fencing。
-4. モックHLを使う正常往復と障害注入、PocketICの永続化・upgrade試験。
-5. HL testnetでmaster/Agent承認、USDC預入・配分・回収・出金、最小注文と取消。
-6. control_guardの予約、SNS認可、猶予、迂回拒否のローカル検証。
-7. 公開トレースのプライバシー評価、署名・照合の遅延とコスト測定。
+1. Pure action construction in Rust, signing payloadhash, signature verification, and comparison tests with the official SDK.
+2. EOA challenge, short-lived session, HPKE request/response, authentication-verified public key acquisition.
+3. Integer double-entry ledger, fund reservation, permanent outbox, nonce, fencing.
+4. Normal bidirectional operation and injection of faults using Mock HL, and the permanentization and upgrade test of PocketIC.
+5. Master/Agent approval on HL testnet, USDC deposits, allocation, recovery, withdrawal, minimum orders and cancellation.
+6. Local verification of control_guard reservations, SNS authorization, deferrals, and bypass denials.
+7. Public trace privacy evaluation, delay in signature and reconciliation and cost measurement.
 
-### 必須の検証
+### Required verification
 
-- [ ] 入金を一度だけ計上し、未確定の送金を確定残高へ含めない。
-- [ ] 出金の本人署名、宛先、金額、期限、nonceを検証する。
-- [ ] 送金成功後の応答喪失でも、自動再送で二重払出ししない。
-- [ ] trading_coreからmaster署名や任意出金を要求できない。
-- [ ] ブラウザからHLへユーザー別取引口座の照会が出ない。
-- [ ] 署名p50/p95、受付→HL受理p50/p95、照合遅延、outcall/署名/保存コストを記録する。
-- [ ] Confidential Subnetの利用可否と未検証の信頼仮定を記録する。
+- [ ] Only add the deposit once, and do not include the undecided transfer in the final balance.
+- [ ] verify the signature of the person withdrawing, the recipient, the amount, the deadline, and the nonce.
+- [ ] Even if there is a response loss after transfer success, we will not double charge with automatic resend.
+- [ ] You cannot request master signing or arbitrary withdrawal from trading_core.
+- [ ] There is no query from the browser to HL regarding the per-user trading account.
+- [ ] signaturep50/p95, reception→HL reception p50/p95, record the delay in reconciliation, outcall/signature/storage cost.
+- [ ] Record whether Confidential Subnet is available and the unverified trust assumption.
 
-### プライバシー評価
+### Privacy evaluation
 
-Plan 16.6のA（直接入金）、B0（共通保管後に即時同額配分）、B1（配分タイミング分離等の候補）を比較する。1/5/20/100ユーザー・30日相当の合成履歴と、実際のtestnet観測を使う。
+Compare A (direct deposit), B0 (immediate equal allocation after common custody), and B1 (candidate options such as allocation timing separation) of Plan 16.6. Use a synthetic history equivalent to 1/5/20/100 users and 30 days, and actual testnet observations.
 
-20人以上の各評価群で、top-1対応付け成功率20%以下、A比80%以上減、直接一意に辿れる割合5%以下を開発上の目安とする。平均だけでなく特徴的金額、反復、損益、退出を含む条件別に報告する。この目安は数学的な匿名性保証ではない。
+For more than 20 evaluation groups, the development benchmark is a success rate of less than 20% in top-1 matching, more than 80% reduction in A ratio, and less than 5% of the proportion that can be directly identified. In addition to the average, we report conditions including characteristic amounts, repetition, profit and loss, and withdrawal separately. This benchmark is not a mathematical guarantee of anonymity.
 
-### 並行するUI作業
+### Parallel UI work
 
-合成データの取引画面を作り、チャート・板・注文フォーム・建玉一覧の情報量と操作順を確認する。モックであることを常時表示し、実口座接続や資金受付は行わない。資金経路が変わっても使える基本コンポーネントを優先する。
+Create a trading screen for synthetic data and check the information volume and operation sequence of the chart, order book, order form, and position list. Always display that it is a mock, and do not connect to real accounts or accept funds. Prioritize the basic components that can be used even if the funding path changes.
 
-### 成果物・進行判定
+### Results and progress judgment
 
-成果物は再現可能なスパイク、署名fixture、資金往復ログの保護済み証跡、計測レポート、相関評価、操作可能なUIモック。
+The results include reproducible spikes, signature fixtures, protected traces of fund transfer logs, measurement reports, correlation assessments, and manipulable UI mocks.
 
-- 安全性未達：資金接続を止め、状態機械と認可を修正する。
-- プライバシー未達：資金配分方式を再設計する。汎用UIや合成データ開発は継続できるが、privacy製品としての合格にはしない。
-- 機密基盤未確保：通常環境で合成データ・testnet検証だけ継続する。
-- 受付→HL受理p95が5秒超：一般利用向けUXは未達。機密性を弱めず、testnetで指値主体の検証と改善を行う。
+- Safety not met: Stop the fund connection and fix the state machine and authorization.
+- Privacy not met: redesign the funding allocation method. General UI and synthetic data development can continue, but it will not meet the requirements for a privacy product.
+- Confidential foundation not secured: Continue only with synthetic data and testnet verification in normal environments.
+- Acceptance→HL acceptance p95 exceeds 5 seconds: UX for general use is not met. Do not weaken confidentiality, and perform verification and improvement of the order entity on testnet.
 
-最終的な資金経路が未決のまま、その方式専用のUI・本番実装へ大きく投資しない。
+Without the final funding pathway being decided, we will not invest heavily in UI and actual implementation dedicated to that method.
 
-## 6. Phase 2：単一ユーザーtestnet MVP
+## 6. Phase 2: Single user testnet MVP
 
-### 実装対象
+### Target for implementation
 
-- [ ] MetaMask接続、署名ログイン、期限切れ・再認証・ログアウト。
-- [ ] 専用HL口座の生成、Agent承認・期限表示。
-- [ ] USDC預入の案内、確定状況、配分、回収、本人宛出金。
-- [ ] BTC/ETHの市況、ローソク足、板、公開約定。
-- [ ] Market/Limit注文、数量・価格・レバレッジ・スリッページ入力。
-- [ ] 注文一覧、建玉、PnL、証拠金、清算価格、SL/TP。
-- [ ] Cancel、Cancel All、部分・全決済。危険な一括操作は確認を挟む。
-- [ ] 資金履歴と注文履歴、データ更新時刻、通信・サービス状態。
-- [ ] UI停止時に利用できる最小の認証・取消・出金クライアント。
+- [ ] MetaMask connection, signature login, expired/reauthentication/logout.
+- [ ] Generation of dedicated HL accounts, Agent approval and expiration date display.
+- [ ] USDC deposit information, confirmation status, allocation, recovery, withdrawal to the person in charge.
+- [ ] BTC/ETH market status, candlestick chart, board, public fill.
+- [ ] Market/Limit orders, enter quantity, price, leverage, and slippage.
+- [ ] Order list, positions, PNL, margin, settlement price, SL/TP.
+- [ ] Cancel, Cancel All, partial/full payment. Dangerous bulk operations are confirmed with a pause.
+- [ ] Fund history and order history, data update time, communication and service status.
+- [ ] The minimum authentication, cancellation, and withdrawal client available when the UI is stopped.
 
-### 代表的な受け入れシナリオ
+### Representative acceptance scenarios
 
-1. ログインし、リスク説明を確認する。
-2. 本人HL口座からtest USDCを預け、確定した残高を取引口座へ配分する。
-3. 指値注文を置き、取消を確認する。
-4. ポジションを持ち、HL標準SL/TPを設定する。
-5. 部分決済、全決済を行い、資金を回収する。
-6. 出金内容をEOAで署名し、本人HL口座への着金を確認する。
+1. Log in and review the risk explanation.
+2. Deposit test USDC from the personal HL account and allocate the confirmed balance to the trading account.
+3. Place a market order and check the cancellation.
+4. Hold a position and set HL standard SL/TP.
+5. Make partial payment, full payment and recover the funds.
+6. Sign the withdrawal details in EOA and confirm the receipt of funds into the HL account of the person.
 
-### UI・障害試験
+### UI and failure testing
 
-- ブラウザ再読込、タブを閉じる、セッション失効、ネット切断から復帰する。
-- 部分約定、取消中の約定、HL拒否、送信結果不明を正しく表示する。
-- 送信ボタン連打・受付要求再送でも二重注文・二重出金しない。
-- 10秒超古い口座状態では新規リスク増加を停止し、理由と観測時刻を表示する。
-- Playwrightで代表フローと失敗フローを検証する。資金安全性は画面試験だけでなくDB・外部状態も照合する。
+- Reload the browser, close tabs, log out of session, reconnect to the internet.
+- Display partial fill, cancellation in progress fill, HL rejection, and send unknown outcome correctly.
+- Double orders or duplicate withdrawals will not occur even if you repeatedly press the send button or request reception resend.
+- In account states older than 10 seconds, stop new risk increases and display the reason and observation time.
+- Verify representative flow and failure flow in Playwright. Fund safety is reconciled not only with screen tests but also with DB and external states.
 
-完了条件は、上記の往復操作が手動DB修正なしで通り、再起動後も資金・注文状態を回復できること。単一ユーザーの成功を匿名性達成の証拠にはしない。
+The completion condition is that the above two-way operation passes without manual DB correction, and that the funds and order status can be restored after restarting. The success of a single user does not serve as proof of achieving anonymity.
 
-## 7. Phase 3：複数ユーザー・負荷・復旧
+## 7. Phase 3: Multiple users, load, recovery
 
-### 実装対象
+### Target for implementation
 
-- [ ] ユーザー別の資金・口座・Agent・セッションの分離。
-- [ ] 並行注文、並行出金、回収中の注文の調整。
-- [ ] 共有REST予算、ユーザー別上限、バックオフ、取消・照合の優先処理。
-- [ ] Agent世代更新、期限切れ、古いcallbackの拒否。
-- [ ] DB migration、upgrade、古いbackup復元時の送信停止・照合。
-- [ ] cycles通知・新規受付停止・退出用予算の確保。
-- [ ] 本番用とは分離したeligibility検証、監査ログ、保持・削除ジョブ。
+- [ ] Separation of funds, accounts, agents, and sessions per user.
+- [ ] Coordination of simultaneous orders, simultaneous withdrawals, and orders in recovery.
+- [ ] Shared REST budget, user-specific limits, back-off, priority processing for cancellation and reconciliation.
+- [ ] agent generation update, expired, refusal of old callback.
+- [ ] Stop transmission and reconciliation during DB migration, upgrade, and restoration of old backups.
+- [ ] Notification of cycles, suspension of new applications, securing budget for withdrawal.
+- [ ] Eligibility verification, audit logs, and retention/deletion jobs separated from production use.
 
-### UIの仕上げ
+### UI finishing
 
-- 複数タブで公開市況接続を共有する。
-- 高頻度の市況更新でも入力・スクロール・取消ボタンが固まらないようにする。
-- 数値の桁揃え、精度、色、フォーカス、エラー文を統一する。
-- ノートPCの狭い画面とモバイルで、残高確認・取消・決済・出金を操作できるようにする。
-- モバイルで全パネルを同時表示せず、切替表示にする。
+- Share public market data connection across multiple tabs.
+- Even with high-frequency market updates, make sure that the input, scroll, and cancellation buttons do not freeze.
+- Uniformize the decimal places, precision, color, focus, and error messages for numbers.
+- Allows you to check balance, cancel, pay, and withdraw from your notebook PC with a narrow screen and on your mobile device.
+- Do not display all panels at the same time on mobile, instead switch display.
 
-### 完了条件
+### Completion conditions
 
-他ユーザーの残高・注文を参照・操作できないこと、負荷下でも重複実行しないこと、unknownを無根拠に解消しないことを必須とする。
+It is mandatory that you cannot refer to and operate other users' balance and orders, do not repeat execution even under load, and do not resolve unknown without reason.
 
-同時利用人数はPhase 1の実測から設定する。合成20人・100人の試験を行う場合も、それを保証人数と呼ばず、API予算・遅延・コストとともに限界を記録する。ブラウザを閉じても照合を継続する。
+The concurrent usage is set based on Phase 1 measurements. Even if a synthetic 20-person or 100-person test is conducted, do not call it the guaranteed number of users; instead, record the limit along with the API budget, delay, and cost. Continue reconciliation even when closing the browser.
 
-複数ユーザーで相関試験を再実施する。資金分離、機密性、性能を別々に合否判定し、1つの成功で他を代用しない。
+Re-conduct correlation tests for multiple users. Separate the evaluation of funding separation, confidentiality, and performance, and do not substitute one success for another.
 
-## 8. Phase 4：本番基盤・運用・退出
+## 8. Phase 4: Actual base, operation, exit
 
-### 必須作業
+### Mandatory work
 
-- [ ] Confidential Subnetのattestation、outcall、state sync、upgrade、recoveryの保護範囲を確認する。
-- [ ] 観測できないTEE異常を検知可能と仮定せず、確認できた信号に基づく停止条件を定める。
-- [ ] guardのSNS連携、7日猶予、policy経由を含む迂回防止を本番相当環境で試験する。
-- [ ] UI・Canister・HL・SNSのそれぞれの停止を想定し、取消・回収・出金を演習する。
-- [ ] guardを変更不能にする場合の復旧制約、cycles補充、依存ID固定を監査用に整理する。
-- [ ] 運営主体、対象地域、規約、必要な本人確認、保存義務、料金を確定する。
-- [ ] SNS配分・議決権集中・ローンチ・権限移管の手順を作る。
-- [ ] 再現可能ビルド、WASM hash、controller構成、依存ライブラリ条件を確認する。
+- [ ] Check the scope of protection for Confidential Subnet attestation, outcall, state sync, upgrade, and recovery.
+- [ ] Do not assume that TEE abnormalities cannot be observed, but set the stop conditions based on the signals that can be confirmed.
+- [ ] We will test the avoidance of bypasses including 7-day delay and policy through guard's SNS connection in a live environment.
+- [ ] We simulate cancellation, recovery, and withdrawal, taking into account the respective stops of UI, Canister, HL, and SNS.
+- [ ] Organize the recovery restrictions, cycles replenishment, and dependency ID fixation for auditing when guard cannot be changed.
+- [ ] Determine the operator, target area, terms and conditions, required identity verification, storage obligation, and fees.
+- [ ] Create the procedure for SNS allocation, centralized voting rights, launch, and power transfer.
+- [ ] Check reproducible build, WASM hash, controller configuration, and dependency library conditions.
 
-### UIに追加するもの
+### Things to add to UI
 
-変更提案と実行可能時刻、資金回収手順、障害状態、サポート導線を表示する。「7日間あれば必ず退出できる」「DAOでも資金を動かせない」とは表現しない。
+Display change proposals and executable times, fund recovery procedures, failure states, and support pathways. Do not express "You can definitely exit if you have 7 days" or "You can't move funds even in a DAO."
 
-完了成果物は、基盤の検証証跡、運用runbook、退出演習記録、リリース候補、監査資料。本番への不可逆なcontroller除去やSNSローンチは、この文書の作成だけでは実行しない。
+The completed results include proof of base verification, operational runbook, performance rehearsal records, release candidates, and audit materials. The irreversible controller removal and SNS launch for the live event cannot be executed solely by creating this document.
 
-## 9. Phase 5：独立監査・限定mainnet
+## 9. Phase 5: independent audit and limited mainnet
 
-- [ ] 資金台帳、master/Agent権限、署名、認証、暗号化、upgrade、guard、復旧を独立監査する。
-- [ ] 最終資金経路の相関耐性を独立レビューし、本番の低利用条件でも提供可能か判定する。
-- [ ] 重大問題を修正し、回帰試験と再レビューを完了する。
-- [ ] 本番の総預かり上限・ユーザー上限・取引上限・停止条件・担当者を確定する。
-- [ ] 本番の料金、規約、プライバシー説明、公開する保護範囲を確認する。
-- [ ] 別途承認を得て、権限移管・本番設定・限定受付を実施する。
+- [ ] Fund ledger, master/Agent permissions, signature, authentication, encryption, upgrade, guard, recovery are audited independently.
+- [ ] Independently review the correlation resistance of the final funding route and determine whether it can be provided even under actual low utilization conditions.
+- [ ] Correct major problems and complete the regression test and re-review.
+- [ ] Determine the maximum total deposit limit, user limit, trading limit, suspension conditions, and the person in charge for the actual operation.
+- [ ] Check the actual fees, terms and conditions, privacy explanation, and the scope of protection to be disclosed.
+- [ ] After obtaining separate approval, we will transfer permissions, set up the live setting, and conduct limited reception.
 
-招待制であることや少額であることは、監査・機密性・法務の代わりにならない。少人数で機密性の成立条件を満たせない場合は、新規預入を開始せずtestnetに留まる。合成ユーザーを匿名性の人数として数えない。
+The fact that it is an invitation-only system and that the amount is small does not replace auditing, confidentiality, or legal compliance. If a small number of participants cannot meet the conditions for confidentiality, they will not start new deposits and will remain on the testnet. Synthetic users will not be counted as anonymous participants.
 
-既存利用者の退出は保護する。匿名性条件が崩れたことを理由に、出金を無期限に保留しない。
+Exit of existing users is protected. Withdrawal is not indefinitely withheld because of the breakdown of the anonymity conditions.
 
-## 10. UI方針：HLに近い品質、機能は限定
+## 10. UI policy: Quality and functions are limited to those close to HL
 
-### 10.1 デスクトップの基本構成
+### 10.1 Basic desktop configuration
 
 ```text
-┌ 銘柄・価格・接続状態・資金・アカウント ────────────┐
+┌ Stock/Price/Connection Status/Funds/Account ────────────┐
 │                                            │
-│        チャート         │ 板・公開約定 │ 注文入力 │
+│        Chart         │ Board/Public fill │ Order input │
 │                         │             │          │
 ├────────────────────────────────────────────┤
-│ 建玉 / 未約定注文 / 約定履歴 / 資金履歴             │
+│ positions / unfilled orders / fill history / fund history             │
 ├────────────────────────────────────────────┤
-│ データ更新時刻・サービス状態・機密性の説明           │
+│ Data update time, service status, and explanation of confidentiality │
 └────────────────────────────────────────────┘
 ```
 
-これは情報配置の方針であり、HLのブランドやアセットを複製する指示ではない。チャートと注文入力を行き来しやすくし、建玉からSL/TP・取消・決済へ直接進めるようにする。
+This is an information configuration policy and not a directive to replicate HL's brand or assets. It aims to make it easy to move between charts and order entry, and to move directly from positions to SL/TP, cancellation, and settlement.
 
-### 10.2 UIの優先順位
+### 10.2 UI priority
 
-| 初期から必要 | 後から追加 | 当面対象外 |
+| Necessary from the beginning | Add later | Not applicable for the time being |
 |---|---|---|
-| ローソク足、時間足、ズーム、クロスヘア | 需要のあるインジケーター・描画 | 分析ツールの網羅的再現 |
-| 板、公開約定、Market/Limit入力 | チャート上の注文・SL/TP操作 | 高度な自動戦略UI |
-| 建玉、PnL、証拠金、清算価格、SL/TP | レイアウト保存、追加ショートカット | 自由な複数チャート端末 |
-| 資金区分、預入、出金、履歴 | 入金経路追加 | 独自ブリッジ |
-| pending/unknown、更新時刻、再接続 | 通知・詳細な分析 | ランキング・紹介施策 |
+| Candle feet, time feet, zoom, crosshair | In-demand indicators and drawings | Comprehensive reproduction of analysis tools |
+| Board, public fill, Market/Limit input | Order and SL/TP operation on the chart | Advanced automatic strategy UI |
+| positions, PNL, margin, clearing price, SL/TP | Save layout, add shortcuts | Free multiple chart terminals |
+| Fund allocation, deposits, withdrawals, history | Add deposit path | Unique bridge |
+| pending/unknown, update time, reconnection | Notification and detailed analysis | Ranking and introduction measures |
 
-「削るのは機能数で、基本操作の品質ではない」を判断基準にする。
+Use the criterion of "cutting is about function numbers, not the quality of basic operation."
 
-### 10.3 注文状態の見せ方
+### 10.3 How to display order status
 
-- 入力直後はローカルの「受付確認中」。Canister受付を確認して初めて「受付済み」にする。
-- 「送信準備中」「送信済み・確認中」「HL受理」「部分約定」「約定」「取消確認中」「取消済み」「拒否」「結果不明」を区別する。
-- タイムアウトを失敗や取消済みと表示しない。結果不明時に再発注を促さない。
-- データの古さは表示し、操作を制限するときは理由と回復条件を伝える。
-- Cancel Allで保護注文も取り消す場合は確認画面で明示する。注文取消と建玉決済を同じ操作にしない。
+- Immediately after entering, the local "Reception Confirmation in Progress" is displayed. Only after confirming the Canister reception will it be marked as "Received".
+- Distinguish between "Sending ready", "Sent/Confirmed", "HL received", "Partial fill", "fill", "cancellation confirmation", "cancellation completed", "rejected", "unknown outcome".
+- Do not display timeouts as failures or cancelled. Do not encourage re-submissions when unknown outcome.
+- Display the age of the data and provide the reason and recovery conditions when restricting operations.
+- If you cancel protected orders with Cancel All, you must confirm it on the confirmation screen. Do not treat order cancellation and position settlement as the same operation.
 
-### 10.4 資金とプライバシーの見せ方
+### 10.4 How to show funds and privacy
 
-共通保管口座にある未配分残高、HL取引口座のequity、移動中の額、確定した出金可能額を別表示する。合計値を表示する場合は二重計上せず、未実現PnLを含むか明示する。
+Separate the unallocated balance in the shared reserve account, the equity in the HL trading account, the amount in transit, and the confirmed withdrawable amount. If you want to display the total value, do not double count, and include or indicate the unrealized PnL.
 
-「Private」のバッジだけで機密性を説明しない。HL上の口座情報は公開であること、入出金の額・時刻から関連を推測され得ること、Canisterと変更権限への信頼が残ることを説明する。測定結果のない匿名性スコアは表示しない。
+Confidentiality is not explained by the "Private" badge alone. It explains that account information on HL is publicly available, that the amount and time of deposits and withdrawals can be inferred from them, and that trust remains in Canister and its change permissions. Anonymous scores without measurement results are not displayed.
 
-### 10.5 チャート採用方針
+### 10.5 Chart selection policy
 
-既存計画のLightweight Chartsを初期候補として維持する。高度な描画やインジケーターが初期利用に必須なら、Phase 0でAdvanced Chartsの利用条件と統合費用を確認し、実装前に選び直す。
+Maintain the Lightweight Charts of the existing plan as the initial candidate. If advanced drawing or indicators are required for initial use, check the usage conditions and integration cost of Advanced Charts in Phase 0 and re-choose them before implementation.
 
-既存Implementation.mdにある「Advanced Chartsは商用クローズドでは使えない」という断定は、採用判断の根拠にしない。企業向け公開サービスとソースコード非公開は別の条件であり、公式提供条件・契約の確認が必要である。これはAdvanced Charts採用の確約ではない。
+The assertion in the existing Implementation.md that "Advanced Charts cannot be used in commercial closed environments" does not serve as a basis for hiring decisions. Public services for enterprises and source code confidentiality are separate conditions, and official provision terms and contracts must be confirmed. This does not guarantee the adoption of Advanced Charts.
 
-参照：[TradingView公式のライブラリ比較・提供条件](https://www.tradingview.com/free-charting-libraries/)。ライブラリ名だけでHLのチャート機能がすべて付くとは仮定せず、必要機能ごとに確認する。
+Reference: [TradingView official library comparison and terms of provision](https://www.tradingview.com/free-charting-libraries/). Do not assume that all HL chart functions are included just by the name of the library, and check each necessary function separately.
 
-### 10.6 UI品質の受け入れ基準
+### 10.6 Acceptance criteria for UI quality
 
-- Phase 0で代表端末・ブラウザを固定し、その環境で計測する。
-- ネットワーク完了を待たず、送信操作に対するローカル表示を目標100ms以内に更新する。これはHL受理時間ではない。
-- 市況更新中も注文入力、スクロール、取消が操作できる。
-- キーボードで主要操作ができ、色だけで損益・エラーを伝えない。
-- 長い価格・数量、空データ、部分約定、狭い画面でも操作が隠れない。
-- 再接続・更新順序の逆転で、古い残高や注文を最新として上書きしない。
-- Playwrightによる機能試験、主要画面の視覚確認、実機の手動操作を併用する。
+- Fix the representative terminal and browser in Phase 0 and measure in that environment.
+- Do not wait for network completion and update local display for transmission operation within 100ms as a target. This is not the HL acceptance time.
+- Even while the market is updating, you can also enter orders, scroll, and cancel.
+- Main operations can be performed with the keyboard, and it does not convey profit and loss or errors only by color.
+- Long price and quantity, empty data, partial fill, even on a narrow screen, the operation is not hidden.
+- In reverse order of reconnection and updating, the old balance and orders are not overwritten as the latest.
+- Combine functional testing by Playwright, visual verification of the main screen, and manual operation in the real-world.
 
-## 11. タスクと完了報告の運用
+## 11. Operation of task and completion report
 
-各タスクは次の項目を持つ。Phase全体を一括で「完成」にせず、証拠を残す。
+Each task has the following items: Do not "complete" the entire Phase in one go, but leave evidence.
 
 ```text
 ID：P2-ORDER-01
-目的：指値注文の受付からHL受理まで表示する
-依存：認証、注文API、照合、本人データ取得
-実装対象：API / Canister / UI
-対象外：チャートからの発注
-受け入れ条件：正常・拒否・unknown・再読込で状態が正しい
-検証：単体 / PocketIC / testnet / Playwright
-証拠：テスト結果・対象revision・必要な保護済み記録
-残件：未検証条件と進行への影響
+Purpose: Display from receipt of limit order to HL receipt
+Dependencies: authentication, order API, reconciliation, identity data retrieval
+Target implementation: API / Canister / UI
+Not applicable: Orders from the chart
+Acceptance conditions: Normal/rejected/unknown/re-reading are all correct states.
+Verification: Single / PocketIC / testnet / Playwright
+Evidence: Test results, revision target, required protected records
+Remaining items: impact of unverified conditions and progress
 ```
 
-資金・署名・認証・guardに関わる変更は、正常系だけで完了にしない。UIのmock成功を実資金フローの成功と数えない。各Phaseで安全性・機密性・性能・UI・運用の判定を分ける。
+Changes related to funds, signature, authentication, and guard cannot be completed by just successful path. The success of UI mock is not counted as the success of the real funds flow. Each Phase is divided into safety, confidentiality, performance, UI, and operational judgment.
 
-## 12. 直近の着手順と見積り
+## 12. Next steps and estimates
 
-最初の作業単位は次の順序とする。
+The first work units should be in the following order.
 
-1. Phase 0のAPI・資金状態・画面仕様を短いレビュー可能な単位にする。
-2. Rust workspaceと固定依存、ローカル試験環境を用意する。
-3. 署名fixture、整数台帳、資金要求の冪等性を実装する。
-4. モックHLで正常往復・応答喪失・二重実行拒否を通す。
-5. 並行して合成データの取引画面を作り、操作性を確認する。
-6. testnet往復と相関評価を行い、採用経路・性能・費用を判断する。
+1. Make the API, funding status, and screen specifications of Phase 0 into short reviewable units.
+2. Set up a Rust workspace and fixed dependencies, and a local test environment.
+3. Implement the idempotency of signaturefixture, integer ledger, and fund request.
+4. Allows normal bidirectional communication, loss of response, and double execution refusal in Mock HL.
+5. Create a trading screen for synthetic data simultaneously and check the operability.
+6. Perform testnet bidirectional and correlation evaluation to determine the adoption pathway, performance, and cost.
 
-旧Agent-only案の工数を流用しない。Phase 1終了時に、基盤・UI・外部依存・監査待ちを分けて再見積りする。UIの完成を理由に未解決の資金・機密性条件を短縮しない。
+Do not reuse the labor hours of the old Agent-only proposal. At the end of Phase 1, re-estimate by dividing the work into base, UI, external dependencies, and audit waiting. Do not shorten unresolved funding or confidentiality conditions based on the completion of the UI.
 
-主配信はCloudflare Workers＋Static Assetsとする。Next.js/Preactは採用しない。Oxlint＋型対応、Oxfmt、tsc、Vitest、Playwrightを採用し、資金・署名・注文状態はICPに残す。PlanとImplementationも今回のADRに整合させる。本番操作は実施しない。
+The main deployment will be with Cloudflare Workers + Static Assets. Next.js/Preact will not be used. Oxlint + type-compatible, Oxfmt, tsc, Vitest, and Playwright will be used, and the funding, signature, and order status will be retained in ICP. The Plan and Implementation will also be aligned with this ADR. No live operations will be carried out.

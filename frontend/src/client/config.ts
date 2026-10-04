@@ -23,9 +23,7 @@ type Env = Record<string, string | boolean | undefined>
 function required(env: Env, name: string): string {
   const value = env[name]
   if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(
-      `${name} が設定されていません（frontend/.env.local、例は frontend/.env.example）`,
-    )
+    throw new Error(`${name} is not configured (see frontend/.env.local and frontend/.env.example)`)
   }
   return value
 }
@@ -34,7 +32,7 @@ function required(env: Env, name: string): string {
 export function resolveConfig(env: Env = import.meta.env as unknown as Env): ClientConfig {
   const stage = env.VITE_APP_STAGE
   if (stage !== 'local' && stage !== 'testnet')
-    throw new Error('VITE_APP_STAGE は local または testnet が必要です')
+    throw new Error('VITE_APP_STAGE must be local or testnet')
   const host = required(env, 'VITE_IC_HOST')
   const mockHl = stage === 'local' ? required(env, 'VITE_MOCK_HL_URL') : ''
   const marketWs = required(env, 'VITE_MARKET_WS_URL')
@@ -46,14 +44,14 @@ export function resolveConfig(env: Env = import.meta.env as unknown as Env): Cli
     ]) {
       const hostname = new URL(value).hostname
       if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) {
-        throw new Error(`${name} はloopbackのみ指定できます`)
+        throw new Error(`${name} must use a loopback address`)
       }
     }
   } else if (new URL(host).protocol !== 'https:' || new URL(marketWs).protocol !== 'wss:') {
-    throw new Error('testnet では HTTPS と WSS が必要です')
+    throw new Error('Testnet requires HTTPS and WSS')
   }
   if (!['ws:', 'wss:'].includes(new URL(marketWs).protocol)) {
-    throw new Error('VITE_MARKET_WS_URL はWebSocket URLである必要があります')
+    throw new Error('VITE_MARKET_WS_URL must be a WebSocket URL')
   }
   return {
     stage,

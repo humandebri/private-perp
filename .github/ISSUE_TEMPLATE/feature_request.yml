@@ -1,0 +1,22 @@
+name: Feature request
+description: Propose an improvement or discuss a design change.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Explain the user need and current limitation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the result and any alternatives considered.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Security and compatibility considerations
+      description: Include affected permissions, privacy assumptions, API compatibility, and migrations where relevant.

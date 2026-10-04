@@ -1,30 +1,31 @@
-# ADR-0002：口座とmaster/Agent権限の分離
+# ADR-0002: Account and master/agent authority separation
 
-- 日付：2026-09-18
-- 設計状態：accepted
-- 実証状態：未実装・未実証。UIデモは資金・暗号化・ガバナンスの証明ではない
+- Date: 2026-09-18
+- Design status: accepted
+- Evidence status: Not implemented or demonstrated. A UI demo is not evidence of fund safety, encryption, or governance.
 
-## 背景
+## Context
 
-HL標準の証拠金・清算を使い、ユーザー間の損失共有を避ける必要がある。
+Use standard HL margin and liquidation while avoiding loss sharing between users.
 
-## 比較した案
+## Options considered
 
-ユーザーがmasterを持つ方式、共通masterのsub-account、ユーザー別独立masterをCanisterが管理する方式を比較した。
+User-held master keys, subaccounts under a shared master, and independent per-user masters managed by canisters.
 
-## 決定
+## Decision
 
-取引しない共通保管口座と、ユーザー別独立HL取引口座を使う。funds_vaultがmaster署名、trading_coreが口座別・世代別Agent署名を担当する。EOAは認証と出金意図を署名し、master秘密鍵は受け取らない。初期払出し先は認証EOAのHL口座に限定する。
+Use a nontrading shared reserve and independent per-user HL trading accounts. funds_vault handles master signatures; trading_core handles per-account, per-generation agent signatures. The EOA signs authentication and withdrawal intent and does not receive the master private key. Initial payouts are restricted to the authenticated EOA’s HL account.
 
-## 欠点・残存リスク
+## Drawbacks and residual risks
 
-ユーザー単独の直接出金・Agent解除はできない。Canister分離だけでは同じ変更権限者による侵害を防げない。共通保管資産と取引口座equityの二重計上を防ぐ必要がある。
+Users cannot independently withdraw directly or revoke agents. Canister separation alone cannot prevent compromise by the same upgrade authority. Shared reserve assets and trading-account equity must not be double-counted.
 
-## 再検討条件
+## Reconsideration criteria
 
-HLの口座・Agent・送金仕様変更、鍵の移行、単独回収要件が発生した場合。
+Reconsider when HL account, agent, or transfer specifications change, keys migrate, or independent recovery becomes a requirement.
 
-## 検証の正
+## Source of verification status
 
-実行結果・未実装範囲はfrontend/README.mdとdocs/implementation-status.mdで追跡する。既存のPlan.md 16章の本番ゲートを省略しない。
-
+Track execution results and unimplemented scope in frontend/README.md and
+docs/implementation-status.md. Do not bypass the production gates in Plan.md,
+section 16.

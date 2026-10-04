@@ -306,6 +306,15 @@ export const idlFactory = ({ IDL }) => {
       amount_micros: IDL.Nat64,
       event_id: IDL.Vec(IDL.Nat8),
     }),
+    DepositCreditWithFee: IDL.Record({
+      fee_micros: IDL.Nat64,
+      observed_at_ms: IDL.Nat64,
+      network: IDL.Text,
+      sender: IDL.Opt(IDL.Vec(IDL.Nat8)),
+      amount_micros: IDL.Nat64,
+      address: IDL.Vec(IDL.Nat8),
+      tx_hash: IDL.Vec(IDL.Nat8),
+    }),
     Baseline: IDL.Record({ state_digest: IDL.Vec(IDL.Nat8) }),
     LedgerPosting: IDL.Record({
       account_id: IDL.Vec(IDL.Nat8),
@@ -338,6 +347,7 @@ export const idlFactory = ({ IDL }) => {
       accepted: IDL.Bool,
     }),
     DepositCredit: IDL.Record({
+      fee_micros: IDL.Opt(IDL.Nat64),
       observed_at_ms: IDL.Nat64,
       network: IDL.Text,
       sender: IDL.Opt(IDL.Vec(IDL.Nat8)),
@@ -350,6 +360,10 @@ export const idlFactory = ({ IDL }) => {
     logical_id: IDL.Vec(IDL.Nat8),
     version: IDL.Nat16,
     payload: journal_RecoveryPayload,
+  })
+  const journal_Result_1 = IDL.Variant({
+    Ok: IDL.Bool,
+    Err: journal_ErrorCode,
   })
   const vault_SessionHandle = IDL.Record({
     session_id: IDL.Vec(IDL.Nat8),
@@ -672,6 +686,7 @@ export const idlFactory = ({ IDL }) => {
   })
   const vault_FundActionKind = IDL.Variant({
     AgentRevocation: IDL.Null,
+    SpotDeposit: IDL.Null,
     Recovery: IDL.Null,
     Withdrawal: IDL.Null,
     AgentApproval: IDL.Null,
@@ -794,7 +809,7 @@ export const idlFactory = ({ IDL }) => {
     intent: journal_SendIntent,
     sequence: IDL.Nat64,
   })
-  const journal_Result_1 = IDL.Variant({
+  const journal_Result_2 = IDL.Variant({
     Ok: IDL.Opt(journal_JournalRecord),
     Err: journal_ErrorCode,
   })
@@ -866,7 +881,7 @@ export const idlFactory = ({ IDL }) => {
     Ok: IDL.Nat32,
     Err: vault_ErrorCode,
   })
-  const journal_Result_2 = IDL.Variant({
+  const journal_Result_3 = IDL.Variant({
     Ok: IDL.Vec(journal_JournalRecord),
     Err: journal_ErrorCode,
   })
@@ -874,13 +889,14 @@ export const idlFactory = ({ IDL }) => {
     hash: IDL.Vec(IDL.Nat8),
     event: journal_RecoveryEvent,
     previous_hash: IDL.Vec(IDL.Nat8),
+    encoded_payload: IDL.Opt(IDL.Vec(IDL.Nat8)),
     sequence: IDL.Nat64,
   })
-  const journal_Result_3 = IDL.Variant({
+  const journal_Result_4 = IDL.Variant({
     Ok: IDL.Opt(journal_RecoveryRecord),
     Err: journal_ErrorCode,
   })
-  const journal_Result_4 = IDL.Variant({
+  const journal_Result_5 = IDL.Variant({
     Ok: IDL.Vec(journal_RecoveryRecord),
     Err: journal_ErrorCode,
   })
@@ -995,12 +1011,15 @@ export const idlFactory = ({ IDL }) => {
   return IDL.Service({
     abort_recovery: IDL.Func([core_RecoveryFenceToken], [core_Result], []),
     append: IDL.Func([journal_SendIntent], [journal_Result], []),
+    append_prepared: IDL.Func([journal_SendIntent], [journal_Result], []),
     append_recovery_event: IDL.Func([journal_RecoveryEvent], [journal_Result], []),
     application_administrator: IDL.Func([], [IDL.Principal], ['query']),
+    authorize_send: IDL.Func([IDL.Text, IDL.Vec(IDL.Nat8)], [journal_Result_1], []),
     begin_recovery_migration: IDL.Func([], [core_Result], []),
     builder_fee_mock_status: IDL.Func([vault_SessionHandle], [vault_Result], ['query']),
     caller_principal: IDL.Func([], [IDL.Principal], ['query']),
     cancel_order: IDL.Func([core_HpkeRequest], [core_Result_1], []),
+    cancel_prepared_send: IDL.Func([IDL.Text, IDL.Vec(IDL.Nat8)], [journal_Result_1], []),
     check_eligibility_account_for_core: IDL.Func(
       [IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)],
       [vault_Result_1],
@@ -1055,7 +1074,7 @@ export const idlFactory = ({ IDL }) => {
     get_vault_principal: IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
     head: IDL.Func([], [journal_Result], []),
     ingest_venue_deposit: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Nat64, IDL.Text], [vault_Result_13], []),
-    intent_record: IDL.Func([IDL.Text, IDL.Vec(IDL.Nat8)], [journal_Result_1], []),
+    intent_record: IDL.Func([IDL.Text, IDL.Vec(IDL.Nat8)], [journal_Result_2], []),
     issue_challenge: IDL.Func([vault_ChallengeRequest], [vault_Result_15], []),
     journal_version: IDL.Func([], [IDL.Text], ['query']),
     list_fills: IDL.Func([core_HpkeRequest], [core_Result_1], []),
@@ -1073,9 +1092,9 @@ export const idlFactory = ({ IDL }) => {
     policy_version: IDL.Func([], [IDL.Text], ['query']),
     prepare_recovery: IDL.Func([core_PrepareRecovery], [core_Result_10], []),
     reconcile_deposits: IDL.Func([IDL.Vec(IDL.Nat8)], [vault_Result_20], []),
-    records: IDL.Func([IDL.Nat64, IDL.Nat32], [journal_Result_2], []),
-    recovery_event: IDL.Func([IDL.Vec(IDL.Nat8)], [journal_Result_3], []),
-    recovery_events: IDL.Func([IDL.Nat64, IDL.Nat32], [journal_Result_4], []),
+    records: IDL.Func([IDL.Nat64, IDL.Nat32], [journal_Result_3], []),
+    recovery_event: IDL.Func([IDL.Vec(IDL.Nat8)], [journal_Result_4], []),
+    recovery_events: IDL.Func([IDL.Nat64, IDL.Nat32], [journal_Result_5], []),
     recovery_head: IDL.Func([], [journal_Result], []),
     recovery_migration_locked: IDL.Func([], [core_Result_11], ['query']),
     refresh_market: IDL.Func([], [core_Result], []),
@@ -1086,12 +1105,19 @@ export const idlFactory = ({ IDL }) => {
       [],
     ),
     role_append: IDL.Func([IDL.Text, journal_SendIntent], [journal_Result], []),
+    role_append_prepared: IDL.Func([IDL.Text, journal_SendIntent], [journal_Result], []),
     role_append_recovery_event: IDL.Func([IDL.Text, journal_RecoveryEvent], [journal_Result], []),
+    role_authorize_send: IDL.Func([IDL.Text, IDL.Text, IDL.Vec(IDL.Nat8)], [journal_Result_1], []),
+    role_cancel_prepared_send: IDL.Func(
+      [IDL.Text, IDL.Text, IDL.Vec(IDL.Nat8)],
+      [journal_Result_1],
+      [],
+    ),
     role_head: IDL.Func([IDL.Text], [journal_Result], []),
-    role_intent_record: IDL.Func([IDL.Text, IDL.Text, IDL.Vec(IDL.Nat8)], [journal_Result_1], []),
-    role_records: IDL.Func([IDL.Text, IDL.Nat64, IDL.Nat32], [journal_Result_2], []),
-    role_recovery_event: IDL.Func([IDL.Text, IDL.Vec(IDL.Nat8)], [journal_Result_3], []),
-    role_recovery_events: IDL.Func([IDL.Text, IDL.Nat64, IDL.Nat32], [journal_Result_4], []),
+    role_intent_record: IDL.Func([IDL.Text, IDL.Text, IDL.Vec(IDL.Nat8)], [journal_Result_2], []),
+    role_records: IDL.Func([IDL.Text, IDL.Nat64, IDL.Nat32], [journal_Result_3], []),
+    role_recovery_event: IDL.Func([IDL.Text, IDL.Vec(IDL.Nat8)], [journal_Result_4], []),
+    role_recovery_events: IDL.Func([IDL.Text, IDL.Nat64, IDL.Nat32], [journal_Result_5], []),
     role_recovery_head: IDL.Func([IDL.Text], [journal_Result], []),
     session_status: IDL.Func([vault_SessionHandle], [vault_Result_22], ['query']),
     set_emergency_stop: IDL.Func([], [policy_Result], []),

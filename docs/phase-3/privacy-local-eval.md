@@ -1,36 +1,36 @@
-# Phase 3 合成公開トレースの相関評価
+# Phase 3 correlation evaluation of synthetic public traces
 
-実行日: 2026-09-24。これは**合成データのローカル評価**であり、実HL観測と負荷試験の合否ではない。評価基準は[privacy-evaluation.md](../phase-0/privacy-evaluation.md)の20人以上の群でtop-1 20%以下、A比80%以上削減、直接一意5%以下。
+Run date: 2026-09-24. This is a **local synthetic-data evaluation**, not real HL observation or load-test acceptance. Criteria from [privacy-evaluation.md](../phase-0/privacy-evaluation.md): top-1 ≤20%, ≥80% reduction versus A, and direct uniqueness ≤5% in groups of at least 20 users.
 
-## 再現方法
+## Reproduction
 
-`python3 tools/run_privacy_eval.py --output target/privacy-eval`を実行する。生成器・攻撃・採点を別プロセスで実行し、攻撃プロセスには`public.json`だけを渡す。正解表は`private/truth.json`へ分離し、Git管理対象へ置かない。調整用seedは`20260924`、未見評価用seedは`20261001`。30日・20人/100人で同一の預入額・時刻・口座対応をA/B0/B1/B1Exitへ渡す。B1ExitはB1と同じ配分に加え、退出時の回収と払い出しを異なる金額へ分割し、3〜18時間ずらす比較腕である。各ユーザーの入金済み残高の範囲内で配分し、各払い出し時点で本人の回収済み額を超えない。これらは合成シミュレーションだけである。
+Run `python3 tools/run_privacy_eval.py --output target/privacy-eval`. Generation, attack, and scoring run in separate processes; the attack receives only `public.json`. Ground truth is isolated in `private/truth.json` outside Git. Calibration seed: `20260924`; unseen evaluation seed: `20261001`. A/B0/B1/B1Exit receive the same deposits, timestamps, and account mappings for 30-day, 20/100-user scenarios. B1Exit uses B1 allocations but splits recovery and payouts on exit into different amounts delayed by 3–18 hours. Allocations remain within each user's deposited balance; each payout remains within that user's recovered amount at that point. These are synthetic simulations only.
 
-30日は入力期間を示し、末日の退出に伴う払い出しはその後へずれる場合がある。
+Thirty days describe the input period; payouts for final-day exits may occur later.
 
-攻撃は公開グラフの直接辺、預入と配分の金額・時刻、回収と出金の金額・時刻、分割された退出額の合計を使う。top-1とWilson 95%区間はユーザー単位で計算した。これは1つの攻撃実装によるスクリーニングで、他の相関手法を排除しない。
+The attack uses direct edges in the public graph, deposit/allocation amounts and timing, recovery/withdrawal amounts and timing, and summed split-exit amounts. Top-1 and Wilson 95% intervals are computed per user. This is screening with one attack implementation, not exclusion of other correlation techniques.
 
-## 結果
+## Results
 
-| 群 | 腕 | top-1 | Wilson 95% | A比削減 | 直接一意 | 判定 |
+| Group | Arm | Top-1 | Wilson 95% | Reduction vs A | Direct uniqueness | Result |
 |---|---|---:|---:|---:|---:|---|
-| 調整20人 | A | 100% | 83.9–100% | — | 100% | 対照 |
-| 調整20人 | B0 | 100% | 83.9–100% | 0% | 0% | 未達 |
-| 調整20人 | B1 | 55% | 34.2–74.2% | 45% | 0% | 未達 |
-| 調整20人 | B1Exit | 55% | 34.2–74.2% | 45% | 0% | 未達 |
-| 調整100人 | A | 100% | 96.3–100% | — | 100% | 対照 |
-| 調整100人 | B0 | 100% | 96.3–100% | 0% | 0% | 未達 |
-| 調整100人 | B1 | 51% | 41.4–60.6% | 49% | 0% | 未達 |
-| 調整100人 | B1Exit | 48% | 38.5–57.7% | 52% | 0% | 未達 |
-| 未見20人 | A | 100% | 83.9–100% | — | 100% | 対照 |
-| 未見20人 | B0 | 100% | 83.9–100% | 0% | 0% | 未達 |
-| 未見20人 | B1 | 45% | 25.8–65.8% | 55% | 0% | 未達 |
-| 未見20人 | B1Exit | 45% | 25.8–65.8% | 55% | 0% | 未達 |
-| 未見100人 | A | 100% | 96.3–100% | — | 100% | 対照 |
-| 未見100人 | B0 | 100% | 96.3–100% | 0% | 0% | 未達 |
-| 未見100人 | B1 | 49% | 39.4–58.7% | 51% | 0% | 未達 |
-| 未見100人 | B1Exit | 48% | 38.5–57.7% | 52% | 0% | 未達 |
+| Calibration, 20 users | A | 100% | 83.9–100% | — | 100% | Control |
+| Calibration, 20 users | B0 | 100% | 83.9–100% | 0% | 0% | Not met |
+| Calibration, 20 users | B1 | 55% | 34.2–74.2% | 45% | 0% | Not met |
+| Calibration, 20 users | B1Exit | 55% | 34.2–74.2% | 45% | 0% | Not met |
+| Calibration, 100 users | A | 100% | 96.3–100% | — | 100% | Control |
+| Calibration, 100 users | B0 | 100% | 96.3–100% | 0% | 0% | Not met |
+| Calibration, 100 users | B1 | 51% | 41.4–60.6% | 49% | 0% | Not met |
+| Calibration, 100 users | B1Exit | 48% | 38.5–57.7% | 52% | 0% | Not met |
+| Unseen, 20 users | A | 100% | 83.9–100% | — | 100% | Control |
+| Unseen, 20 users | B0 | 100% | 83.9–100% | 0% | 0% | Not met |
+| Unseen, 20 users | B1 | 45% | 25.8–65.8% | 55% | 0% | Not met |
+| Unseen, 20 users | B1Exit | 45% | 25.8–65.8% | 55% | 0% | Not met |
+| Unseen, 100 users | A | 100% | 96.3–100% | — | 100% | Control |
+| Unseen, 100 users | B0 | 100% | 96.3–100% | 0% | 0% | Not met |
+| Unseen, 100 users | B1 | 49% | 39.4–58.7% | 51% | 0% | Not met |
+| Unseen, 100 users | B1Exit | 48% | 38.5–57.7% | 52% | 0% | Not met |
 
-未見B1のシナリオ別top-1は、20人/100人の順に反復0%/0%、少額0%/0%、特徴的金額0%/0%、部分退出100%/100%、全退出100%/100%、損益あり100%/100%。B1Exitでも未見20人の退出3群はすべて100%、未見100人では部分退出94.1%、全退出100%、損益あり100%である。退出の単発送金を分割しても合計額と時刻窓から対応付けられた。各シナリオの人数とWilson区間は`target/privacy-eval/summary.json`に保存される。B1/B1Exitの配分・退出方法を本番へ反映しない。
+Unseen B1 top-1 by scenario, for 20/100 users respectively: repeated deposits 0%/0%, small amounts 0%/0%, distinctive amounts 0%/0%, partial exit 100%/100%, full exit 100%/100%, and profit/loss 100%/100%. For B1Exit, all three unseen 20-user exit groups remain at 100%; unseen 100-user partial exit is 94.1%, full exit 100%, and profit/loss 100%. Splitting single exit transfers still permits matching through total amounts and time windows. Scenario counts and Wilson intervals are in `target/privacy-eval/summary.json`. Do not apply B1/B1Exit allocation or exit methods to production.
 
-実HLの手数料、確定時刻、イベント粒度、残高、約定、PnLを取り込めていない。したがって実観測を加えた評価は未達であり、現在の数値を匿名性の保証に用いない。
+Real HL fees, finalization times, event granularity, balances, fills, and PnL are not incorporated. Evaluation including real observations remains incomplete, and these numbers must not be used as an anonymity guarantee.

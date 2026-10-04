@@ -199,10 +199,16 @@ pub async fn post_usd_send(
     signature: &hl_sign::Signature,
     permit: &crate::rest_budget::Permit,
 ) -> Result<(ExchangeOutcome, Vec<u8>), ErrorCode> {
+    post_signed_body(payload.body(signature)?, permit).await
+}
+
+pub(crate) async fn post_signed_body(
+    body: Vec<u8>,
+    permit: &crate::rest_budget::Permit,
+) -> Result<(ExchangeOutcome, Vec<u8>), ErrorCode> {
     if !permit.valid_now() {
         return Err(ErrorCode::PolicyUnavailable);
     }
-    let body = payload.body(signature)?;
     let exchange_url = crate::environment::resolved()?.exchange_url;
     let response = HttpRequest::new(&exchange_url)
         .with_method(HttpMethod::POST)

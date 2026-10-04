@@ -1,116 +1,116 @@
-# 金額・単位・一意性
+# Amounts, units, and uniqueness
 
-- 根拠：`Plan.md` 16.2、16.5、`Implementation.md` 4.3、4.5、4.6、5.2、14.1
-- 状態：設計契約。実装はPhase 1以降
+- Basis: `Plan.md` 16.2, 16.5; `Implementation.md` 4.3, 4.5, 4.6, 5.2, 14.1
+- Status: design contract; implementation starts in Phase 1.
 
-## 1. 原則
+## 1. Principles
 
-1. 金額は浮動小数点で保持しない。USDCは最小単位の整数で扱う。
-2. 数量・価格は正規化した十進文字列で扱い、`f64`へ変換しない。
-3. 不明な額を出金可能残高へ足さない。未確定の入金・未実現PnLを確定残高として扱わない。
-4. 丸めは1箇所（勘定へ加算する箇所）で行い、丸め結果を記録する。
-5. 一意性はDB制約で守る。アプリケーションの事前チェックだけに依存しない。
+1. Never store monetary amounts as floating point; use integer USDC base units.
+2. Quantities/prices are normalized decimal strings, never converted to `f64`.
+3. Unknown amounts do not increase withdrawable balances; pending deposits and unrealized PnL are not confirmed balances.
+4. Round once at account crediting and record the rounded result.
+5. Enforce uniqueness in DB constraints, not only application prechecks.
 
-## 2. USDCの表現
+## 2. USDC representation
 
-| 項目 | 値 |
+| Item | Value |
 |---|---|
-| 単位 | 1e-6 USDC（最小単位） |
-| 型 | `nat64`（0 〜 18,446,744,073,709.551615 USDC相当） |
-| 表示 | 小数6桁。桁区切りは表示層のみ |
-| 演算 | 加減算は整数。乗除算は商と剰余を明示的に扱う |
-| 禁止 | `f64`・`f32`・SQLiteの`REAL`列への保存、指数表記の受け付け |
+| Unit | 1e-6 USDC |
+| Type | `nat64`, equivalent to 0–18,446,744,073,709.551615 USDC |
+| Display | Six decimals; grouping only in presentation |
+| Arithmetic | Integer addition/subtraction; explicit quotient/remainder for multiplication/division |
+| Prohibited | f64/f32, SQLite REAL storage, exponent input |
 
-- 入力の受理形式: `^[0-9]{1,13}(\.[0-9]{1,6})?$`。符号・指数・先頭の`+`・空の小数部を拒否する。
-- 出力の正規化: 末尾ゼロを削除し、`.`のみになる場合は`0`とする。指数表記を使わない。
-- 1リクエストあたり・1ユーザーあたりの上限額、総預かり上限は**未確定**。実資金の受付前に確定し、`environments.md` の設定値として固定する。
+- Accepted input: `^[0-9]{1,13}(\.[0-9]{1,6})?$`. Reject signs, exponents, leading `+`, and empty fractional parts.
+- Normalize output by removing trailing zeros; use `0` if only `.` remains. No exponent notation.
+- Per-request, per-user, and total custody caps are **undecided**. Fix them before real-fund admission as `environments.md` configuration.
 
-## 3. 数量・価格
+## 3. Quantities and prices
 
-| 項目 | 規則 |
+| Item | Rule |
 |---|---|
-| 数量 | 正規化十進文字列。精度は銘柄の `szDecimals` に従い、超過は拒否（丸めない） |
-| 価格 | 正規化十進文字列。HLが受理する価格精度・有効桁の条件はPhase 1のtestnet実測で確定する |
-| 精度ソース | `meta_cache`（network/DEX・取得時刻・digest・添字を維持した実データ）。digestと件数だけでは注文を検証できない |
-| 銘柄 | 初期allowlistはBTC・ETH perpsのみ。asset indexは`universe`全件走査で解決し、廃止銘柄・未知添字を拒否する |
-| レバレッジ | 既定3倍、UI上限5倍（開発用の制限であり安全な投資倍率の推奨ではない） |
-| スリッページ | MarketはIOC指値。既定許容幅50bps（0.5%） |
-| 型 | 価格・数量は文字列で保持し、境界（action構築時）で正規化する。`f64`を使わない |
+| Quantity | Normalized decimal string respecting asset szDecimals; reject excess precision without rounding |
+| Price | Normalized decimal string; establish real HL precision/significant-digit rules through Phase 1 testnet measurements |
+| Precision source | Real meta_cache retaining network/DEX, retrieval time, digest, and indices; digest/count alone cannot validate orders |
+| Assets | Initial BTC/ETH perps allowlist; scan the full universe for indices; reject delisted/unknown assets |
+| Leverage | Default 3×, UI maximum 5×; development restriction, not an investment recommendation |
+| Slippage | Market uses IOC limits; default 50 bps (0.5%) |
+| Type | Strings normalized at action construction; no f64 |
 
-- 計算過程の途中値も整数または十進文字列で扱い、丸めは1箇所に限定する。
-- 数量・価格の変換に失敗した注文は受付段階で拒否する（`BadRequest.PrecisionExceeded`／`QuantityOutOfRange`／`PriceOutOfRange`）。
-- 署名対象のmsgpackでは、金額・数量・価格を**必ず文字列**（msgpack str）として渡す。整数は最小表現で符号化し、`|値|` がint32範囲外の整数は符号付きで最小の表現（非負は `0xcf` uint64、負は `0xd3` int64）になる（公式SDK `_l1.js` の `adjust()` と `@std/msgpack` の挙動）。2026-09-19に公式SDKのfixture（`cancel_large_oid`）で一致を確認した（`docs/phase-1/README.md` 6節）。
-- asset indexはnetworkごとに異なるため、`meta.universe`から解決する（testnetはBTC=3・ETH=4、mainnetはBTC=0・ETH=1）。
+- Intermediate calculations also use integers/decimal strings and one rounding point.
+- Reject conversion errors at admission with `BadRequest.PrecisionExceeded`, `QuantityOutOfRange`, or `PriceOutOfRange`.
+- Signed msgpack amounts/quantities/prices are **strings**. Encode integers minimally; values outside int32 use the minimal signed-compatible representation (nonnegative `0xcf` uint64, negative `0xd3` int64), matching SDK `_l1.js` adjust() and @std/msgpack. Verified with SDK `cancel_large_oid` on 2026-09-19 (`docs/phase-1/README.md` section 6).
+- Resolve network-specific indices from meta.universe: testnet BTC=3/ETH=4; mainnet BTC=0/ETH=1.
 
-## 4. 台帳の整数規則
+## 4. Integer ledger rules
 
-`Implementation.md` 14.1に基づく。
+Based on `Implementation.md` 14.1:
 
-- 複式仕訳とする。1つのjournalの借方合計と貸方合計が同額で、資産・単位が一致すること。
-- 整数overflowを拒否する。加算前後の検査をDB書き込みと同じトランザクションで行う。
-- 外部イベント・要求からの重複仕訳を一意制約で拒否する。
-- 残高は仕訳から導けるようにし、キャッシュ残高を更新する場合は仕訳と同一トランザクションで更新する。
-- 勘定を分離する: 未配分（reserve unallocated）、出金予約（reserved for withdrawal）、移動中（in transit）、ユーザー別取引口座equity、証拠金拘束。共通保管資産とユーザー別口座資産を二重計上しない。
-- 未実現PnLを確定した出金可能残高として信用しない。合計を表示する場合は二重計上せず、未実現PnLを含むか明示する。
-- 手数料は同意した規則で計上し、未確定資金を収益扱いしない。顧客資金をcycles・開発費・Treasuryへ流用しない。
-- 切捨てが発生した場合、残余をユーザーへ与信しない。残余は残差として記録し、勘定間で消滅させない。
+- Double-entry journals: equal debit/credit totals with matching assets/units.
+- Reject overflow; check arithmetic in the same DB-write transaction.
+- Reject duplicate request/event postings through unique constraints.
+- Derive balances from journals; update any cache within the same transaction.
+- Separate reserve-unallocated, withdrawal-reserved, in-transit, per-user trading equity, and margin holds. Never double-count shared and per-user account assets.
+- Unrealized PnL is not confirmed withdrawable funds. Combined displays must avoid duplicates and state whether PnL is included.
+- Account for fees under agreed rules; unsettled funds are not revenue. Do not divert customer assets to cycles/development/Treasury.
+- Truncated residuals are not user credit. Record them as residuals without disappearing between accounts.
 
-## 5. 丸め
+## 5. Rounding
 
-| 局面 | 規則 |
+| Stage | Rule |
 |---|---|
-| ユーザーへの与信（入金計上・回収確定） | 検証済みの外部イベント額を上限として切り捨て。外部額を超える与信をしない |
-| ユーザーからの要求額の検証 | 要求額が残高・精度を超える場合は拒否（切り捨てて減額しない） |
-| HL照合値の取り込み | HLが返した値をそのまま採用し、独自の換算・按分をしない |
-| 表示 | 表示桁で丸めるが、内部値は変更しない。丸め表示と内部値の差を残高に反映しない |
+| User credit: deposits/confirmed recovery | Round down, bounded by verified external amounts; never overcredit |
+| User request validation | Reject amounts above balance/precision, rather than rounding down the request |
+| HL reconciliation ingestion | Use returned values without custom conversion/apportionment |
+| Display | Round presentation only; do not alter internal balances |
 
-- 為替・他資産への換算は初期スコープ外（USDCのみ）。換算レートを暗黙に導入しない。
+- FX/other-asset conversion is outside initial USDC-only scope. No implicit exchange rates.
 
-## 6. 一意性・冪等性
+## 6. Uniqueness and idempotency
 
-`Implementation.md` 5.2、14.1に基づく。
+Based on `Implementation.md` 5.2 and 14.1:
 
-| 対象 | 規則 |
+| Item | Rule |
 |---|---|
-| 受付要求 | `UNIQUE(user_id, client_request_id)` ＋ 正規化本文のfingerprint。同一ID・同一内容は同じ結果を返し、同一ID・異なる内容は`IdempotencyConflict` |
-| action nonce | 署名者単位で `max(now_ms, last_nonce + 1)` を永続確保。1つのactionに1つ、子注文ごとには割り当てない。action生成と同一トランザクションで`last_nonce`を更新 |
-| cloid | 16バイト固定。`UNIQUE`。事前補充した安全な乱数から割り当て、枯渇時は受付を拒否する（`SigningQueueFull`／`BadRequest`） |
-| 外部イベント | 外部の安定ID・network・口座・相手先・資産・金額・時刻・種別・証拠参照を保存し、安定IDで重複を拒否する |
-| 二重ingress | DB制約により1件だけが受付を確定する。敗者は`DuplicateIgnored`で既存結果を返す |
-| Agent世代 | `UNIQUE(account_id, generation)`、`UNIQUE(agent_address)`。失効世代を再利用しない |
+| Admission | UNIQUE(user_id, client_request_id) plus normalized-body fingerprint; same ID/body returns same result, changed body yields IdempotencyConflict |
+| Action nonce | Persist signer-specific max(now_ms, last_nonce + 1), one per action rather than child order; update last_nonce atomically with action creation |
+| cloid | Unique fixed 16 bytes from a secure prefetched randomness pool; reject exhaustion with SigningQueueFull/BadRequest |
+| External event | Persist stable ID, network, account, counterparty, asset, amount, time, kind, evidence; deduplicate by stable ID |
+| Duplicate ingress | DB admits one; loser returns existing result through DuplicateIgnored |
+| Agent generation | UNIQUE(account_id, generation) and UNIQUE(agent_address); never reuse revoked generations |
 
-- cloidは照合キーであり、永久のexactly-once保証ではない。nonceの記録保持とAgentの寿命に依存するため、失効・期限切れした鍵を再承認しない。
-- 署名再試行は未送信の同一action/digestに限定する。`dispatching`以降に新nonce・新cloidで自動再注文しない。
-- `request_id`の再実行防止レコードは保持窓を明示し、古い受付要求の拒否と整合させる。
+- cloid is a reconciliation key, not perpetual exactly-once assurance; nonce retention and agent lifetime matter. Never reapprove expired/revoked keys.
+- Retry signing only for the same unsent action/digest. Never automatically reorder with a new nonce/cloid from dispatching onward.
+- Specify request-ID replay-record retention windows consistently with old-request rejection.
 
-## 7. 乱数
+## 7. Randomness
 
-- cloid・トークン・暗号学的IDはmanagement canisterの非同期`raw_rand`由来の安全な乱数で生成し、事前補充のプールから同期受付処理へ供給する。
-- **SQLiteの`random()`／`randomblob()`を使わない。** このVFSでは決定的であり、同一呼び出しで同一値になる。
-- nonceは乱数ではなく時刻と永続カウンタから割り当てる。
-- `user_id`・`account_id`は暗号学的乱数とし、EOA・Principalを公開のderivation pathやcloidへ埋め込まない。
+- Use secure async management-canister raw_rand for cloids/tokens/cryptographic IDs, supplying synchronous admission from prefetched pools.
+- **Never use SQLite random()/randomblob()**: this VFS makes them deterministic, including identical values within one call.
+- Allocate nonces from time/persistent counters rather than randomness.
+- Randomize user/account IDs cryptographically; never embed EOAs/principals in public derivation paths or cloids.
 
-## 8. 保持と削除
+## 8. Retention and deletion
 
-| 対象 | 期間 |
+| Data | Period |
 |---|---|
-| 終端照合済みの署名payload | 24時間後に削除可能 |
-| 詳細履歴（注文・約定・資金イベントの詳細） | 30日後に削除可能 |
-| `unknown`のaction・予約 | 削除しない |
-| 残高・未解放の予約 | 削除しない |
-| 現在の認証・Agent状態 | 削除しない |
-| 二重処理防止に必要な記録（request ID対応、外部イベント安定ID、nonce） | 削除しない。保持窓を明示する |
+| Terminal reconciled signed payloads | May delete after 24 hours |
+| Detailed order/fill/fund history | May delete after 30 days |
+| Unknown actions/reservations | Never delete |
+| Balances/unreleased reservations | Never delete |
+| Current auth/agent state | Never delete |
+| Deduplication records: request mappings, stable event IDs, nonces | Do not delete; state retention windows |
 
-- 注文の終端とactionの照合完了を別々に確認してから削除する。未約定・部分約定・`unknown`を掃除しない。
-- DB上の削除で過去のsnapshotやreplica保存物まで消えるとは保証しない。本番の保存年限と削除根拠は法務承認を要する。
-- 開発データは合成データのみとする。
+- Check order termination and action reconciliation separately before cleanup. Keep open, partially filled, and unknown records.
+- DB deletion does not guarantee deletion from old snapshots/replica storage. Production retention/legal grounds require legal approval.
+- Development data is synthetic only.
 
-## 9. 未確定事項
+## 9. Pending decisions
 
-| 項目 | 確定時期 |
+| Item | Timing |
 |---|---|
-| HLの価格精度・有効桁の実条件 | Phase 1（testnet実測） |
-| 1リクエスト上限・ユーザー上限・総預かり上限 | 実資金受付前 |
-| 送金手数料と最小額 | Phase 1（16.2の実測項目） |
-| 保持期間の具体値と削除ジョブ | Phase 2-1、Phase 3-7 |
-| 本番の保存年限・削除根拠 | 法務承認後（Phase 4） |
+| Real HL price precision/significant digits | Phase 1 testnet |
+| Request/user/total custody caps | Before real-fund admission |
+| Transfer fees/minimum amounts | Phase 1 section 16.2 measurements |
+| Concrete retention windows/deletion jobs | Phase 2-1, Phase 3-7 |
+| Production retention/legal grounds | After legal approval, Phase 4 |

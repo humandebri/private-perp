@@ -113,6 +113,7 @@ type vault_ErrorCode = variant {
 };
 type vault_FundActionKind = variant {
   AgentRevocation;
+  SpotDeposit;
   Recovery;
   Withdrawal;
   AgentApproval;
@@ -728,6 +729,15 @@ type journal_RecoveryPayload = variant {
     amount_micros : nat64;
     event_id : blob;
   };
+  DepositCreditWithFee : record {
+    fee_micros : nat64;
+    observed_at_ms : nat64;
+    network : text;
+    sender : opt blob;
+    amount_micros : nat64;
+    address : blob;
+    tx_hash : blob;
+  };
   Baseline : record { state_digest : blob };
   LedgerPosting : record {
     account_id : blob;
@@ -760,6 +770,7 @@ type journal_RecoveryPayload = variant {
     accepted : bool;
   };
   DepositCredit : record {
+    fee_micros : opt nat64;
     observed_at_ms : nat64;
     network : text;
     sender : opt blob;
@@ -772,14 +783,16 @@ type journal_RecoveryRecord = record {
   hash : blob;
   event : journal_RecoveryEvent;
   previous_hash : blob;
+  encoded_payload : opt blob;
   sequence : nat64;
 };
 type journal_Result = variant { Ok : journal_JournalHead; Err : journal_ErrorCode };
-type journal_Result_1 = variant { Ok : opt journal_JournalRecord; Err : journal_ErrorCode };
-type journal_Result_2 = variant { Ok : vec journal_JournalRecord; Err : journal_ErrorCode };
-type journal_Result_3 = variant { Ok : opt journal_RecoveryRecord; Err : journal_ErrorCode };
-type journal_Result_4 = variant { Ok : vec journal_RecoveryRecord; Err : journal_ErrorCode };
-type journal_Result_5 = variant { Ok; Err : journal_ErrorCode };
+type journal_Result_1 = variant { Ok : bool; Err : journal_ErrorCode };
+type journal_Result_2 = variant { Ok : opt journal_JournalRecord; Err : journal_ErrorCode };
+type journal_Result_3 = variant { Ok : vec journal_JournalRecord; Err : journal_ErrorCode };
+type journal_Result_4 = variant { Ok : opt journal_RecoveryRecord; Err : journal_ErrorCode };
+type journal_Result_5 = variant { Ok : vec journal_RecoveryRecord; Err : journal_ErrorCode };
+type journal_Result_6 = variant { Ok; Err : journal_ErrorCode };
 type journal_SendIntent = record {
   account_id : blob;
   request_id : blob;
@@ -796,7 +809,11 @@ service : (principal) -> {
 
   append : (journal_SendIntent) -> (journal_Result);
 
+  append_prepared : (journal_SendIntent) -> (journal_Result);
+
   append_recovery_event : (journal_RecoveryEvent) -> (journal_Result);
+
+  authorize_send : (text, blob) -> (journal_Result_1);
 
   begin_recovery_migration : () -> (core_Result);
 
@@ -805,6 +822,8 @@ service : (principal) -> {
   caller_principal : () -> (principal) query;
 
   cancel_order : (core_HpkeRequest) -> (core_Result_1);
+
+  cancel_prepared_send : (text, blob) -> (journal_Result_1);
 
   check_eligibility_account_for_core : (blob, blob) -> (vault_Result_1);
 
@@ -898,7 +917,7 @@ service : (principal) -> {
 
   ingest_venue_deposit : (blob, nat64, text) -> (vault_Result_13);
 
-  intent_record : (text, blob) -> (journal_Result_1);
+  intent_record : (text, blob) -> (journal_Result_2);
 
   issue_challenge : (vault_ChallengeRequest) -> (vault_Result_15);
 
@@ -926,11 +945,11 @@ service : (principal) -> {
 
   reconcile_deposits : (blob) -> (vault_Result_20);
 
-  records : (nat64, nat32) -> (journal_Result_2);
+  records : (nat64, nat32) -> (journal_Result_3);
 
-  recovery_event : (blob) -> (journal_Result_3);
+  recovery_event : (blob) -> (journal_Result_4);
 
-  recovery_events : (nat64, nat32) -> (journal_Result_4);
+  recovery_events : (nat64, nat32) -> (journal_Result_5);
 
   recovery_head : () -> (journal_Result);
 
@@ -944,17 +963,23 @@ service : (principal) -> {
 
   role_append : (text, journal_SendIntent) -> (journal_Result);
 
+  role_append_prepared : (text, journal_SendIntent) -> (journal_Result);
+
   role_append_recovery_event : (text, journal_RecoveryEvent) -> (journal_Result);
+
+  role_authorize_send : (text, text, blob) -> (journal_Result_1);
+
+  role_cancel_prepared_send : (text, text, blob) -> (journal_Result_1);
 
   role_head : (text) -> (journal_Result);
 
-  role_intent_record : (text, text, blob) -> (journal_Result_1);
+  role_intent_record : (text, text, blob) -> (journal_Result_2);
 
-  role_records : (text, nat64, nat32) -> (journal_Result_2);
+  role_records : (text, nat64, nat32) -> (journal_Result_3);
 
-  role_recovery_event : (text, blob) -> (journal_Result_3);
+  role_recovery_event : (text, blob) -> (journal_Result_4);
 
-  role_recovery_events : (text, nat64, nat32) -> (journal_Result_4);
+  role_recovery_events : (text, nat64, nat32) -> (journal_Result_5);
 
   role_recovery_head : (text) -> (journal_Result);
 

@@ -516,4 +516,9 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 27,
         sql: LEVERAGE_CACHE,
     },
+    Migration {
+        version: 28,
+        sql: "ALTER TABLE orders ADD COLUMN last_status_checked_at INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE account_observations ADD COLUMN fills_cursor INTEGER;",
+    },
 ];

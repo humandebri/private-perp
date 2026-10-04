@@ -6,7 +6,7 @@ import { expect, test } from '@playwright/test'
 import { createClients } from '../../src/client/ic'
 import { resolveConfig } from '../../src/client/config'
 import { hexToBytes } from '../../src/client/wallet'
-import { unwrap } from '../../src/client/result'
+import { CanisterError, unwrap } from '../../src/client/result'
 import { Principal } from '@icp-sdk/core/principal'
 import { vaultPrivateCodec } from '../../src/client/candid-codec'
 import { EnvelopeClient, envelopeAad, newRequestId } from '../../src/client/envelope'
@@ -33,33 +33,30 @@ test('hashed assets remain immutable', async ({ request }) => {
   expect(response.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
 })
 
-test('order ticket explains blocked actions and fits a mobile viewport', async ({ page }) => {
+test('order ticket opens from a chart-first mobile viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/trade')
-  await expect(page.getByRole('button', { name: '注文を受付' })).toBeDisabled()
-  await expect(page.locator('#order-guidance')).toContainText('MetaMaskで接続')
-  await expect(page.getByLabel('注文価格')).toHaveValue('')
-  await page.getByLabel('銘柄').selectOption('ETH')
-  await expect(page.getByLabel('注文価格')).toHaveValue('')
-  await page.getByLabel('売買').selectOption('sell')
-  await expect(page.getByText('売り価格の下限 (USDC)')).toBeVisible()
-  await page.getByLabel('種別').selectOption('limit')
-  await expect(page.getByLabel('スリッページ')).toBeDisabled()
-  const ticket = await page.locator('#order-ticket').boundingBox()
-  const chart = await page.locator('#market-chart').boundingBox()
-  expect(ticket!.y).toBeLessThan(chart!.y)
-  const tape = page.getByText('板・公開約定を見る')
-  await expect(tape).toBeVisible()
-  await expect(page.getByText('公開約定', { exact: true })).toBeHidden()
-  await tape.click()
-  await expect(page.getByText('公開約定', { exact: true })).toBeVisible()
-  const exits = page.getByRole('navigation', { name: '退出操作' })
-  await expect(exits.getByRole('button', { name: '全取消' })).toBeVisible()
-  await expect(exits.getByRole('button', { name: '全決済' })).toBeVisible()
-  await expect(exits.getByRole('link', { name: '回収・出金' })).toBeVisible()
-  await exits.getByRole('link', { name: '回収・出金' }).click()
-  await expect(page).toHaveURL(/\/funds$/)
-  await expect(page.getByRole('button', { name: 'MetaMaskで接続' })).toBeVisible()
+  await expect(page.locator('#order-ticket')).toBeHidden()
+  await expect(page.locator('#market-chart')).toBeVisible()
+  await page.getByRole('button', { name: 'Trade BTC', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Open long' })).toBeDisabled()
+  await expect(page.locator('#order-guidance')).toContainText('Connect MetaMask')
+  await page.getByRole('button', { name: 'Short', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Open short' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Limit', exact: true }).click()
+  await expect(page.getByLabel('Order price')).toHaveValue('')
+  await page.getByText('Advanced settings', { exact: true }).click()
+  await expect(page.getByLabel('Slippage')).toBeDisabled()
+  await page.getByRole('button', { name: 'Close order panel' }).click()
+  await expect(page.locator('#order-ticket')).toBeHidden()
+  await page.getByLabel('Symbol').selectOption('ETH')
+  await page.getByRole('button', { name: '15m', exact: true }).click()
+  await expect(page.getByRole('button', { name: '15m', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  await page.getByText('View order book and public trades').click()
+  await expect(page.getByText('Public trades', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
 })
 
@@ -108,27 +105,31 @@ test.describe('real local canister flow', () => {
     )
 
     await page.goto('/funds')
-    await page.getByRole('button', { name: 'MetaMaskで接続' }).click()
+    await page.getByRole('button', { name: 'Connect MetaMask' }).click()
     await expect(page.getByText(`${address.slice(0, 10)}…${address.slice(-6)}`)).toBeVisible()
-    await page.getByRole('button', { name: '署名対象を取得' }).click()
-    const claims = await page.getByRole('textbox', { name: /issuerへ渡すCandid/ }).inputValue()
+    await page.getByRole('button', { name: 'Get signing claims' }).click()
+    const claims = await page
+      .getByRole('textbox', { name: /Candid claims for the issuer/ })
+      .inputValue()
     const issuer = resolve(process.cwd(), '../target/debug/eligibility-issuer')
     const eligibilitySignature = execFileSync(issuer, [], {
       input: claims,
       encoding: 'utf8',
     }).trim()
-    await page.getByRole('textbox', { name: 'issuerが返した署名' }).fill(eligibilitySignature)
-    await page.getByRole('button', { name: '受付資格を登録' }).click()
-    await expect(page.getByText('受付資格：登録済み')).toBeVisible({ timeout: 30_000 })
-    await page.getByLabel('金額').fill('100')
-    const seedButton = page.getByRole('button', { name: 'LOCAL MOCK 保管残高に入金' })
+    await page
+      .getByRole('textbox', { name: 'Signature returned by the issuer' })
+      .fill(eligibilitySignature)
+    await page.getByRole('button', { name: 'Register eligibility' }).click()
+    await expect(page.getByText('Eligibility: Registered')).toBeVisible({ timeout: 30_000 })
+    await page.getByLabel('Amount').fill('100')
+    const seedButton = page.getByRole('button', { name: 'Deposit to LOCAL MOCK custody' })
     await seedButton.click()
     await expect(seedButton).toBeEnabled({ timeout: 120_000 })
     await expect(page.getByRole('alert')).toHaveCount(0)
     await expect
       .poll(
         async () => {
-          await page.getByRole('button', { name: '再読込' }).click()
+          await page.getByRole('button', { name: 'Refresh' }).click()
           return page.getByTestId('account-balances').textContent()
         },
         { timeout: 30_000 },
@@ -136,44 +137,43 @@ test.describe('real local canister flow', () => {
       .toContain('100.000000')
 
     const balances = page.getByTestId('account-balances')
-    const reserve = balances.locator('article').filter({ hasText: '保管残高' }).first()
-    const trading = balances.locator('article').filter({ hasText: '取引口座の残高' })
+    const reserve = balances.locator('article').filter({ hasText: 'Custody balance' }).first()
+    const trading = balances.locator('article').filter({ hasText: 'Trading balance' })
     await expect(reserve).toContainText('100.000000')
     await expect(trading).toContainText('0.000000')
     // Leaving and returning must not implicitly allocate the held balance.
-    await page.getByRole('link', { name: '履歴' }).click()
-    await page.getByRole('link', { name: '資金', exact: true }).click()
+    await page.getByRole('link', { name: 'History' }).click()
+    await page.getByRole('link', { name: 'Funds', exact: true }).click()
     await expect(reserve).toContainText('100.000000')
     await expect(trading).toContainText('0.000000')
-    const allocateButton = page.getByRole('button', { name: '保管残高から取引に使う' })
+    const allocateButton = page.getByRole('button', { name: 'Allocate to trading' })
     await allocateButton.click()
     await expect(allocateButton).toBeEnabled({ timeout: 120_000 })
     await expect(page.getByRole('alert')).toHaveCount(0)
     await expect(trading).toContainText('100.000000')
     await expect(reserve).toContainText('0.000000')
 
-    await page.getByRole('link', { name: '取引' }).click()
-    await page.getByRole('button', { name: 'Agentを生成・承認' }).click()
-    await expect(page.getByText('Active', { exact: true })).toBeVisible({ timeout: 30_000 })
+    await page.getByRole('link', { name: 'Trade' }).click()
+    await page.getByRole('button', { name: 'Approve trading' }).click()
+    await expect(page.getByRole('button', { name: 'Approve trading' })).toHaveCount(0, {
+      timeout: 30_000,
+    })
 
-    const submitButton = page.getByRole('button', { name: '注文を受付' })
-    await page.getByLabel('数量').fill('0')
+    const submitButton = page.getByRole('button', { name: 'Open long' })
+    await page.getByLabel('Amount unit').selectOption('coin')
+    await page.getByLabel('Order amount').fill('0')
     await expect(submitButton).toBeDisabled()
-    await expect(page.locator('#order-guidance')).toContainText('数量は0より大きい')
-    await page.getByLabel('数量').fill('0.0001')
-    await expect(submitButton).toBeDisabled()
-    await expect(page.locator('#order-guidance')).toContainText('現在の参考価格')
-    const referencePrice = page.getByRole('button', { name: '現在の参考価格を入力' })
-    await expect(referencePrice).toBeEnabled({ timeout: 30_000 })
-    await referencePrice.click()
+    await expect(page.locator('#order-guidance')).toContainText('amount greater than zero')
+    await page.getByLabel('Order amount').fill('0.0001')
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
+    const referencePrice = page.getByRole('button', { name: 'Use reference price' })
     await submitButton.click()
     await expect(submitButton).toBeEnabled({ timeout: 15_000 })
     await expect(page.getByRole('alert')).toHaveCount(0)
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: '再読込' })
+          const refresh = page.getByRole('button', { name: 'Refresh' })
           if (await refresh.isEnabled()) await refresh.click()
           return page.getByRole('cell', { name: 'Filled' }).count()
         },
@@ -183,9 +183,9 @@ test.describe('real local canister flow', () => {
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: '再読込' })
+          const refresh = page.getByRole('button', { name: 'Refresh' })
           if (await refresh.isEnabled()) await refresh.click()
-          return page.getByRole('heading', { name: '建玉' }).count()
+          return page.getByRole('heading', { name: 'Positions' }).count()
         },
         { timeout: 30_000 },
       )
@@ -193,28 +193,28 @@ test.describe('real local canister flow', () => {
     await page.getByLabel('BTC Stop Loss').fill('55000')
     await page.getByLabel('BTC Take Profit').fill('65000')
     await page.setViewportSize({ width: 390, height: 844 })
-    await expect(page.getByRole('button', { name: '100%決済' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Close 100%' })).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
     page.once('dialog', (dialog) => dialog.dismiss())
-    await page
-      .getByRole('navigation', { name: '退出操作' })
-      .getByRole('button', { name: '全決済' })
-      .click()
-    await expect(page.getByRole('button', { name: '100%決済' })).toBeVisible()
-    await page.getByRole('button', { name: 'SL/TP設定' }).click()
-    await expect(page.getByRole('button', { name: 'SL/TP設定' })).toBeEnabled({ timeout: 30_000 })
-    await page.getByLabel('種別').selectOption('limit')
+    await page.locator('#positions').getByRole('button', { name: 'Close all' }).click()
+    await expect(page.getByRole('button', { name: 'Close 100%' })).toBeVisible()
+    await page.getByRole('button', { name: 'Set SL/TP' }).click()
+    await expect(page.getByRole('button', { name: 'Set SL/TP' })).toBeEnabled({ timeout: 30_000 })
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.getByRole('button', { name: 'Limit', exact: true }).click()
+    await referencePrice.click()
+    await expect(submitButton).toBeEnabled({ timeout: 30_000 })
     await submitButton.click()
     await expect(submitButton).toBeEnabled({ timeout: 15_000 })
     await expect(page.getByRole('alert')).toHaveCount(0)
     const cancelButton = page
       .getByRole('row')
       .filter({ has: page.getByRole('cell', { name: 'limit_gtc' }) })
-      .getByRole('button', { name: '取消' })
+      .getByRole('button', { name: 'Cancel' })
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: '再読込' })
+          const refresh = page.getByRole('button', { name: 'Refresh' })
           if (await refresh.isEnabled()) await refresh.click()
           await expect(refresh).toBeEnabled({ timeout: 5_000 })
           return cancelButton.isEnabled()
@@ -223,16 +223,13 @@ test.describe('real local canister flow', () => {
       )
       .toBe(true)
     page.once('dialog', (dialog) => dialog.dismiss())
-    await page
-      .getByRole('navigation', { name: '退出操作' })
-      .getByRole('button', { name: '全取消' })
-      .click()
+    await page.locator('#order-status').getByRole('button', { name: 'Cancel all' }).click()
     await expect(cancelButton).toBeEnabled()
     await cancelButton.click()
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: '再読込' })
+          const refresh = page.getByRole('button', { name: 'Refresh' })
           if (await refresh.isEnabled()) await refresh.click()
           return page.getByRole('cell', { name: 'Cancelled' }).count()
         },
@@ -242,10 +239,7 @@ test.describe('real local canister flow', () => {
 
     // Recovery requires both the venue positions and open orders to be empty.
     page.once('dialog', (dialog) => dialog.accept())
-    await page
-      .getByRole('navigation', { name: '退出操作' })
-      .getByRole('button', { name: '全取消' })
-      .click()
+    await page.locator('#order-status').getByRole('button', { name: 'Cancel all' }).click()
     await expect
       .poll(
         async () => {
@@ -257,11 +251,11 @@ test.describe('real local canister flow', () => {
         { timeout: 30_000 },
       )
       .toBe(0)
-    await page.getByRole('button', { name: '100%決済', exact: true }).click()
+    await page.getByRole('button', { name: 'Close 100%', exact: true }).click()
     await expect
       .poll(
         async () => {
-          const refresh = page.getByRole('button', { name: '再読込' })
+          const refresh = page.getByRole('button', { name: 'Refresh' })
           if (await refresh.isEnabled()) await refresh.click()
           const response = await page.request.post('http://127.0.0.1:8080/info', {
             data: { type: 'clearinghouseState', user: address },
@@ -272,28 +266,26 @@ test.describe('real local canister flow', () => {
       )
       .toBe(0)
 
-    await page.getByRole('link', { name: '資金', exact: true }).click()
-    await page.getByLabel('金額').fill('5')
-    const withdrawButton = page.getByRole('button', { name: 'MetaMask署名で出金' })
+    await page.getByRole('link', { name: 'Funds', exact: true }).click()
+    await page.getByLabel('Amount').fill('5')
+    const withdrawButton = page.getByRole('button', { name: 'Withdraw with MetaMask' })
     await withdrawButton.click()
     await expect(withdrawButton).toBeEnabled({ timeout: 60_000 })
     await expect(page.getByRole('alert')).toHaveCount(0)
-    await page.getByRole('link', { name: '履歴' }).click()
+    await page.getByRole('link', { name: 'History' }).click()
     await expect(page.getByRole('cell', { name: 'Withdrawal' })).toBeVisible()
     await expect(
       page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Allocation' }) }),
     ).toContainText('Settled')
     await expect(page.getByRole('cell', { name: 'BTC' }).first()).toBeVisible()
-    await page.getByRole('link', { name: '取引', exact: true }).click()
-    await expect(page.getByLabel('注文価格')).toHaveValue('')
-    await expect(referencePrice).toBeEnabled({ timeout: 30_000 })
-    await referencePrice.click()
+    await page.getByRole('link', { name: 'Trade', exact: true }).click()
+    await expect(page.getByLabel('Order price')).toHaveCount(0)
     // 通信失敗は口座表示を保持しても、新規注文をfail-closedにする。
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
     await page.route('http://127.0.0.1:18100/**', (route) => route.abort('connectionreset'))
-    await page.getByRole('button', { name: '再読込' }).click()
+    await page.getByRole('button', { name: 'Refresh' }).click()
     await expect(submitButton).toBeDisabled()
-    await expect(page.locator('#order-guidance')).toContainText('更新できません')
+    await expect(page.locator('#order-guidance')).toContainText('Could not refresh')
     await page.unroute('http://127.0.0.1:18100/**')
     await expect(submitButton).toBeEnabled({ timeout: 30_000 })
 
@@ -310,14 +302,20 @@ test.describe('real local canister flow', () => {
         await route.abort('connectionreset')
       } else await route.continue()
     })
-    await page.getByLabel('数量').fill('0.0001')
+    await page.getByLabel('Amount unit').selectOption('coin')
+    await page.getByLabel('Order amount').fill('0.0001')
     await submitButton.click()
-    await expect(page.getByRole('cell', { name: /応答不明・再送禁止/ })).toBeVisible()
+    await expect(
+      page.getByRole('cell', { name: /Unknown response; do not resubmit/ }),
+    ).toBeVisible()
     await expect(submitButton).toBeDisabled()
     allowLookup = true
-    await expect(page.getByRole('cell', { name: /応答不明・再送禁止/ })).toHaveCount(0, {
-      timeout: 30_000,
-    })
+    await expect(page.getByRole('cell', { name: /Unknown response; do not resubmit/ })).toHaveCount(
+      0,
+      {
+        timeout: 30_000,
+      },
+    )
     expect(submitted).toBe(1)
     await page.unroute('http://127.0.0.1:18100/**')
 
@@ -338,14 +336,14 @@ test.describe('real local canister flow', () => {
         await route.fulfill({ response })
       } else await route.continue()
     })
-    await page.getByRole('button', { name: '再読込' }).click()
+    await page.getByRole('button', { name: 'Refresh' }).click()
     await started
-    await page.getByRole('button', { name: 'ログアウト' }).click()
+    await page.getByRole('button', { name: 'Log out' }).click()
     release()
     await expect(page.getByTestId('trade-overview')).toHaveCount(0)
     await page.unroute('http://127.0.0.1:18100/**')
-    await expect(page.getByRole('button', { name: 'MetaMaskで接続' })).toBeVisible()
-    await page.getByRole('button', { name: 'MetaMaskで接続' }).click()
+    await expect(page.getByRole('button', { name: 'Connect MetaMask' })).toBeVisible()
+    await page.getByRole('button', { name: 'Connect MetaMask' }).click()
     await expect(page.getByTestId('trade-overview')).toBeVisible()
     // ページ境界を超える実際の資金履歴を用意し、追加ページを読み込む。
     const clients = await createClients(resolveConfig(parseEnv(readFileSync('.env.local', 'utf8'))))
@@ -466,7 +464,10 @@ test.describe('real local canister flow', () => {
             )
             break
           } catch (error) {
-            if (!(error instanceof Error) || !error.message.startsWith('PolicyUnavailable:'))
+            if (
+              !(error instanceof CanisterError) ||
+              !['PolicyUnavailable', 'JournalWriterBusy'].includes(error.code)
+            )
               throw error
             if (attempt === 19)
               throw new Error(`history fixture allocation ${entry} remained unavailable`, {
@@ -481,27 +482,27 @@ test.describe('real local canister flow', () => {
         await privateCall('revoke_session', vaultPrivateCodec.session(fixtureSession)),
       )
     }
-    await page.getByRole('link', { name: '履歴', exact: true }).click()
-    await expect(page.getByRole('button', { name: '資金履歴をさらに表示' })).toBeVisible({
+    await page.getByRole('link', { name: 'History', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Load more fund events' })).toBeVisible({
       timeout: 45_000,
     })
-    await page.getByRole('button', { name: '資金履歴をさらに表示' }).click()
+    await page.getByRole('button', { name: 'Load more fund events' }).click()
     const fundTable = page
-      .getByRole('heading', { name: '資金履歴' })
+      .getByRole('heading', { name: 'Funding history' })
       .locator('..')
       .locator('tbody tr')
     await expect.poll(() => fundTable.count()).toBeGreaterThan(100)
-    await page.getByRole('button', { name: 'ログアウト' }).click()
+    await page.getByRole('button', { name: 'Log out' }).click()
     await page.evaluate((account) => {
       ;(globalThis as typeof globalThis & { __e2eAccount?: string }).__e2eAccount = account
     }, secondaryAddress)
-    await page.getByRole('button', { name: 'MetaMaskで接続' }).click()
+    await page.getByRole('button', { name: 'Connect MetaMask' }).click()
     await expect(
       page.getByText(`${secondaryAddress.slice(0, 10)}…${secondaryAddress.slice(-6)}`),
     ).toBeVisible()
     await expect(fundTable).toHaveCount(0)
-    await expect(page.getByRole('button', { name: '資金履歴をさらに表示' })).toHaveCount(0)
-    await page.getByRole('button', { name: 'ログアウト' }).click()
+    await expect(page.getByRole('button', { name: 'Load more fund events' })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Log out' }).click()
     expect(
       await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length })),
     ).toEqual({ local: 0, session: 0 })

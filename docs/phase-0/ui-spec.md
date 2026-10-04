@@ -1,207 +1,209 @@
-# 画面仕様：構成・状態表示・説明文言・チャート
+# Screen specifications: composition, state display, description text, chart
 
-- 根拠：ロードマップ10章、`Plan.md` 1.4、16.1、16.4、16.5、`Implementation.md` 6.1〜6.3、`docs/adr/0004`、`0006`
-- 状態：設計契約。実装はPhase 2以降。現行の `frontend/` は合成データ専用デモであり、本仕様の実装完了を意味しない
+> Historical Phase 0 design contract. Later implementation and validation results are recorded in the phase reports and root README.
 
-## 1. 適用範囲
+- References: Roadmap Chapter 10, `Plan.md` 1.4, 16.1, 16.4, 16.5, `Implementation.md` 6.1–6.3, `docs/adr/0004`, `0006`
+- Status: Design contract. Implementation will be after Phase 2. The current `frontend/` is a demo dedicated to synthetic data and does not mean the completion of the implementation of this specification.
 
-- 対象はデスクトップの取引・資金・履歴・公開説明の4画面と、状態表示の規約および説明文言である。
-- 本仕様は実装指示であり、画面の完成を資金・機密性の証明として扱わない。
-- 「VEIL」は作業用の仮称である。製品名・商標の確定ではない。
-- 商品名の表示、HLのブランド・アセットの複製は行わない。
+## 1. Scope of application
 
-## 2. デスクトップの基本構成
+- The target is the 4 screens of desktop trading, funds, history, public explanation and the terms and explanation text of status display.
+- This specification is an implementation instruction and does not treat the completion of the screen as proof of funds and confidentiality.
+- "VEIL" is a provisional name for work purposes. It is not the final product name or trademark.
+- Do not display product names or reproduce HL's brand and assets.
+
+## 2. Basic desktop configuration
 
 ```text
-┌ 銘柄・価格・接続状態・資金・アカウント ──────────────┐
+┌ Stock/Price/Connection Status/Funds/Account ──────────────┐
 │                                              │
-│      チャート        │ 板・公開約定 │ 注文入力   │
+│      Chart        │ Order book/Public trades │ Order input   │
 │                      │              │            │
 ├──────────────────────────────────────────────┤
-│ 建玉 / 未約定注文 / 約定履歴 / 資金履歴             │
+│ positions / unfilled orders / fill history / fund history             │
 ├──────────────────────────────────────────────┤
-│ データ更新時刻・サービス状態・機密性の説明           │
+│ Data update time, service status, and explanation of confidentiality │
 └──────────────────────────────────────────────┘
 ```
 
-| 領域 | 責務 |
+| Area | Responsibility |
 |---|---|
-| ヘッダー | 銘柄選択、最新価格、公開市況の接続状態、保管残高／取引口座equityの要約、アカウント（接続EOA、セッション期限、ログアウト） |
-| チャート | ローソク足、時間足、ズーム、クロスヘア。建玉・注文の価格線は後続 |
-| 板・公開約定 | 板（`l2Book`）、公開約定（`trades`）。本人注文の板への重畳はPhase 3以降 |
-| 注文入力 | 方向、種別（Market/Limit）、数量、価格、レバレッジ、スリッページ、reduce-only、SL/TP、確認 |
-| 下部タブ | 建玉（equity・証拠金・清算価格・PnL・SL/TP・決済）、未約定注文（取消）、約定履歴、資金履歴 |
-| フッター | データ更新時刻（本人状態と市況を別々）、サービス状態、機密性の説明への導線 |
+| Header | Market selection, latest price, connection status of public market status, summary of custody balance/trading account equity, account (connection EOA, session expiration, logout) |
+| a chart | Candlesticks, time intervals, zoom, crosshair. The price line for positions and orders will be shown later. |
+| Order book/Public trades | Order book (`l2Book`), public trades (`trades`). Overlaying the user’s own orders on the order book is after Phase 3. |
+| Order input | Direction, type (Market/Limit), quantity, price, leverage, slippage, reduce-only, SL/TP, confirmation |
+| Bottom tab | positions (equity, margin, liquidation price, PNL, SL/TP, position closing), unfilled orders (cancellation), fill history, fund history |
+| Foot | Data update time (separate from the person's status and market conditions), service status, guide to the explanation of confidentiality |
 
-- チャートと注文入力を行き来しやすくし、建玉からSL/TP・取消・決済へ直接進める。
-- 情報配置は方針であり、HLのブランド・アセットを複製しない。
+- It makes it easy to go back and forth between charts and order entry, and allows you to proceed directly from positions to SL/TP, cancellation, and settlement.
+- Information distribution is a policy and does not replicate HL's brand assets.
 
-## 3. 取引画面（`/trade`）
+## 3. trading screen (`/trade`)
 
-| 要素 | 内容 |
+| Element | Content |
 |---|---|
-| 銘柄 | BTC・ETH perpsのみ。初期allowlist外は選択不可 |
-| 注文入力 | 数量・価格は文字列入力。精度違反は入力時に拒否し、丸めない |
-| Market | スリッページ上限（既定0.5%）を明示。IOC指値であることを説明する |
-| Limit | GTC。`expires_after`は受付期限であり板の取消期限ではないと説明する |
-| レバレッジ | 既定3倍・上限5倍。開発用の制限であり推奨倍率ではないと明示する |
-| SL/TP | 建玉単位のHL `positionTpsl`、reduce-only。エントリー同時の複雑なbracketは提供しない |
-| 送信 | 送信直後にローカルの「受付確認中」行を出す。`submit_order`の応答で`cloid`・`order_id`を紐づける |
-| 建玉 | equity、証拠金、清算価格、未実現PnL、SL/TP、部分決済・全決済 |
-| 危険操作 | Cancel All、全決済は確認を挟む。Cancel Allが保護用SL/TPも消す場合は明示する |
+| Market | Only BTC/ETH perps. Cannot be selected outside the initial allowlist. |
+| Order input | Enter quantity and price as strings. Reject input with precision violations at the time of entry and do not round. |
+| Market | Explicitly state the slippage limit (default 0.5%). Explain that it is an IOC limit order. |
+| Limit | GTC. `expires_after` is explained as the acceptance deadline and not the cancellation deadline for the board. |
+| Leverage | Default 3× and maximum 5×. Explicitly stated that it is a restriction for development and not a recommended multiplier. |
+| SL/TP | HL `positionTpsl` in positions units, reduce-only. Complex brackets are not provided at the same time as entry. |
+| transmission | Immediately after sending, output the local "Processing Confirmation" line. Link `cloid` and `order_id` with the response of `submit_order`. |
+| positions | equity, margin, liquidation price, unrealized PnL, SL/TP, partial/full position closing |
+| Dangerous operation | Cancel All, closing all positions requires confirmation. If Cancel All also deletes protective SL/TP, it will be explicitly stated. |
 
-- 「送信したように見せる」のではなく「受付済みで送信中であることを正しく表示する」。
-- 建玉の決済と注文の取消を同じ操作にしない。
-- 緊急停止で自動成行決済しない。
+- Instead of "showing as sent", show "received and in transit" correctly.
+- Do not treat position closing and order cancellation as the same operation.
+- An emergency stop does not automatically market-close positions.
 
-## 4. 資金画面（`/funds`）と履歴画面（`/history`）
+## 4. Funds screen (`/funds`) and History screen (`/history`)
 
-### 4.1 資金画面
+### 4.1 Fund screen
 
-| 要素 | 内容 |
+| Element | Content |
 |---|---|
-| 残高区分 | 未配分（保管）、移動中、出金予約、取引口座equity、出金可能額を別行で表示（7節） |
-| 預入 | 本人HL口座から共通保管口座への本人署名送金の案内。確定状況を表示する |
-| 配分 | 共通保管からユーザー別取引口座へ。受付・送信・照合の状態を表示する |
-| 回収 | 取引口座から共通保管へ。未約定注文・建玉がある場合の制約を表示する |
-| 出金 | 金額入力→EOA署名（本人認可）→受付→回収→払出しの順序を明示。第三者宛は選択肢に出さない |
-| 制約 | 未確認の回収・未確定PnLを先払いしない。`unknown`がある間は該当額を出金可能額に含めない |
-| Agent | 現在・次の世代、承認状態、有効期限、失効要求。アドレス・用途・権限・期限を明示する |
+| balance classification | Display unallocated (custody), in transit, withdrawal reservation, trading account equity, and withdrawable amount separately (Section 7) |
+| Deposit | Notice of the signature transfer from the personal HL account to the shared reserve account. Show the confirmation status. |
+| allocation | From shared custody to per-user trading account. Display the status of receipt, transmission, and reconciliation. |
+| recovery | From trading account to shared custody. Display restrictions when there are unfilled orders and positions. |
+| withdrawal | Clearly indicate the order of entering the amount → EOA signature (owner authorization) → reception → recovery → disbursement. Do not select the option for third parties. |
+| restriction | Do not pay in advance for unconfirmed recovery/unconfirmed PnL. Do not include the corresponding amount in the withdrawable amount while there is `unknown`. |
+| Agent | Current/next generation, approval status, validity period, expiration request. Indicate address, purpose, permissions, and expiration date. |
 
-### 4.2 履歴画面
+### 4.2 History screen
 
-| 要素 | 内容 |
+| Element | Content |
 |---|---|
-| 種別 | 約定履歴、注文履歴、資金履歴（入金・配分・回収・出金・手数料） |
-| ページング | カーソル方式。件数上限を表示し、無制限スクロールで全件走査しない |
-| 各行 | 時刻、種別、金額または数量・価格、状態、参照ID（cloid等の短縮表示） |
-| unknown | 未解決の`unknown`を履歴上部の専用領域に固定表示し、解消まで残す |
-| データ鮮度 | 一覧の観測時刻とrevisionを表示する |
+| Category | fill history, order history, fund history (deposit, allocation, recovery, withdrawal, fees) |
+| Pagination | Cursor mode. Display the number limit and do not scan all items with unlimited scrolling. |
+| Each row | Time, type, amount or quantity/price, condition, reference ID (shortened display such as cloid) |
+| unknown | Display unresolved `unknown` in the dedicated area at the top of the history and leave it until resolved. |
+| Data freshness | Show observation times and revision in the list |
 
-## 5. 非正常状態の画面
+## 5. Abnormal screen state
 
-| 状態 | 表示 | 許可する操作 | 禁止 |
+| State | Display | Allowed operation | Prohibited |
 |---|---|---|---|
-| 未接続（ウォレット未接続） | 接続導線と、預入前に読むべき制約（9節） | 公開説明・公開市況の閲覧 | 注文・資金操作 |
-| セッション失効 | 失効理由、再認証導線。ローカルのnoteを破棄する | 再認証 | 旧セッションでの操作継続 |
-| 残高不足 | 不足額、必要額、配分導線 | 配分・入金案内 | 注文送信（理由を示す） |
-| 送信中（受付確認中→受付済み→送信準備中→送信済み・確認中） | 正準状態の文言（`state-machines.md` 8節）。HL未到達の可能性を明示 | 取消要求（送信前の中止とHL上の取消を区別） | 約定済み表示、二重送信 |
-| 部分約定 | 累積約定量／発注数量、残数量 | 取消、追加の決済 | 全量約定として表示 |
-| 取消確認中 | 取消要求の送信状況 | 照合結果の待機 | 「取消済み」表示 |
-| 結果不明 | 「結果不明（再送しない）」、開始時刻、照合中であること | 照会、取消要求、reduce-only | 再発注の誘導 |
-| データ遅延（10秒超） | 観測時刻と遅延量、理由、回復条件 | 参照、取消、reduce-only、確認済み出金 | 新規リスク増加（新規注文・レバレッジ変更） |
-| 照合中（起動直後・復旧後） | 「取引所状態を照合中」、進捗、送信を開始していないこと | 参照 | 新規注文・配分 |
-| サービス停止（緊急停止・新規受付停止） | 停止理由コード、開始時刻、告知導線 | 参照、取消、建玉のreduce-only決済、確認済み出金 | 新規注文・新規預入 |
-| guard変更予約中 | 対象、実行可能時刻、変更内容のhash（顧客情報を含まない） | 退出・出金の手続き | 「必ず退出できる」表現 |
-| cycles低下 | 通知段階（目標30日／通知7日／停止3日） | 参照・退出 | 新規預入（3日段階） |
+| Unconnected (wallet not connected) | Connection controls and restrictions to read before depositing (Section 9) | Viewing public explanations and public market conditions | Orders and fund operations |
+| Session expired | Reason for expiration, re-authentication path. Discard local notes | Reauthentication | Continue using in the previous session |
+| Insufficient balance | Insufficient amount, necessary amount, allocation guide | Allocation and deposit information | Order submission (indicate the reason) |
+| Sending (Confirmation of receipt → Received → Preparing to send → Sent and confirmed) | Canonical state-machine (`state-machines.md` Section 8). Explicitly indicate the possibility of HL not being reached. | Cancellation request (distinguish between suspension before sending and cancellation on HL) | Filled display, double sending |
+| Partial fill | Cumulative fill amount/order quantity, remaining quantity | Cancellation, additional position closing | Displayed as full fill |
+| Cancellation confirmation in progress | Status of sending cancellation request | Waiting for reconciliation results | "Cancellation completed" display |
+| unknown outcome | "unknown outcome (do not resend)", start time, that it is in reconciliation | Request for inquiry, cancellation request, reduce-only | Encouraging order resubmission |
+| Data delay (over 10 seconds) | Observation time, delay amount, reason, recovery conditions | Reference, cancellation, reduce-only, confirmed withdrawal | Increase in new risks (new orders and leverage changes) |
+| Reconciliation in progress (immediately after startup or after recovery) | "Exchange state is being reconciled", progress, not starting transmission | reference | New orders/allocation |
+| Service suspension (emergency suspension and new application suspension) | Reason for stopping code, start time, notification line | Reference, cancellation, reduce-only position closing, confirmed withdrawal | New orders and new deposits |
+| Guard change reservation is pending | Target, executable time, hash of the changes (excluding customer information) | Withdrawal procedure | The expression "You can definitely exit" |
+| Cycle reduction | Notification stage (goal 30 days / notification 7 days / suspension 3 days) | Reference and exit | New deposit (3-day stage) |
 
-- タイムアウトを失敗や取消済みと表示しない。
-- データの古さは表示し、操作を制限するときは理由と回復条件を伝える。
-- 状態の表示は`revision`と`observed_at`の比較で更新し、古い応答を最新として上書きしない。
+- Do not display timeouts as failures or cancelled.
+- Display the age of the data and provide the reason and recovery conditions when restricting operations.
+- The state is updated by comparing `revision` and `observed_at`, and never overwrite newer state with an older response.
 
-## 6. 残高の表示規則
+## 6. rules for displaying balance
 
-| 区分 | 意味 | 出所 |
+| division | Meaning | Source |
 |---|---|---|
-| 保管残高（未配分） | 共通保管口座にある、まだ取引口座へ配分していない額 | `FundStatus.reserve_unallocated` |
-| 移動中 | 配分・回収の実行中で、どちらの口座にも確定していない額 | `FundStatus.in_transit` |
-| 出金予約 | 出金要求により拘束済みの額 | `FundStatus.reserved_for_withdrawal` |
-| 取引口座equity | HLが返すユーザー別口座のequity | `FundStatus.trading_equity` |
-| 未実現PnL | equityに含まれる場合は内訳として別表示 | `FundStatus.trading_unrealized_pnl` |
-| 出金可能額 | 裏付けと本人認可を確認済みで、実際に払出し可能な額 | `FundStatus.withdrawable` |
+| custody balance (unallocated) | The amount that has not yet been allocated to the trading account in the shared reserve account. | `FundStatus.reserve_unallocated` |
+| in transit | An amount that has not been confirmed in either account while allocation/recovery is in progress. | `FundStatus.in_transit` |
+| withdrawal reservation | The amount that is bound by withdrawal requests | `FundStatus.reserved_for_withdrawal` |
+| trading account equity | Equity of user-specific accounts returned by HL | `FundStatus.trading_equity` |
+| unrealized PnL | If included in equity, it will be separately indicated as a breakdown. | `FundStatus.trading_unrealized_pnl` |
+| withdrawable amount | The amount that can actually be disbursed after confirming the backing and owner authorization | `FundStatus.withdrawable` |
 
-- 合計値を表示する場合は二重計上しない。equityに未実現PnLを含むか明示する。
-- 「保管残高＋取引口座equity」を「総資産」として単純合算しない。移動中と出金予約を別に示す。
-- 不明額を出金可能額へ足さない。`unknown`がある間はその旨を金額の近くに表示する。
-- 測定結果のない匿名性スコアを表示しない。
+- Do not double count when showing the total value. Include or explicitly indicate unrealized PnL in equity.
+- Do not simply add "custody balance + trading account equity" as "total asset". Show in transit and withdrawal reservation separately.
+- Do not add the unknown amount to the withdrawable amount. During the `unknown` period, display this information near the amount.
+- Do not display anonymity scores without measurement results.
 
-## 7. 説明文言（たたき台）
+## 7. Description text (foundation)
 
-預入前に必ず表示する。文言は変更時にレビューを要する。
+It must be displayed before deposit. The text will require a review when changed.
 
-### 7.1 機密性について
+### 7.1 about confidentiality
 
-> 取引口座の情報はHyperliquid上では公開です。入出金の額・時刻・回数から、口座間の関連を推測される可能性があります。当サービスは、接続ウォレットと取引口座の対応を画面や公開ログに直接表示しませんが、関連を完全に隠せることを保証するものではありません。相関耐性の測定結果は別途公開します。
+> Information about the trading account is publicly available on Hyperliquid. From the amount, time, and frequency of deposits and withdrawals, you may infer the relationship between accounts. This service does not directly display the connection between the connected wallet and the trading account on the screen or in the public logs, but it does not guarantee that the relationship can be completely hidden. The correlation resistance measurement results will be published separately.
 
-### 7.2 Canister保管について
+### 7.2 About Canister custody
 
-> 資金はInternet Computer上のCanisterが管理する共通保管口座と、あなた専用の取引口座で扱います。秘密鍵はCanisterの閾値署名で管理され、当サービスの運営者が単独で取り出すことはできません。ただし、Canisterのコードとその変更権限への信頼は残ります。
+> Funds are managed by a shared reserve account managed by Canister on the Internet Computer and a per-user trading account. The private key is managed by Canister's threshold signature and cannot be retrieved by the operator of this service alone. However, trust in Canister's code and its change authority remains.
 
-### 7.3 EOAを失った場合
+### 7.3 Losing EOA
 
-> 接続ウォレット（EOA）を失うと、ログインと出金の本人認可ができなくなります。メール等による復旧、運営者による認証リセットは提供しません。資金の回復は保証されません。重要なウォレットは失わないように管理してください。
+> If you lose your connected wallet (EOA), you will no longer be able to log in or withdraw with owner authorization. We do not provide recovery via email or other means, nor do we reset authentication by the operator. The recovery of funds is not guaranteed. Please manage your important wallets carefully to avoid losing them.
 
-### 7.4 停止時の回収制約
+### 7.4 Recovery restrictions when stopped
 
-> Canisterの停止、不具合、Hyperliquid側の停止、未解決の送金、証拠金の拘束により、希望する時点で出金できない場合があります。当サービスは、あなたが単独でいつでも資金を回収できることを保証しません。取引の停止と出金の停止は別であり、新規注文の停止後も、確認できる範囲で取消・reduce-only決済・確認済みの出金を優先します。
+> Due to the suspension of Canister, malfunctions, suspension on the Hyperliquid side, unresolved transfers, and margin restrictions, you may not be able to withdraw at your desired time. This service does not guarantee that you can recover your funds on your own at any time. Trading suspension and withdrawal suspension are separate, and even after the suspension of new orders, we will prioritize cancellations, reduce-only settlements, and confirmed withdrawals within the scope of confirmation.
 
-### 7.5 7日間の変更猶予について
+### 7.5 About the 7-day change allowance
 
-> 資金を扱うCanisterの更新には7日間の待機があります。これは退出を検討する機会であり、資金の回収を保証するものではありません。猶予の後に実施された変更は、残っている資金や保存済みの情報に影響し得ます。画面配信（フロントエンド）にはこの猶予は適用されません。
+> There is a 7-day waiting period for updates to Canister, which handles funds. This is an opportunity to consider withdrawing funds, but it does not guarantee the recovery of funds. Changes made after the waiting period may affect remaining funds or stored information. This waiting period does not apply to screen delivery (front-end).
 
-### 7.6 使わない表現
+### 7.6 Expressions not to use
 
-| 禁止表現 | 理由 |
+| Prohibited expressions | Reason |
 |---|---|
-| 「Private」等のバッジだけで機密性を説明する | 保護範囲を説明していない |
-| 「DAOでも資金を動かせない」 | 変更権限の侵害可能性を否定できない |
-| 「7日間あれば必ず退出できる」 | 回収保証ではない |
-| 測定していない匿名性スコア | 未測定の数値を提示しない |
-| 「ノンカストディ」 | Canisterと変更権限への信頼が残る |
-| 「元本保証」「清算されない」等 | 取引リスクを誤認させる |
+| Explain confidentiality only with badges such as "Private" | Not explaining the scope of protection |
+| "Even in DAO, you can't move funds." | Cannot deny the possibility of infringement of change permissions |
+| "If you have 7 days, you can definitely leave." | It is not a recovery guarantee |
+| Unmeasured anonymity score | Do not provide unmeasured values |
+| "Non-custodial" | Canister and trust in change permissions remain |
+| "Principal guarantee", "No liquidation" etc. | Misleading the trading risk |
 
-## 8. チャート方針
+## 8. Chart policy
 
-| 項目 | 決定 |
+| Item | Decision |
 |---|---|
-| 採用 | Lightweight Charts（Apache-2.0）。現行デモと同じ |
-| 初期必須機能 | ローソク足、時間足（1m〜1M）、ズーム、クロスヘア、リサイズ、履歴5,000本上限の扱い |
-| 後続 | 需要のあるインジケーター、描画、チャート上の注文・SL/TP操作 |
-| 当面対象外 | 分析ツールの網羅的再現、自由な複数チャート配置 |
-| Advanced Charts / Trading Platform | **未評価**。初期必須機能に高度な描画・インジケーターが必要になった時点で、公開形態・attribution・契約条件を確認して再判断する |
-| 参照 | [TradingView公式の比較・提供条件](https://www.tradingview.com/free-charting-libraries/) |
+| adoption | Lightweight Charts (Apache-2.0). Same as the current demo |
+| Essential initial function | Candlesticks, time intervals (1m~1M), zoom, crosshair, resize, handling up to 5,000 records |
+| following | In-demand indicators, drawing, order/SL/TP operations on charts |
+| Not applicable for the time being | Comprehensive reproduction of analysis tools, free multiple chart placement |
+| Advanced Charts / Trading Platform | **Not evaluated**. When advanced drawing and indicator are required for the initial mandatory functions, check the public form, attribution, and contract terms and re-evaluate. |
+| reference | [TradingView official comparison and provision conditions](https://www.tradingview.com/free-charting-libraries/) |
 
-- 「Advanced Chartsは商用クローズドでは使えない」という断定を採用判断の根拠にしない。
-- ライブラリ名だけでHLのチャート機能がすべて揃うと仮定せず、必要機能ごとに確認する。
-- attribution要件（Lightweight Charts）を満たす表示を維持する。
+- We do not base the decision on the assumption that "Advanced Charts cannot be used in commercial closed environments."
+- Don't assume that all the HL chart features are included just by the library name, but check each necessary feature individually.
+- Maintain display that meets attribution requirements (Lightweight Charts).
 
-## 9. 公開市況の接続とデータ鮮度
+## 9. Connection to public market conditions and data freshness
 
-`Implementation.md` 6.1〜6.3に基づく。
+Based on `Implementation.md` 6.1 through 6.3.
 
-| 要件 | 内容 |
+| Requirement | Content |
 |---|---|
-| 直結構成 | 公開市況のみ `wss://api.hyperliquid.xyz/ws`（mainnet）／`-testnet`（testnet）へ接続する |
-| チャネル | `allMids`、`l2Book`、`trades`、`candle`、`bbo`、`activeAssetCtx` |
-| タブ共有 | タブごとに接続を作らない（`BroadcastChannel`＋leader election）。10接続/IPの制限を守る |
-| 維持 | 60秒無メッセージで切断されるためpingを定期送信する |
-| 再接続 | `isSnapshot: true`を検出して状態を置き換える。差分として適用しない |
-| 本人状態 | Canister照合結果のrevisionと観測時刻のみで更新する。公開市況から約定を推測して確定しない |
-| 購読管理 | 必要になった時点で購読し、画面を離れたら解除する |
-| 更新性能 | 高頻度更新中も入力・スクロール・取消ボタンが固まらない |
+| Direct connection configuration | Connect only to public market status `wss://api.hyperliquid.xyz/ws` (mainnet) / `-testnet` (testnet) |
+| Channel | `allMids`, `l2Book`, `trades`, `candle`, `bbo`, `activeAssetCtx` |
+| Tab sharing | Do not connect to each tab (`BroadcastChannel` + leader election). Follow the 10 connections/IP limit. |
+| maintenance | Ping is regularly sent because it is disconnected without any message for 60 seconds. |
+| Reconnection | Detect `isSnapshot: true` and replace the state. Do not apply as a difference. |
+| Actual state | Only update the canister reconciliation result with the revision and observation time. It does not confirm by inferring fill from the public market status. |
+| Subscription management | Subscribe when you need it and unsubscribe when you leave the screen. |
+| Update performance | Even while updating at high frequency, the input, scroll, and cancellation buttons do not freeze. |
 
-## 10. 品質・アクセシビリティ受け入れ基準
+## 10. Quality and accessibility acceptance standards
 
-- Phase 0で代表端末・ブラウザを固定し、その環境で計測する（代表環境はPhase 1の着手時に記録する）。
-- ネットワーク完了を待たず、送信操作に対するローカル表示を目標100ms以内に更新する。これはHL受理時間ではない。
-- キーボードで主要操作ができ、色だけで損益・エラー・状態を伝えない。
-- 長い価格・数量、空データ、部分約定、狭い画面でも操作が隠れない。
-- モバイルでは全パネルを同時表示せず、残高確認・取消・決済・出金を操作できる切替表示にする。
-- 再接続・更新順序の逆転で、古い残高や注文を最新として上書きしない。
-- Playwrightによる機能試験、主要画面の視覚確認、実機の手動操作を併用する。資金安全性は画面試験だけで判断せず、DB・外部状態も照合する。
+- In Phase 0, fix the representative device and browser and measure in that environment (the representative environment is recorded when starting Phase 1).
+- Do not wait for network completion and update local display for transmission operation within 100ms as a target. This is not the HL acceptance time.
+- Main operations can be performed with the keyboard, and it does not convey profit, loss, error, or status only by color.
+- Long price and quantity, empty data, partial fill, even on a narrow screen, the operation is not hidden.
+- On mobile, it switches to a display that allows you to operate balance confirmation, cancellation, position closing, and withdrawal without displaying all panels at the same time.
+- In reverse order of reconnection and updating, the old balance and orders are not overwritten as the latest.
+- Combine functional testing by Playwright, visual verification of the main screen, and manual operation on the actual device. Funding security is not determined solely by screen testing, but also reconciled with DB and external conditions.
 
-## 11. 最小の代替クライアント（Phase 2の対象）
+## 11. Minimum alternative client (Phase 2 eligible)
 
-- UI停止時に利用できる最小の認証・取消・出金クライアントを用意する設計にする。
-- 停止したCanisterの代替実行基盤とはしない。認証・取消・出金要求の送信のみを担う。
-- 表示は最小限（状態、観測時刻、取消・出金の結果）とし、機密性の説明を省略しない。
+- Design a system that provides the minimum authentication, cancellation, and withdrawal clients available when the UI is stopped.
+- It is not an alternative execution basis for the stopped Canister. It only handles the transmission of authentication, cancellation, and withdrawal requests.
+- Display is limited to the minimum (state, observation time, results of cancellation/withdrawal) and does not omit the explanation of confidentiality.
 
-## 12. 未確定事項
+## 12. Undecided matters
 
-| 項目 | 確定時期 |
+| Item | Fixed period |
 |---|---|
-| 代表端末・ブラウザ、性能計測手順 | Phase 1 |
-| Advanced Chartsの要否判断 | 高度描画が初期必須となった時点 |
-| モバイルの切替表示の具体 | Phase 3 |
-| 通知（約定・停止・cycles）の要否 | Phase 3 |
-| レイアウト保存・ショートカット | Phase 3以降 |
+| Representative terminal/browser, performance measurement procedure | Phase 1 |
+| Whether to use Advanced Charts | The point when high drawing became a mandatory requirement at the beginning |
+| The specific details of mobile switching display | Phase 3 |
+| Whether notification (fill, stop, cycles) is necessary | Phase 3 |
+| Layout saving and shortcuts | After Phase 3 |

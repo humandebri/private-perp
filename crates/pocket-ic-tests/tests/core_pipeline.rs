@@ -376,7 +376,13 @@ fn route(
         let query: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
         match query.get("type").and_then(|value| value.as_str()) {
             Some("clearinghouseState") => Ok((200, positions.clone())),
-            Some("userFills") => Ok((200, fills.clone())),
+            Some("userFillsByTime") => {
+                let mut rows: Vec<serde_json::Value> = serde_json::from_slice(&fills).unwrap();
+                for fill in &mut rows {
+                    fill["time"] = query["endTime"].clone();
+                }
+                Ok((200, serde_json::to_vec(&rows).unwrap()))
+            }
             Some("orderStatus") => Ok((200, status.clone())),
             other => Err((1, format!("unexpected info query: {other:?}"))),
         }
@@ -971,4 +977,337 @@ fn lost_order_reply_recovers_by_cloid_and_ingests_decimal_rebate() {
         .unwrap();
     assert_eq!(fills.items.len(), 1);
     assert_eq!(fills.items[0].fee, -120);
+}
+
+#[test]
+fn ambiguous_field_boundaries_are_idempotency_conflicts() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let user = provision_user(&pic, vault, core, principal(170), 222, b"fingerprint");
+    let make = |quantity: &str, price: &str| SubmitOrderArgs {
+        session: user.session.clone(),
+        client_request_id: blob(b"same-id"),
+        account_id: user.account_id.clone(),
+        market: "ETH".into(),
+        side: Side::Buy,
+        kind: OrderKind::LimitGtc,
+        quantity: quantity.into(),
+        limit_price: Some(price.into()),
+        slippage_tolerance_bps: None,
+        reduce_only: false,
+        leverage: Some(3),
+        trigger: None,
+        expires_after: None,
+    };
+    let first: Result<api_types::order::SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        user.caller,
+        "submit_order",
+        (user.session.clone(), make("1", "23")),
+    )
+    .unwrap();
+    first.unwrap();
+    let changed: Result<api_types::order::SubmitOrderResult, ErrorCode> = update_args(
+        &pic,
+        core,
+        user.caller,
+        "submit_order",
+        (user.session.clone(), make("12", "3")),
+    )
+    .unwrap();
+    assert!(matches!(
+        changed,
+        Err(ErrorCode::IdempotencyConflict { .. })
+    ));
+}
+
+#[test]
+fn status_polling_rotates_and_releases_venue_terminal_orders() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 223, b"rotate-status");
+    for i in 0..6 {
+        submit(&pic, core, &user, &[i], "0.01").unwrap();
+    }
+    let next_oid = Cell::new(0u64);
+    let terminal = Cell::new(false);
+    let sweep = || {
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+        &pic, core, controller, "test_sweep_now", (), |call| {
+            let q: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+            let response = if call.url.contains("/exchange") {
+                if q["action"]["type"] == "updateLeverage" { serde_json::json!({"status":"ok","response":{"type":"default"}}) }
+                else { next_oid.set(next_oid.get()+1); serde_json::json!({"status":"ok","response":{"data":{"statuses":[{"resting":{"oid":next_oid.get()}}]}}}) }
+            } else { match q["type"].as_str().unwrap() {
+                "clearinghouseState" => serde_json::json!({"assetPositions":[],"marginSummary":{"totalMarginUsed":"0","totalNtlPos":"0"}}),
+                "userFillsByTime" => serde_json::json!([]),
+                "orderStatus" => { let oid=q["oid"].as_u64().unwrap(); serde_json::json!({"status": if terminal.get() && oid==5 {"marginCanceled"} else if terminal.get() && oid==6 {"iocCancelRejected"} else {"open"},"order":{"oid":oid}}) },
+                other => panic!("unexpected {other}"),
+            }};
+            Ok((200, serde_json::to_vec(&response).unwrap()))
+        }).unwrap()
+    };
+    sweep().0.unwrap();
+    sweep().0.unwrap();
+    assert_eq!(next_oid.get(), 6);
+    terminal.set(true);
+    for _ in 0..3 {
+        pic.advance_time(std::time::Duration::from_millis(1));
+        sweep().0.unwrap();
+    }
+    let orders: Result<api_types::Paged<OrderSummary>, ErrorCode> =
+        envelope::list_orders(&pic, core, user.caller, &user.session, None, 10).unwrap();
+    let orders = orders.unwrap().items;
+    assert_eq!(
+        orders.iter().find(|o| o.hl_oid == Some(5)).unwrap().state,
+        OrderState::Cancelled
+    );
+    assert_eq!(
+        orders.iter().find(|o| o.hl_oid == Some(6)).unwrap().state,
+        OrderState::Rejected
+    );
+    assert_eq!(
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved,
+        100_000_000
+    );
+}
+
+#[test]
+fn large_fill_history_is_ingested_and_cursor_survives_upgrade() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 225, b"large-fills");
+    submit(&pic, core, &user, b"fill-order", "0.05").unwrap();
+    let empty =
+        br#"{"assetPositions":[],"marginSummary":{"totalMarginUsed":"0","totalNtlPos":"0"}}"#;
+    let status = br#"{"status":"open","order":{"oid":4242}}"#;
+    let first =
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            route(ACCEPTED, empty, b"[]", status),
+        )
+        .unwrap();
+    first.0.unwrap();
+    pic.advance_time(std::time::Duration::from_secs(121));
+    let observed_start = Cell::new(0u64);
+    let observed_end = Cell::new(0u64);
+    let raw_bytes = Cell::new(0usize);
+    let sweep = || {
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+        &pic, core, controller, "test_sweep_now", (), |call| {
+            let q: serde_json::Value=serde_json::from_slice(&call.body).unwrap();
+            if q["type"]=="userFillsByTime" {
+                observed_start.set(q["startTime"].as_u64().unwrap());
+                observed_end.set(q["endTime"].as_u64().unwrap());
+                let rows: Vec<_>=(1..=200).map(|tid| serde_json::json!({"tid":tid,"oid":4242,"coin":"ETH","px":"2500","sz":"0.0001","fee":"0.000001","time":q["endTime"],"hash":"a".repeat(64),"closedPnl":"0","dir":"Open Long"})).collect();
+                let bytes=serde_json::to_vec(&rows).unwrap(); raw_bytes.set(bytes.len());
+                Ok((200,bytes))
+            } else { route(ACCEPTED, empty, b"[]", status)(call) }
+        }).unwrap()
+    };
+    let checked = sweep();
+    checked.0.unwrap();
+    assert!(raw_bytes.get() > 32 * 1024);
+    let page = envelope::list_fills(&pic, core, user.caller, &user.session, None, 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.items.len(), 100);
+    let next = envelope::list_fills(
+        &pic,
+        core,
+        user.caller,
+        &user.session,
+        page.next_cursor,
+        100,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(next.items.len(), 100);
+    let previous_end = observed_end.get();
+    pic.upgrade_canister(
+        core,
+        pocket_ic_tests::wasm(TRADING_CORE_WASM),
+        candid::encode_one(()).unwrap(),
+        Some(controller),
+    )
+    .unwrap();
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, core, controller, "get_journal_guard", ()).unwrap();
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, core, guard.unwrap().unwrap(), "resume_journal", ()).unwrap();
+    resumed.unwrap();
+    pic.advance_time(std::time::Duration::from_secs(121));
+    sweep().0.unwrap();
+    assert_eq!(observed_start.get(), previous_end);
+    assert_eq!(
+        account_snapshot(&pic, core, user.caller, &user.session).open_order_risk_reserved,
+        125_000_000
+    );
+}
+
+#[test]
+fn full_fill_pages_keep_an_inclusive_boundary_and_continue_next_sweep() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 226, b"paged-fills");
+    submit(&pic, core, &user, b"page-order", "0.05").unwrap();
+    let empty =
+        br#"{"assetPositions":[],"marginSummary":{"totalMarginUsed":"0","totalNtlPos":"0"}}"#;
+    let status = br#"{"status":"open","order":{"oid":4242}}"#;
+    call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+        &pic,
+        core,
+        controller,
+        "test_sweep_now",
+        (),
+        route(ACCEPTED, empty, b"[]", status),
+    )
+    .unwrap()
+    .0
+    .unwrap();
+    pic.advance_time(std::time::Duration::from_secs(121));
+    let first_start = Cell::new(0u64);
+    let page_number = Cell::new(0u32);
+    let sweep = || {
+        call_with_routed_outcalls::<(),Result<api_types::order::SweepOutcome,ErrorCode>,_>(
+        &pic,core,controller,"test_sweep_now",(),|call| {
+            let q:serde_json::Value=serde_json::from_slice(&call.body).unwrap();
+            if q["type"]=="userFillsByTime" {
+                let start=q["startTime"].as_u64().unwrap();
+                let rows:Vec<_>=if page_number.get()==0 {
+                    first_start.set(start);
+                    (0..2000).map(|i|serde_json::json!({"tid":i+1,"oid":999,"coin":"ETH","px":"2500","sz":"0.000001","fee":"0","time":start+i})).collect()
+                } else {
+                    assert_eq!(start,first_start.get()+1999);
+                    vec![serde_json::json!({"tid":2000,"oid":999,"coin":"ETH","px":"2500","sz":"0.000001","fee":"0","time":start}),serde_json::json!({"tid":2001,"oid":999,"coin":"ETH","px":"2500","sz":"0.000001","fee":"0","time":start+1})]
+                };
+                page_number.set(page_number.get()+1);
+                Ok((200,serde_json::to_vec(&rows).unwrap()))
+            } else { route(ACCEPTED,empty,b"[]",status)(call) }
+        }).unwrap()
+    };
+    sweep().0.unwrap();
+    sweep().0.unwrap();
+    assert_eq!(
+        page_number.get(),
+        2,
+        "full pages continue without the regular polling delay"
+    );
+}
+
+#[test]
+fn recovered_order_rewind_survives_failed_fetch_and_upgrade() {
+    let pic = pic();
+    let (vault, core) = setup(&pic);
+    let controller = principal(170);
+    let user = provision_user(&pic, vault, core, controller, 226, b"durable-rewind");
+    let submitted = submit(&pic, core, &user, b"lost-rewind-order", "0.05").unwrap();
+    let cloid = std::cell::RefCell::new(String::new());
+    let phase = Cell::new(0u8);
+    let recent_cursor = Cell::new(0u64);
+    let rewind_start = Cell::new(0u64);
+    let fill_requests = Cell::new(0u32);
+    let sweep = || {
+        call_with_routed_outcalls::<(), Result<api_types::order::SweepOutcome, ErrorCode>, _>(
+            &pic,
+            core,
+            controller,
+            "test_sweep_now",
+            (),
+            |call| {
+                let q: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                if q["action"]["type"] == "order" {
+                    assert_eq!(phase.get(), 0, "must not resend order");
+                    *cloid.borrow_mut() = q["action"]["orders"][0]["c"].as_str().unwrap().into();
+                    return Err((4, "lost order response".into()));
+                }
+                if q["type"] == "orderStatus" {
+                    return Ok((
+                        200,
+                        serde_json::to_vec(&serde_json::json!({
+                            "status": if phase.get() < 2 { "unknown" } else { "filled" },
+                            "order": { "oid":4242, "cloid":*cloid.borrow() }
+                        }))
+                        .unwrap(),
+                    ));
+                }
+                if q["type"] == "userFillsByTime" {
+                    fill_requests.set(fill_requests.get() + 1);
+                    let start = q["startTime"].as_u64().unwrap();
+                    if phase.get() < 2 {
+                        recent_cursor.set(q["endTime"].as_u64().unwrap());
+                        return Ok((200, b"[]".to_vec()));
+                    }
+                    if phase.get() == 2 {
+                        assert!(start < recent_cursor.get(), "recovered oid must rewind");
+                        rewind_start.set(start);
+                        return Err((4, "fill fetch unavailable".into()));
+                    }
+                    assert_eq!(
+                        start,
+                        rewind_start.get(),
+                        "failed rewind must survive upgrade"
+                    );
+                    return Ok((
+                        200,
+                        serde_json::to_vec(&serde_json::json!([{
+                            "tid":9001, "oid":4242, "coin":"ETH", "px":"2500",
+                            "sz":"0.05", "fee":"0.000120", "time":start
+                        }]))
+                        .unwrap(),
+                    ));
+                }
+                route(ACCEPTED, POSITIONS, b"[]", STATUS_FILLED)(call)
+            },
+        )
+        .unwrap()
+        .0
+        .unwrap()
+    };
+    sweep();
+    phase.set(1);
+    pic.advance_time(std::time::Duration::from_secs(130));
+    sweep();
+    assert!(recent_cursor.get() > 0);
+    phase.set(2);
+    pic.advance_time(std::time::Duration::from_millis(1));
+    sweep();
+    assert!(rewind_start.get() > 0);
+    assert_eq!(
+        list_orders(&pic, core, user.caller, &user.session)[0].state,
+        OrderState::Filled
+    );
+    pic.upgrade_canister(
+        core,
+        pocket_ic_tests::wasm(TRADING_CORE_WASM),
+        candid::encode_one(()).unwrap(),
+        Some(controller),
+    )
+    .unwrap();
+    let guard: Result<Option<Principal>, ErrorCode> =
+        query(&pic, core, controller, "get_journal_guard", ()).unwrap();
+    let resumed: Result<(), ErrorCode> =
+        update(&pic, core, guard.unwrap().unwrap(), "resume_journal", ()).unwrap();
+    resumed.unwrap();
+    phase.set(3);
+    let before = fill_requests.get();
+    sweep();
+    assert_eq!(
+        fill_requests.get(),
+        before + 1,
+        "rewound history remains due immediately"
+    );
+    let fills = envelope::list_fills(&pic, core, user.caller, &user.session, None, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(fills.items.len(), 1);
+    assert_eq!(fills.items[0].order_id, submitted.order_id);
 }

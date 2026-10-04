@@ -17,8 +17,27 @@ pub fn credit_external_deposit(
     now: u64,
     sender: Option<&[u8; 20]>,
 ) -> Result<bool, Error> {
+    credit_external_deposit_with_fee(
+        connection, event_id, network, tx_hash, amount, 0, address, asset, now, sender,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn credit_external_deposit_with_fee(
+    connection: &mut UpdateConnection<'_>,
+    event_id: &[u8; 32],
+    network: &str,
+    tx_hash: &[u8],
+    amount: u64,
+    fee: u64,
+    address: &[u8; 20],
+    asset: &str,
+    now: u64,
+    sender: Option<&[u8; 20]>,
+) -> Result<bool, Error> {
     if tx_hash.is_empty()
         || tx_hash.len() > 64
+        || fee >= amount
         || amount == 0
         || amount > i64::MAX as u64
         || now == 0
@@ -42,7 +61,7 @@ pub fn credit_external_deposit(
         account_address: *address,
         counterparty: sender.copied().unwrap_or([0u8; 20]),
         asset: asset.to_string(),
-        amount,
+        amount: amount - fee,
         kind: "deposit".to_string(),
         at: now,
         evidence_ref: Some(hex::encode(tx_hash)),
@@ -57,6 +76,11 @@ pub fn credit_external_deposit(
                 .ok_or(Error::Invariant("trading account requires an owner"))?;
             let in_transit = ledger::user_in_transit_balance(connection, &user_id)?;
             let confirmable = amount.min(in_transit);
+            if fee > 0 && confirmable > 0 && confirmable != amount {
+                return Err(Error::Invariant(
+                    "fee-bearing allocation requires complete settlement",
+                ));
+            }
             let confirmed = funds::confirm_executing_allocations(
                 connection,
                 &user_id,
@@ -65,17 +89,27 @@ pub fn credit_external_deposit(
                 confirmable,
                 now,
             )?;
+            if fee > 0 && confirmed > 0 && confirmed != amount {
+                return Err(Error::Invariant(
+                    "fee-bearing allocation is not fully matched",
+                ));
+            }
             if confirmed > 0 {
-                ledger::allocation_confirm(
+                ledger::allocation_confirm_with_fee(
                     connection,
                     &user_id,
                     &owner.account_id,
                     confirmed,
+                    fee,
                     now,
                     event_id,
                 )?;
             }
-            let excess = amount - confirmed;
+            let excess = if confirmed == 0 {
+                amount - fee
+            } else {
+                amount - confirmed
+            };
             // Once observations begin, direct arrivals are included in the next
             // absolute equity observation. Never add them again: the response
             // may already contain an arrival whose history was ingested later.
@@ -97,13 +131,19 @@ pub fn credit_external_deposit(
                 .transpose()?
                 .flatten();
             if let Some(identity) = identity {
-                ledger::deposit_confirmed(connection, &identity.user_id, amount, now, event_id)?;
+                ledger::deposit_confirmed(
+                    connection,
+                    &identity.user_id,
+                    amount - fee,
+                    now,
+                    event_id,
+                )?;
             } else {
-                ledger::unmatched_deposit(connection, amount, now, event_id)?;
+                ledger::unmatched_deposit(connection, amount - fee, now, event_id)?;
             }
         }
         _ => {
-            ledger::unmatched_deposit(connection, amount, now, event_id)?;
+            ledger::unmatched_deposit(connection, amount - fee, now, event_id)?;
             events::insert_audit(
                 connection,
                 "system",

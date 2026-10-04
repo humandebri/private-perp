@@ -22,6 +22,57 @@ pub struct ExistingRecord {
     pub digest: [u8; 32],
 }
 
+/// No legacy record is backfilled: absence cannot establish that a send was prevented.
+pub fn prepare_send(
+    c: &mut UpdateConnection<'_>,
+    worker: &[u8],
+    kind: &str,
+    id: &[u8; 32],
+) -> Result<(), Error> {
+    c.execute(
+        "INSERT INTO send_permits(worker, kind, request_id, state) VALUES (?1, ?2, ?3, 'prepared')",
+        params![worker, kind, id.as_slice()],
+    )
+    .map_err(sql)
+}
+
+pub fn send_state(
+    c: &Connection,
+    worker: &[u8],
+    kind: &str,
+    id: &[u8; 32],
+) -> Result<Option<String>, Error> {
+    c.query_optional_scalar(
+        "SELECT state FROM send_permits WHERE worker=?1 AND kind=?2 AND request_id=?3",
+        params![worker, kind, id.as_slice()],
+    )
+    .map_err(sql)
+}
+
+/// Authorization is single-use; a lost reply never produces a second permission.
+pub fn authorize_send(
+    c: &mut UpdateConnection<'_>,
+    worker: &[u8],
+    kind: &str,
+    id: &[u8; 32],
+) -> Result<bool, Error> {
+    c.execute("UPDATE send_permits SET state='authorized' WHERE worker=?1 AND kind=?2 AND request_id=?3 AND state='prepared'",
+        params![worker, kind, id.as_slice()]).map_err(sql)?;
+    Ok(crate::cas::changes(c)? == 1)
+}
+
+/// True is durable evidence that authorization was never granted and is now impossible.
+pub fn cancel_send(
+    c: &mut UpdateConnection<'_>,
+    worker: &[u8],
+    kind: &str,
+    id: &[u8; 32],
+) -> Result<bool, Error> {
+    c.execute("UPDATE send_permits SET state='cancelled' WHERE worker=?1 AND kind=?2 AND request_id=?3 AND state='prepared'",
+        params![worker, kind, id.as_slice()]).map_err(sql)?;
+    Ok(send_state(c, worker, kind, id)?.as_deref() == Some("cancelled"))
+}
+
 pub fn records(
     c: &Connection,
     worker: &[u8],

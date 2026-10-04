@@ -85,7 +85,7 @@ fn route(
             Some("updateLeverage") | Some("approveAgent") | Some("usdSend") => Ok((200, ACCEPTED.to_vec())),
             Some("order") if body["action"].get("builder").is_none() => Ok((200, format!(r#"{{"status":"ok","response":{{"type":"order","data":{{"statuses":[{{"resting":{{"oid":{oid}}}}}]}}}}}}"#).into_bytes())),
             Some("order") => Err((1, "nonzero or unexpected builder fee".into())),
-            Some("cancel") | Some("cancelByCloid") => Ok((200, br#"{"status":"ok","response":{"type":"cancel","data":{"statuses":[{"success":true}]}}}"#.to_vec())),
+            Some("cancel") | Some("cancelByCloid") => Ok((200, br#"{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}"#.to_vec())),
             other => Err((1, format!("unexpected exchange action {other:?}"))),
         };
     }
@@ -96,7 +96,7 @@ fn route(
             Ok((200, format!(r#"{{"levels":[[{{"px":"{}","sz":"1.25"}}],[{{"px":"{}","sz":"1.10"}}]]}}"#, mid - 1, mid + 1).into_bytes()))
         },
         Some("clearinghouseState") => Ok((200, EMPTY_STATE.to_vec())),
-        Some("openOrders") | Some("userFills") => Ok((200, b"[]".to_vec())),
+        Some("openOrders") | Some("userFillsByTime") => Ok((200, b"[]".to_vec())),
         Some("orderStatus") => Ok((200, format!(r#"{{"status":"cancelled","order":{{"oid":{oid}}}}}"#).into_bytes())),
         other => Err((1, format!("unexpected info query {other:?}"))),
     }

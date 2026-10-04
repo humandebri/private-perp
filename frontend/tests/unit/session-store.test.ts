@@ -73,7 +73,7 @@ describe('session lifecycle and order reconciliation', () => {
     await store.login()
     gateway.refresh.mockResolvedValueOnce({ ...data(), coreJournal: [true, true] })
     await store.refresh()
-    expect(orderBlockReason(store.getSnapshot(), 0)).toContain('復元した記録')
+    expect(orderBlockReason(store.getSnapshot(), 0)).toContain('restored records')
     await store.submit(input)
     expect(gateway.submitOrder).not.toHaveBeenCalled()
   })
@@ -85,7 +85,7 @@ describe('session lifecycle and order reconciliation', () => {
       funds: { ...data().funds, recovery_fence: [{ Preparing: null }] },
     })
     await store.refresh()
-    expect(orderBlockReason(store.getSnapshot(), 0, 1_000)).toContain('回収フェンス')
+    expect(orderBlockReason(store.getSnapshot(), 0, 1_000)).toContain('Recovery is fenced')
     await store.submit(input)
     expect(gateway.submitOrder).not.toHaveBeenCalled()
     gateway.refresh.mockResolvedValueOnce({
@@ -93,7 +93,7 @@ describe('session lifecycle and order reconciliation', () => {
       agent: { ...data().agent!, current: [{ ...data().agent!.current[0]!, expires_at: [999n] }] },
     })
     await store.refresh()
-    expect(orderBlockReason(store.getSnapshot(), 0, 1_000)).toContain('期限')
+    expect(orderBlockReason(store.getSnapshot(), 0, 1_000)).toContain('expired')
   })
   it('does not send invalid input and clears tracked requests on logout', async () => {
     const { store, gateway } = fixture()
@@ -116,7 +116,7 @@ describe('session lifecycle and order reconciliation', () => {
       orders: undefined,
     })
     await store.refresh()
-    expect(orderBlockReason(store.getSnapshot(), 0)).toContain('更新できません')
+    expect(orderBlockReason(store.getSnapshot(), 0)).toContain('Could not refresh')
     await store.refresh()
     const pending = deferred<void>()
     const action = store.run(() => pending.promise)
@@ -135,7 +135,7 @@ describe('session lifecycle and order reconciliation', () => {
     advance(10001)
     await store.submit(input)
     expect(gateway.submitOrder).not.toHaveBeenCalled()
-    expect(store.getSnapshot().error).toContain('古い')
+    expect(store.getSnapshot().error).toContain('stale')
   })
   it('shares refresh, drops delayed responses across logout and re-login', async () => {
     const { store, gateway } = fixture()
@@ -175,7 +175,7 @@ describe('session lifecycle and order reconciliation', () => {
     })
     gateway.refresh.mockRejectedValueOnce(new Error('offline'))
     await store.refresh()
-    expect(orderBlockReason(store.getSnapshot(), 0)).toContain('更新できません')
+    expect(orderBlockReason(store.getSnapshot(), 0)).toContain('Could not refresh')
     await store.refresh()
     expect(orderBlockReason(store.getSnapshot(), 0)).toBeUndefined()
     expect(store.getSnapshot().error).toBe('action rejected')
@@ -239,7 +239,7 @@ describe('session lifecycle and order reconciliation', () => {
     expect(store.getSnapshot().orders[0].state).toBe('unknown')
     gateway.lookupOrder.mockResolvedValueOnce({ ...order, state: { Unknown: null } })
     await store.refresh()
-    expect(orderBlockReason(store.getSnapshot(), 0)).toContain('照合中')
+    expect(orderBlockReason(store.getSnapshot(), 0)).toContain('Reconciling')
   })
 })
 

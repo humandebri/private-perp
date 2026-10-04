@@ -56,7 +56,8 @@ for role, (types, entries) in parts.items():
             exported = "transform_info"
         methods.append((exported, signature))
         if role == "journal" and name in {
-            "head", "records", "intent_record", "append", "recovery_head",
+            "head", "records", "intent_record", "append", "append_prepared",
+            "authorize_send", "cancel_prepared_send", "recovery_head",
             "recovery_events", "recovery_event", "append_recovery_event",
         }:
             assert signature.startswith("("), signature

@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "RFC 9180 HPKE封筒（canister共通のseal/openとaad束縛）"
+license.workspace = true
+repository.workspace = true
+description = "RFC 9180 HPKE envelopes with authenticated context binding"
 
 [lib]
 crate-type = ["rlib"]

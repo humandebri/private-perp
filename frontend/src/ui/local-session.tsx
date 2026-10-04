@@ -57,6 +57,6 @@ export function LocalSessionProvider({ children }: { children: ReactNode }) {
 }
 export function useLocalSession() {
   const value = useContext(Context)
-  if (!value) throw new Error('LocalSessionProviderがありません')
+  if (!value) throw new Error('LocalSessionProvider is missing')
   return value
 }

@@ -1,48 +1,48 @@
-# Phase 3 混合負荷（PocketIC + mock HL）
+# Phase 3 mixed load: PocketIC and mock HL
 
-2026-09-25、固定seed `20260924`で20人と100人を再実行した。各ユーザーは署名済みeligibility登録、合成入金、配分、Agent承認、ETH注文、取消、回収を通した。注文と取消はcoreの実際の送信パイプライン、配分と回収はvaultの実際のoutboxを使用した。HLのREST応答だけをmockした。各ユーザーの資金・口座・要求IDは分離し、全POST件数と回収後の残高・フェンスを検査した。builder feeフィールドが注文に入らないことも検査した。vaultのV2保管口座生成イベントとvault/core双方のV2送信結果イベントの通常追記を含む。下表は業務区間別cycles差分を追加した再実行値である。
+On 2026-09-25, reran 20 and 100 users with fixed seed `20260924`. Each user completed signed eligibility registration, a synthetic deposit, allocation, agent approval, an ETH order, cancellation, and recovery. Orders/cancellations used core's real dispatch pipeline; allocation/recovery used vault's real outbox. Only HL REST responses were mocked. User funds, accounts, and request IDs were separate. Checks covered all POST counts, post-recovery balances/fences, and the absence of builder-fee fields. The run includes normal V2 custody-account creation events and vault/core V2 send-result events. The tables reflect the rerun with per-business-stage cycles measurements.
 
-| 人数 | 配分/注文/取消/回収POST | REST weight累計 | 予算待ち（IC模擬時間） | 注文受付p95（ホスト時間） | 1人の処理p95（ホスト時間） | ETH観測年齢 | 失敗 |
+| Users | Allocation/order/cancel/recovery POSTs | Total REST weight | Budget wait, simulated IC time | Order admission p95, host time | Per-user processing p95, host time | ETH observation age | Failures |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 20 | 各20 | 6,840 | 366秒 | 120ms | 1,943ms | 61秒 | 0 |
-| 100 | 各100 | 61,894 | 3,416秒 | 133ms | 1,670ms | 61秒 | 0 |
+| 20 | 20 each | 6,840 | 366s | 120ms | 1,943ms | 61s | 0 |
+| 100 | 100 each | 61,894 | 3,416s | 133ms | 1,670ms | 61s | 0 |
 
-| 人数 | vault cycles | core cycles | policy cycles | vault journal cycles | core journal cycles |
+| Users | Vault cycles | Core cycles | Policy cycles | Vault journal cycles | Core journal cycles |
 |---:|---:|---:|---:|---:|---:|
 | 20 | 625,132,242,995 | 630,260,292,004 | 3,794,483,371 | 4,473,515,931 | 3,546,722,837 |
 | 100 | 3,129,985,960,306 | 3,163,271,407,877 | 20,390,986,618 | 23,026,531,288 | 18,110,716,209 |
 
-各区間の前後に5 canisterの残高を読み、包括的な差分を`phase_cycles`として試験ログへ出す。下表は資金・取引の主要2 canisterの値で、単位は10億cycles。ログの配列は行が表の区間順、列がvault・core・policy・vault journal・core journalの順である。
+Read balances for all 5 canisters before and after each stage and log inclusive deltas as `phase_cycles`. The table below shows the two main fund/trading canisters in billions of cycles. Log arrays use the table's stage order for rows and vault, core, policy, vault journal, and core journal for columns.
 
-| 区間 | 20人 vault | 20人 core | 100人 vault | 100人 core |
+| Stage | 20 users: vault | 20 users: core | 100 users: vault | 100 users: core |
 |---|---:|---:|---:|---:|
-| ログイン・入金準備 | 8.2 | 0.0 | 41.9 | 0.0 |
-| 配分 | 204.7 | 0.2 | 1,024.4 | 1.1 |
-| Agent・口座観測 | 203.9 | 1.9 | 1,020.1 | 9.4 |
-| 注文 | 1.8 | 415.9 | 9.4 | 2,085.5 |
-| 取消 | 0.3 | 206.9 | 1.3 | 1,039.9 |
-| 回収 | 206.3 | 5.4 | 1,032.9 | 27.3 |
+| Login/deposit preparation | 8.2 | 0.0 | 41.9 | 0.0 |
+| Allocation | 204.7 | 0.2 | 1,024.4 | 1.1 |
+| Agent/account observation | 203.9 | 1.9 | 1,020.1 | 9.4 |
+| Order | 1.8 | 415.9 | 9.4 | 2,085.5 |
+| Cancellation | 0.3 | 206.9 | 1.3 | 1,039.9 |
+| Recovery | 206.3 | 5.4 | 1,032.9 | 27.3 |
 
-共有REST予算は1200 weight/分、退出予約300。試験はweight使用量が900を超えた時点でIC時計を61秒進めており、100人の3,416秒は**実際のユーザー待ち時間の予測値ではない**。ホストp95にもIC時計の前進を含めない。REST weight累計が大きいのは、各sweepがほかの口座も照合し、`userFills`へ保守的な最大weightを確保するためである。区間値には同時に動いたtimerの費用も入り、署名・HTTPS outcall・保存別の費用は分離できていない。実HLの制限、実時間の同時受付、障害時の失敗率も未検証。安全性試験の成功を性能の合格として扱わない。
+The shared REST budget is 1200 weight/minute with an exit reserve of 300. Tests advance the IC clock by 61 seconds whenever weight exceeds 900. The 100-user wait of 3,416 seconds is **not a prediction of real user wait time**. Host p95 excludes simulated clock advances. Total weight is high because sweeps also reconcile other accounts and reserve conservative maximum weight for `userFills`. Stage deltas include concurrent timers; signing, HTTPS outcalls, and storage costs are not separated. Real HL limits, real-time concurrent admission, and failure rates under faults remain unverified. Safety-test success is not a performance pass.
 
-## Agent公開鍵照会削減・`/info`非複製化後の再測定
+## Remeasurement after fewer agent public-key calls and non-replicated `/info`
 
-同じseed・同じtest-venue試験を2026-09-25に再実行した。`ic-cdk-management-canister` 0.2.0のHTTP builderは変更前から料金方式v2で、`/exchange`も既に非複製だった。今回の変更はAgent署名ごとの`ecdsa_public_key`呼び出しの削減と、core/vaultの`/info`を非複製にしたこと。下表は上記の先行測定と変更後の**5 canister合計の残量差分**であり、単独の管理Canister呼出しの料金ではない。
+Reran the same seed and test-venue tests on 2026-09-25. The `ic-cdk-management-canister` 0.2.0 HTTP builder already used fee model v2, and `/exchange` was already non-replicated. This change removed per-agent-signature `ecdsa_public_key` calls and made core/vault `/info` non-replicated. Values below compare **aggregate balance deltas across 5 canisters**, not the fee of one management-canister call.
 
-| 人数 | 先行測定cycles | 変更後cycles | 差（減少） | 減少率 | core単体の減少 |
+| Users | Earlier cycles | Updated cycles | Reduction | Reduction rate | Core-only reduction |
 |---:|---:|---:|---:|---:|---:|
 | 20 | 1,267,207,257,138 | 1,265,138,673,035 | 2,068,584,103 | 0.163% | 2,019,095,652 |
 | 100 | 6,354,785,602,298 | 6,343,243,273,806 | 11,542,328,492 | 0.182% | 11,892,209,229 |
 
-変更後のREST weightは20人が6,840（同値）、100人が60,166（先行測定61,894）。失敗は両群とも0件。100人の市場観測年齢は244秒（先行測定61秒）で、10分の停止閾値内だが鮮度は悪化した。timerや口座巡回の実行回数に揺れがあるため、合計cycles差を公開鍵照会または非複製化だけに帰属できない。実HLでのcycles費用、非複製読取の信頼条件と鮮度は未検証。
+Updated REST weight was 6,840 for 20 users (unchanged) and 60,166 for 100 users (previously 61,894). Both had 0 failures. The 100-user observation age rose from 61 to 244 seconds: within the 10-minute stop threshold, but less fresh. Timer and account-sweep counts vary, so the full cycles delta cannot be attributed solely to fewer public-key calls or non-replicated reads. Real HL cycles costs, read trust assumptions, and freshness remain unverified.
 
-## 2026-09-28 fixture修正後の再測定
+## Remeasurement after fixture correction on 2026-09-28
 
-上の表は当時の測定記録として残す。現行fixtureでは、配分送信後に取引口座への着金を別イベントとして計上する。以前は送信前の直接入金だけを計上して配分を未決済のまま回収を要求していたため、現在の残高観測の安全条件では`ReservationConflict`となる。着金後の取引残高は10,000 USDC、1 USDCの回収後は9,999 USDCと確認する。
+Retain earlier tables as historical measurements. The updated fixture records trading-account receipt as a separate event after allocation dispatch. Previously, it recorded only a direct deposit before sending and requested recovery while allocation remained unsettled, producing `ReservationConflict` under current balance-observation safety checks. Assert a trading balance of 10,000 USDC after receipt and 9,999 USDC after recovering 1 USDC.
 
-| 人数 | 配分/注文/取消/回収POST | REST weight累計 | 予算待ち（IC模擬時間） | 注文受付p95（ホスト時間） | 1人の処理p95（ホスト時間） | ETH観測年齢 | 失敗 |
+| Users | Allocation/order/cancel/recovery POSTs | Total REST weight | Budget wait, simulated IC time | Order admission p95, host time | Per-user processing p95, host time | ETH observation age | Failures |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 20 | 各20 | 6,916 | 366秒 | 91ms | 1,284ms | 61秒 | 0 |
-| 100 | 各100 | 64,092 | 3,599秒 | 111ms | 1,474ms | 244秒 | 0 |
+| 20 | 20 each | 6,916 | 366s | 91ms | 1,284ms | 61s | 0 |
+| 100 | 100 each | 64,092 | 3,599s | 111ms | 1,474ms | 244s | 0 |
 
-これは5 Canister構成のPocketIC + mock HL測定であり、単一Canisterの同時負荷や実HLの性能を表さない。新旧の表はfixtureが異なるため、改善率の比較には使わない。
+These are five-canister PocketIC/mock-HL measurements, not unified-canister concurrent-load or real-HL performance results. Different fixtures prevent using the old/new tables to calculate an improvement rate.

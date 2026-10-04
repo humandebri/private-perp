@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "control_guard Canisterの雛形"
+license.workspace = true
+repository.workspace = true
+description = "Standalone canister upgrade control guard"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

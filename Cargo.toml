@@ -18,9 +18,8 @@ members = [
     "tools/e2e-signer",
     "tools/eligibility-issuer",
 ]
-# ホストで実行できる純粋クレートのみを既定の対象にする。
-# Canisterクレートと `db` の実装は wasm32 ビルドでのみ検証する（Implementation.md 3.2、3.3）。
-# `pocket-ic-tests` はPocketICサーバを必要とするため既定の対象から外す。
+# Default members run on the host. Canister implementations require Wasm builds.
+# PocketIC integration tests are run separately with their server.
 default-members = ["crates/hl-types", "crates/hl-sign", "crates/api-types", "crates/db"]
 
 [workspace.package]
@@ -28,8 +27,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
 publish = false
+license = "MIT"
+repository = "https://github.com/humandebri/private-perp"
 
-# 依存は完全固定する（Implementation.md 4.1、14.1）。Cargo.lock をコミットする。
+# Pin dependency versions and commit Cargo.lock for reproducibility.
 [workspace.dependencies]
 candid = "=0.10.35"
 hex = "=0.4.3"
@@ -46,6 +47,5 @@ sha2 = "=0.11.0"
 rand_core = "=0.10.1"
 hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
 sha3 = "=0.12.0"
-# `pocket-ic 16.0.0` が `thiserror =2.0.18` を要求するため、同一メジャー内で
-# 1バージョンしか選べない制約に合わせて 2.0.18 へ揃える。
+# Match the thiserror version required by pocket-ic 16.0.0.
 thiserror = "=2.0.18"

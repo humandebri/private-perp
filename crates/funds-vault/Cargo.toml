@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "funds_vault Canister（認証・台帳・資金outbox）"
+license.workspace = true
+repository.workspace = true
+description = "Custody canister with authentication, ledger, and fund outbox"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

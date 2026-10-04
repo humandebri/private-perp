@@ -1,7 +1,4 @@
-# canister build/deploy configuration (icp-cli)
-#
-# 統合 Canister の build 設定。Canister ID はデプロイ先ごとに確定する。
-# frontend は Cloudflare Workers 配信なのでここには定義しない。
+# Unified canister build configuration; the frontend is hosted separately.
 canisters:
   - name: private_perp
     recipe:

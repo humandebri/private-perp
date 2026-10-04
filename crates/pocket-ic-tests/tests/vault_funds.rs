@@ -624,3 +624,43 @@ fn a_session_from_another_caller_is_rejected() {
         "{error:?}"
     );
 }
+
+#[test]
+fn history_pages_preserve_requests_with_equal_timestamps() {
+    let pic = pic();
+    let vault = deploy_default(&pic, FUNDS_VAULT_WASM);
+    let caller = principal(224);
+    let (session, _) = open_session(&pic, vault, caller, &secret(224));
+    credit(&pic, vault, caller, &session, 1_000_000, 224);
+    for i in 0u8..101 {
+        allocation(&pic, vault, caller, &session, &[i], 1).unwrap();
+    }
+    let first: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session.clone(), None::<Blob>, 100u32),
+    )
+    .unwrap();
+    let first = first.unwrap();
+    assert_eq!(first.items.len(), 100);
+    assert!(first.items.iter().all(|row| row.at == first.items[0].at));
+    let second: Result<api_types::Paged<api_types::fund::FundEvent>, ErrorCode> = update_args(
+        &pic,
+        vault,
+        caller,
+        "list_fund_events",
+        (session, first.next_cursor, 100u32),
+    )
+    .unwrap();
+    let second = second.unwrap();
+    assert_eq!(second.items.len(), 1);
+    let ids: std::collections::HashSet<_> = first
+        .items
+        .iter()
+        .chain(&second.items)
+        .map(|row| row.event_id.clone().into_vec())
+        .collect();
+    assert_eq!(ids.len(), 101);
+}

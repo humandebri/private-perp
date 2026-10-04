@@ -19,8 +19,19 @@ __pycache__/
 # Rust / icp-cli
 /target/
 /.icp/
-# サンドボックス内でCARGO_HOME / ICP_HOMEをワークスペースへ向けた場合のキャッシュ
+# Workspace-local tool caches and identity stores
 /.cargo-home/
 /.icp-home/
-# PocketICサーババイナリ（テスト専用のダウンロード）
+# Downloaded PocketIC test server
 /.pocket-ic/
+
+# Local deployment and visual verification state
+/.cloudflare/
+.vlmkit/
+
+# Local signing material and tool environment files
+.dev.vars*
+!.dev.vars.example
+*.pem
+*.key
+*.seed

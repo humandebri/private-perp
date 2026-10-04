@@ -10,6 +10,7 @@
 //! 認可は `funds_vault` の `session_status` に問い合わせ、返却されたprincipalをこの
 //! Canisterが受け取ったcallerと比較する（vaultはcoreのcallerを知らないため）。
 
+mod close_price;
 mod cycles;
 mod environment;
 mod market;
@@ -856,8 +857,11 @@ async fn submit_inner(
     // leverage・kind を除くと、同一IDで反対売買やreduce_onlyを変えた再送が
     // 「同一本文」と誤判定され、黙って捨てられる。
     let mut body = Vec::new();
+    body.extend_from_slice(&(market.len() as u64).to_be_bytes());
     body.extend_from_slice(market.as_bytes());
+    body.extend_from_slice(&(quantity.as_str().len() as u64).to_be_bytes());
     body.extend_from_slice(quantity.as_str().as_bytes());
+    body.extend_from_slice(&(args.limit_price.as_deref().unwrap_or("").len() as u64).to_be_bytes());
     body.extend_from_slice(args.limit_price.as_deref().unwrap_or("").as_bytes());
     body.push(u8::from(matches!(args.side, api_types::order::Side::Buy)));
     body.push(u8::from(args.reduce_only));
@@ -875,6 +879,7 @@ async fn submit_inner(
             trigger.kind,
             api_types::order::TriggerKind::StopLoss
         )));
+        body.extend_from_slice(&(trigger.trigger_price.len() as u64).to_be_bytes());
         body.extend_from_slice(trigger.trigger_price.as_bytes());
         body.push(u8::from(trigger.is_market));
     }
@@ -1344,7 +1349,7 @@ fn close_order_args(
 ///
 /// mark価格は`entry_price + unrealized_pnl / size`で近似する（coreはmark配信を
 /// 持たない）。reduce-onlyでは価格はスリッページ上限としてのみ作用し、建玉を
-/// 反転できないため、近似でも安全側に働く。価格の桁は`szDecimals`に合わせて切り捨てる。
+/// 反転できないため、近似でも安全側に働く。価格は市場の小数桁数と有効数字5桁に丸める。
 fn slippage_bounded_price(
     position: &api_types::order::PositionView,
     is_long: bool,
@@ -1375,19 +1380,7 @@ fn slippage_bounded_price(
             "cannot derive a positive limit price",
         ));
     }
-    let step = if sz_decimals >= 6 {
-        1u128
-    } else {
-        10u128.pow(sz_decimals)
-    };
-    // 売りの上限は切り捨て（弱気側）、買いの上限は切り上げ（スリッページ幅を狭めない）。
-    let micros = bounded.unsigned_abs();
-    let floored = micros / step * step;
-    let rounded = if is_long || floored == micros {
-        floored
-    } else {
-        floored + step
-    };
+    let rounded = close_price::round_price_micros(bounded.unsigned_abs(), !is_long, sz_decimals);
     Ok(micros_to_decimal(rounded))
 }
 

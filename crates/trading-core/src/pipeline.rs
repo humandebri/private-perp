@@ -848,34 +848,53 @@ async fn reconcile_account(
             apply_order_status_for_cloid(&account.account_id, &status, now, Some(&cloid)).await?;
     }
 
-    // userFills has a large variable weight. Poll active accounts at most every
-    // two minutes, idle accounts every ten minutes; the schedule survives upgrade.
-    if recovered_order
-        || db::tx::query(|connection| {
-            db::repo::accounts::fills_due(connection, &account.account_id, now)
-        })
-        .map_err(map_db)?
-    {
-        let fills = venue::user_fills(&address).await?;
-        ingest_fills_json(&account.user_id, &account.account_id, &fills, now).await?;
-        db::tx::update(|connection| {
-            db::repo::accounts::mark_fills_checked(connection, &account.account_id, now)
-        })
-        .map_err(map_db)?;
-    }
-
+    let mut needs_fills = recovered_order
+        || db::tx::query(|c| db::repo::accounts::fills_due(c, &account.account_id, now))
+            .map_err(map_db)?;
     // 未終端でoidが分かっている注文の状態を問い合わせる。
-    let oids = db::tx::query(|connection| {
+    let oids = db::tx::update(|connection| {
         db::repo::orders::oids_awaiting_status(
             connection,
             &account.account_id,
             MAX_STATUS_CHECKS_PER_ACCOUNT,
+            now,
         )
     })
     .map_err(map_db)?;
     for oid in oids {
         let status = venue::order_status(&address, oid).await?;
-        apply_order_status_json(&account.account_id, &status, now).await?;
+        needs_fills |= apply_order_status_json(&account.account_id, &status, now).await?;
+    }
+    if needs_fills {
+        let start = db::tx::query(|c| db::repo::accounts::fills_start(c, &account.account_id, now))
+            .map_err(map_db)?;
+        let fills = venue::user_fills(&address, start, now).await?;
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(&fills).map_err(|_| ErrorCode::PolicyUnavailable)?;
+        let mut last = start;
+        for fill in &entries {
+            let at = fill
+                .get("time")
+                .and_then(|v| v.as_u64())
+                .filter(|at| *at >= start && *at <= now)
+                .ok_or(ErrorCode::PolicyUnavailable)?;
+            last = last.max(at);
+        }
+        // No offset exists inside a timestamp. Keep saturated boundaries pending.
+        if entries.len() >= 2000 && last == start {
+            return Err(ErrorCode::PolicyUnavailable);
+        }
+        ingest_fills_json(&account.user_id, &account.account_id, &fills, now).await?;
+        db::tx::update(|c| {
+            db::repo::accounts::advance_fills(
+                c,
+                &account.account_id,
+                if entries.len() >= 2000 { last } else { now },
+                now,
+                entries.len() < 2000,
+            )
+        })
+        .map_err(map_db)?;
     }
     Ok(())
 }
@@ -1158,8 +1177,33 @@ async fn apply_order_status_for_cloid(
     let state = match status.as_str() {
         "open" => "open",
         "filled" => "filled",
-        "canceled" | "cancelled" => "cancelled",
-        "rejected" => "rejected",
+        "canceled"
+        | "cancelled"
+        | "marginCanceled"
+        | "vaultWithdrawalCanceled"
+        | "openInterestCapCanceled"
+        | "selfTradeCanceled"
+        | "reduceOnlyCanceled"
+        | "siblingFilledCanceled"
+        | "delistedCanceled"
+        | "liquidatedCanceled"
+        | "scheduledCancel" => "cancelled",
+        "rejected"
+        | "tickRejected"
+        | "minTradeNtlRejected"
+        | "perpMarginRejected"
+        | "reduceOnlyRejected"
+        | "badAloPxRejected"
+        | "iocCancelRejected"
+        | "badTriggerPxRejected"
+        | "marketOrderNoLiquidityRejected"
+        | "positionIncreaseAtOpenInterestCapRejected"
+        | "positionFlipAtOpenInterestCapRejected"
+        | "tooAggressiveAtOpenInterestCapRejected"
+        | "openInterestIncreaseRejected"
+        | "insufficientSpotBalanceRejected"
+        | "oracleRejected"
+        | "perpMaxPositionRejected" => "rejected",
         _ => "unknown",
     };
     // An unrecognized venue status is not evidence for replacing an existing

@@ -42,7 +42,8 @@ fn valid_event(event: &RecoveryEvent) -> bool {
     }
     let id = |id: &api_types::Blob| id.len() == 32;
     let state = |s: &str| s.len() <= 32 && s.is_ascii();
-    match &event.payload {
+    let payload = event.payload.clone().into_fee_aware();
+    match &payload {
         RecoveryPayload::Baseline { state_digest } => id(state_digest),
         RecoveryPayload::IdentityRegistration {
             user_id,
@@ -183,12 +184,14 @@ fn valid_event(event: &RecoveryEvent) -> bool {
                 && *accepted_at_ms > 0
                 && event.logical_id.as_ref() == expected
         }
-        RecoveryPayload::DepositCredit {
+        RecoveryPayload::DepositCredit { .. } => false,
+        RecoveryPayload::DepositCreditWithFee {
             sender,
             tx_hash,
             network,
             address,
             amount_micros,
+            fee_micros,
             observed_at_ms,
         } => {
             let mut input = b"deposit".to_vec();
@@ -204,6 +207,7 @@ fn valid_event(event: &RecoveryEvent) -> bool {
                 && tx_hash.len() <= 64
                 && matches!(network.as_str(), "local" | "testnet")
                 && address.len() == 20
+                && *fee_micros < *amount_micros
                 && *amount_micros > 0
                 && *amount_micros <= i64::MAX as u64
                 && *observed_at_ms > 0
@@ -480,6 +484,7 @@ fn recovery_record(
             code: "invalid stored recovery payload".into(),
         })?;
     Ok(RecoveryRecord {
+        encoded_payload: Some(row.payload.into()),
         sequence: row.sequence,
         previous_hash: row.previous_hash.to_vec().into(),
         hash: row.hash.to_vec().into(),
@@ -596,6 +601,25 @@ fn role_append(role: String, intent: SendIntent) -> Result<JournalHead, ErrorCod
 
 #[cfg(feature = "embedded")]
 #[ic_cdk::update]
+fn role_append_prepared(role: String, intent: SendIntent) -> Result<JournalHead, ErrorCode> {
+    with_journal_role(role, || append_prepared(intent))
+}
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_authorize_send(role: String, kind: String, request_id: Vec<u8>) -> Result<bool, ErrorCode> {
+    with_journal_role(role, || authorize_send(kind, request_id))
+}
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
+fn role_cancel_prepared_send(
+    role: String,
+    kind: String,
+    request_id: Vec<u8>,
+) -> Result<bool, ErrorCode> {
+    with_journal_role(role, || cancel_prepared_send(kind, request_id))
+}
+#[cfg(feature = "embedded")]
+#[ic_cdk::update]
 fn role_recovery_head(role: String) -> Result<JournalHead, ErrorCode> {
     with_journal_role(role, recovery_head)
 }
@@ -684,7 +708,14 @@ fn intent_record(
     let request_id = fixed32(&request_id)?;
     if !matches!(
         kind.as_str(),
-        "allocation" | "withdrawal" | "recovery" | "order" | "cancel" | "leverage" | "agent"
+        "allocation"
+            | "withdrawal"
+            | "recovery"
+            | "order"
+            | "cancel"
+            | "leverage"
+            | "agent"
+            | "spot_conversion"
     ) {
         return Err(ErrorCode::BadRequest {
             code: BadRequestCode::MalformedPayload,
@@ -711,10 +742,47 @@ fn intent_record(
 
 #[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
 fn append(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
+    append_impl(intent, false)
+}
+
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
+fn append_prepared(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
+    if !matches!(
+        intent.kind.as_str(),
+        "allocation" | "withdrawal" | "recovery" | "spot_conversion"
+    ) {
+        return Err(ErrorCode::PolicyUnavailable);
+    }
+    append_impl(intent, true)
+}
+
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
+fn authorize_send(kind: String, request_id: Vec<u8>) -> Result<bool, ErrorCode> {
+    let worker = require_worker()?;
+    let id = fixed32(&request_id)?;
+    db::tx::update(|c| db::repo::send_journal::authorize_send(c, &worker, &kind, &id))
+        .map_err(map_db)
+}
+
+#[scoped_entrypoint::update(scope = Journal, prefix = "journal_")]
+fn cancel_prepared_send(kind: String, request_id: Vec<u8>) -> Result<bool, ErrorCode> {
+    let worker = require_worker()?;
+    let id = fixed32(&request_id)?;
+    db::tx::update(|c| db::repo::send_journal::cancel_send(c, &worker, &kind, &id)).map_err(map_db)
+}
+
+fn append_impl(intent: SendIntent, prepared: bool) -> Result<JournalHead, ErrorCode> {
     let worker = require_worker()?;
     if !matches!(
         intent.kind.as_str(),
-        "allocation" | "withdrawal" | "recovery" | "order" | "cancel" | "leverage" | "agent"
+        "allocation"
+            | "withdrawal"
+            | "recovery"
+            | "order"
+            | "cancel"
+            | "leverage"
+            | "agent"
+            | "spot_conversion"
     ) {
         return Err(ErrorCode::BadRequest {
             code: BadRequestCode::MalformedPayload,
@@ -740,6 +808,13 @@ fn append(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
             {
                 return Err(DbError::Conflict);
             }
+            if prepared
+                && db::repo::send_journal::send_state(c, &worker, &intent.kind, &request_id)?
+                    .as_deref()
+                    != Some("prepared")
+            {
+                return Err(DbError::Conflict);
+            }
             return Ok(JournalHead {
                 sequence: existing.sequence,
                 hash: existing.hash.to_vec().into(),
@@ -758,6 +833,9 @@ fn append(intent: SendIntent) -> Result<JournalHead, ErrorCode> {
         hasher.update(intent.nonce.to_be_bytes());
         hasher.update(digest);
         let hash: [u8; 32] = hasher.finalize().into();
+        if prepared {
+            db::repo::send_journal::prepare_send(c, &worker, &intent.kind, &request_id)?;
+        }
         db::repo::send_journal::append(
             c,
             &worker,

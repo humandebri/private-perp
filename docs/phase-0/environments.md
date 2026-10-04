@@ -1,105 +1,102 @@
-# 環境分離：local・testnet・mainnet
+# Environment separation: local, testnet, and mainnet
 
-- 根拠：`Plan.md` 16.1、16.3、16.4、16.5、`Implementation.md` 2.1、3.1、14.3、`ADR-0006`
-- 状態：設計契約。**Canister ID、署名鍵ID、実額上限は未確定**であり、この文書で値を捏造しない
+- Basis: `Plan.md` 16.1, 16.3, 16.4, and 16.5; `Implementation.md` 2.1, 3.1, and 14.3; `ADR-0006`.
+- Status: design contract. **Canister IDs, signing key IDs, and real-fund limits remain unresolved** at this stage. Do not invent values.
 
-## 1. 目的と原則
+> Historical environment contract. The matrix and measurements record the original phase; current deployment instructions are in the root README and later testnet reports.
 
-1. 環境は「network」「鍵」「endpoint」「eligibility issuer」の4点で分離する。1つの設定ミスでmockが本番へ通る状態を作らない。
-2. 秘密（PEM、seed、identity、`.icp/data`）をリポジトリへ入れない。`.gitignore` で除外する。
-3. 未確定値は「未確定」と記録し、判明した時点でこの表へ追記する。推測値を設定ファイルへ書かない。
-4. 本番の不可逆な操作（controller除去、SNSローンチ、実資金受付）はPhase 0の対象外である。
+## 1. Purpose and principles
 
-## 2. 環境マトリクス
+1. Separate four dimensions: network, keys, endpoints, and eligibility issuer. A single configuration mistake must not let mock behavior reach production.
+2. Keep secrets (PEM, seeds, identities, and `.icp/data`) out of the repository using `.gitignore`.
+3. Record unresolved values as unresolved and add confirmed values when available. Do not put guesses in configuration.
+4. Irreversible production actions (controller removal, SNS launch, and accepting real funds) are outside Phase 0.
 
-| 項目 | local | testnet | mainnet |
+## 2. Environment matrix
+
+| Item | local | testnet | mainnet |
 |---|---|---|---|
-| IC network | `icp network start` のローカル（PocketICベース） | IC testnet（`ic` とは別の検証用） | IC mainnet |
-| Canister ID | `icp deploy` が動的割当。`.icp/data` に保持し**コミットしない** | **未確定**（Phase 1で払い出し後に記録） | **未確定**（本番前に記録） |
-| tECDSA key ID | local のテスト鍵（既定 `test_key_1`） | `fuqsr` 上のテスト鍵。key ID名は**未確認**（`test_key_1` を第一候補。`set_ecdsa_key_id` で上書き） | `key_1`（subnet `pzp6e`、34ノード）。Phase 2では拒否 |
-| 署名subnet | local replica | `fuqsr` | `pzp6e`（fiduciary signing subnet） |
-| HL REST | mock HL（ローカル） | `https://api.hyperliquid-testnet.xyz` | `https://api.hyperliquid.xyz` |
-| HL WS（ブラウザ直結） | mock または未接続 | `wss://api.hyperliquid-testnet.xyz/ws` | `wss://api.hyperliquid.xyz/ws` |
-| 資産 | 合成 | test USDC（HyperCore） | USDC（HyperCore） |
-| builder fee | 0 | 0 | **未確定**（本番の事業判断。暗黙に徴収しない） |
-| eligibility issuer | mock issuer（合成属性） | mock issuer（合成属性） | **未確定**（契約・法務確認後に登録） |
-| 開発者controller | 許容 | 許容 | 本番目標では除去。除去はPhase 4の別途承認 |
-| `APP_STAGE`（frontend） | `demo` | `demo` | 未設定（`demo`以外は503） |
-| 実資金 | 扱わない | test USDCのみ | **Phase 0では扱わない** |
+| IC network | Local `icp network start` network (PocketIC based) | IC verification testnet, distinct from `ic` in this design | IC mainnet |
+| Canister ID | Dynamically assigned by `icp deploy`; stored in `.icp/data`, **not committed** | **Unresolved**; record after allocation in Phase 1 | **Unresolved**; record before production |
+| tECDSA key ID | Local test key, default `test_key_1` | Test key on `fuqsr`; name **unverified**. First candidate: `test_key_1`; override via `set_ecdsa_key_id` | `key_1` on `pzp6e` (34 nodes); rejected in Phase 2 |
+| Signing subnet | Local replica | `fuqsr` | `pzp6e` (fiduciary signing subnet) |
+| HL REST | Local mock HL | `https://api.hyperliquid-testnet.xyz` | `https://api.hyperliquid.xyz` |
+| HL WS, direct browser connection | Mock or disconnected | `wss://api.hyperliquid-testnet.xyz/ws` | `wss://api.hyperliquid.xyz/ws` |
+| Assets | Synthetic | Test USDC on HyperCore | USDC on HyperCore |
+| Builder fee | 0 | 0 | **Unresolved** business decision; no implicit charge |
+| Eligibility issuer | Mock, synthetic attributes | Mock, synthetic attributes | **Unresolved**; register after contractual/legal review |
+| Developer controller | Allowed | Allowed | Remove for the production target; separate Phase 4 approval |
+| Frontend `APP_STAGE` | `demo` | `demo` | Unset; non-demo requests return 503 in this original contract |
+| Real funds | None | Test USDC only | **Outside Phase 0** |
 
-- `key_1`／`pzp6e` は `Implementation.md` 2.1の記載であり、本契約で再確認はしていない。Phase 1で実測して確定する。
-- asset indexは`meta.universe`から解決し、固定値を埋め込まない。2026-09-19のtestnet実測ではBTC=3・ETH=4（mainnetはBTC=0・ETH=1）であり、network間で添字が異なる（`docs/phase-1/README.md` 6節）。
-- ローカルの統合試験はPocketICサーバ（`.pocket-ic/`、16.0.0）で行う。ローカルネットワーク（`icp network start`）とは別のハーネスである。
-- ローカルの閾値ECDSAは、PocketICの**テスト用閾値鍵サブネット**で有効になる。`PocketIc::new()`（既定トポロジ）には鍵が無いため `existing keys: []` で拒否される。`PocketIcBuilder::new().with_application_subnet().with_test_threshold_keys_subnet().build()` を使う（`crates/pocket-ic-tests/src/lib.rs`）。
-- ローカルのkey idは **`test_key_1`**（2026-09-19に実測）。本番は `key_1`（`pzp6e`）。PocketIC上の署名往復は約17.9msだが、これはtestnet・本番subnetの性能値ではない。
-- mainnetの署名鍵・subnetは本番リリース候補のビルドで再確認する（Phase 4）。
-- Builder feeの上限同意・徴収アドレスは暗黙に決めない。`api-contract.md` のAgent承認とは別のmaster署名（`approveBuilderFee`）を要求する。
+- `key_1` and `pzp6e` come from `Implementation.md` 2.1 and were not reverified for this contract. Confirm through Phase 1 measurements.
+- Resolve asset indices from `meta.universe`; do not embed fixed values. Measurements on 2026-09-19 found BTC=3 and ETH=4 on testnet, versus BTC=0 and ETH=1 on mainnet (`docs/phase-1/README.md` section 6).
+- Local integration tests use PocketIC server 16.0.0 in `.pocket-ic/`, a separate harness from `icp network start`.
+- Local threshold ECDSA requires PocketIC's **test threshold-key subnet**. `PocketIc::new()` has no keys and rejects requests with `existing keys: []`. Use `PocketIcBuilder::new().with_application_subnet().with_test_threshold_keys_subnet().build()` (`crates/pocket-ic-tests/src/lib.rs`).
+- The local key ID is **`test_key_1`**, measured on 2026-09-19. Production uses `key_1` on `pzp6e`. The measured PocketIC signing round trip was about 17.9ms; this is not testnet or production subnet performance.
+- Reverify production signing keys and subnets in the Phase 4 release candidate.
+- Builder-fee caps and recipients require explicit agreement. `approveBuilderFee` needs a separate master signature from agent approval in `api-contract.md`.
 
-## 3. 鍵とderivation path
+## 3. Keys and derivation paths
 
-`Plan.md` 16.1に基づく規則。
+Rules from `Plan.md` 16.1:
 
-- tECDSA鍵はCanister ID・derivation path・key IDに束縛される。同じCanisterの悪意ある新コードも署名できる前提で扱う。
-- `funds_vault` が共通保管口座とユーザー別取引口座のmaster鍵を管理する。ユーザー別口座は独立masterの口座であり、共通masterのHL sub-accountではない。
-- `trading_core` は口座別・世代別Agent鍵のみを管理する。
-- derivation pathには暗号学的乱数の`account_id`（32バイト）と`generation`のみを使う。**EOA・Principal・`user_id`を公開pathやcloidへ埋め込まない。**
-- 設計上のpath名（Phase 1で最終確定）:
+- tECDSA keys are bound to canister ID, derivation path, and key ID. Assume malicious replacement code in the same canister can also sign.
+- `funds_vault` manages master keys for the shared reserve and individual trading accounts. Each trading account has an independent master; it is not an HL sub-account under one shared master.
+- `trading_core` manages only per-account, per-generation agent keys.
+- Paths use a cryptographically random 32-byte `account_id` and `generation`. **Do not embed EOA, Principal, or `user_id` in public paths or cloids.**
+- Proposed path names, to be finalized in Phase 1:
 
-| 用途 | path案 |
+| Purpose | Proposed path |
 |---|---|
-| 共通保管口座master | `["private-perp", "vault", "reserve"]` |
-| ユーザー別取引口座master | `["private-perp", "trading", account_id_hex]` |
-| Agent世代鍵 | `["private-perp", "agent", account_id_hex, generation]` |
+| Shared reserve master | `["private-perp", "vault", "reserve"]` |
+| Individual trading master | `["private-perp", "trading", account_id_hex]` |
+| Agent-generation key | `["private-perp", "agent", account_id_hex, generation]` |
 
-- 導出結果は世代ごとにキャッシュする。失効・期限切れした鍵を再承認しない。Agent再生成は保存した`account_id`と`generation`に基づく（公開`user_id`を使わない）。
-- 開発環境の開発者controllerは許容するが、本番相当の安全性を主張しない。
+## 4. Prevent mock settings from reaching production
 
-## 4. mock と本番の分離（必須の試験）
+Required Phase 1 tests based on `Plan.md` 16.5 and `ADR-0006`:
 
-`Plan.md` 16.5、`ADR-0006` に基づく。Phase 1で実施する。
-
-| # | 分離試験 | 合格条件 | 状態 |
+| ID | Separation test | Acceptance condition | Status |
 |---|---|---|---|
-| E-1 | mock eligibility tokenを本番相当の network・鍵・build設定で提示 | 拒否される | **未実施**（eligibility発行はPhase 3。tokenが存在しない） |
-| E-2 | testnet用の設定で mainnet endpoint を指定 | 起動・受付が拒否されるか、明示的に失敗する | **実装・検証済み**（`hl-types`のホスト試験＋`core_environment.rs`・`vault_environment.rs`） |
-| E-3 | HPKE要求の`aad`に別network・別canister・別method・別caller・別`request_id`・期限超過を混ぜる | すべて拒否される |
-| E-4 | 別環境で発行したセッション・challengeを再利用 | 拒否される（`NetworkMismatch`／`OriginMismatch`） |
-| E-5 | mock HL用のendpoint設定が本番ビルドへ混入 | ビルド時に検出され、そのままでは起動しない |
-| E-6 | `APP_STAGE`が`demo`以外で公開ページ以外の応答 | 503かつ本人データを返さない |
+| E-1 | Present a mock eligibility token with production-equivalent network, keys, and build settings | Rejected | **Not run**; eligibility issuance belongs to Phase 3 and no token exists yet |
+| E-2 | Configure a mainnet endpoint under testnet settings | Startup/admission rejects it or fails explicitly | **Implemented and verified** with hl-types host tests, `core_environment.rs`, and `vault_environment.rs` |
+| E-3 | Change HPKE AAD network, canister, method, caller, request ID, or exceed expiry | All rejected | |
+| E-4 | Reuse a session/challenge from another environment | Rejected with `NetworkMismatch` or `OriginMismatch` | |
+| E-5 | Include mock HL endpoint settings in a production build | Detected; cannot start unchanged | |
+| E-6 | Serve a non-public response with `APP_STAGE` other than `demo` | 503; no personal data | |
 
-- 環境判定はビルド時の設定ではなく、起動時に検証可能な値（network、canister、key ID、endpoint）で行う。
-- mock token・mock issuer・mock HLの設定は「開発用」と明示し、本番設定のテンプレートへコピーしない。
+Use startup-verifiable values (network, canister, key ID, and endpoint), not build settings alone, to identify the environment. Mark mock tokens, issuers, and endpoints as development settings and do not copy them to production templates.
 
-### 4.1 起動時の環境設定（実装）
+### 4.1 Implemented startup configuration
 
-- 値はビルド定数ではなく、canisterの設定（`funds_vault.vault_config`／`trading_core.core_config`）に持つ。設定は controller のみが変更できる（`funds_vault` は `set_network`・`set_venue_endpoints`・`set_ecdsa_key_id`、`trading_core` は `set_market_context`（network・dex）・`set_venue_endpoints`・`set_ecdsa_key_id`）。`get_environment` は公開の診断queryで、秘密を含まない。
-- 未設定は network 既定（`local`）とし、endpoint は network から解決する。**mainnet は Phase 2 では拒否**する（`mainnet_not_enabled`）。endpoint は network と整合する host のみ受け付ける（testnet → `api.hyperliquid-testnet.xyz`、local → ループバック等。**local の設定で実venueのhostを指定すると拒否**する）。
-- tECDSA key ID は network 既定（local・testnetは `test_key_1`）とし、testnet の実名が確定したら `set_ecdsa_key_id` で上書きする。mainnet の `key_1` はPhase 2では到達しない。
-- 検証は純粋クレート `hl-types::environment` に集約し、ホスト試験で固定する（mainnet拒否・host不一致・lookalike domain・key ID形式）。
-- E-5（mock endpointの本番混入）は、mock endpoint を**コードへ埋め込まない**（設定でのみ与える）ことで構造的に満たす。ローカルの既定はループバックであり、実venueへは出ない。
+- Store values in `funds_vault.vault_config` and `trading_core.core_config`, rather than build constants. Only controllers may change them. Vault setters: `set_network`, `set_venue_endpoints`, `set_ecdsa_key_id`. Core setters: `set_market_context` (network/dex), `set_venue_endpoints`, `set_ecdsa_key_id`. Public `get_environment` diagnostics contain no secrets.
+- Unset network defaults to `local`; endpoints derive from it. **Phase 2 rejects mainnet** with `mainnet_not_enabled`. Accept only hosts matching the network: testnet uses `api.hyperliquid-testnet.xyz`, local uses loopback. **Local configuration rejects real venue hosts.**
+- Default local/testnet key ID is `test_key_1`; override the verified testnet name through `set_ecdsa_key_id`. Mainnet `key_1` is unreachable in Phase 2.
+- Centralize validation in pure `hl-types::environment` host tests: mainnet rejection, host mismatch, lookalike domains, and key-ID format.
+- E-5 is addressed structurally by keeping mock endpoints out of code and supplying them only through configuration. Local defaults are loopback and cannot reach the real venue.
 
-## 5. 設定の出所
+## 5. Configuration sources
 
-| 設定 | 出所 | コミット |
+| Configuration | Source | Committed? |
 |---|---|---|
-| Canisterビルド・配信 | `icp.yaml`（Phase 0で追加。environmentsはPhase 1で追加） | する |
-| Canister ID | `icp` CLIの管理データ（`.icp/`）、`icp canister status <name> -i` | しない（`.icp/`は`.gitignore`） |
-| identity・PEM | `icp identity` | しない |
-| network・root key | `icp network status --json` | しない |
-| 環境別の固定値（endpoint等） | `icp.yaml` の environments、またはcanister environment variables | する（秘密を含めない） |
-| 起動時の環境設定（network・endpoint・key ID） | canisterの設定（controller専用のsetter。`get_environment`で確認） | しない（値はデプロイ時に設定） |
-| 本番の実額上限・料金 | 事業判断の確定後 | する（確定後） |
+| Canister build/deployment | `icp.yaml`, added in Phase 0; environments added in Phase 1 | Yes |
+| Canister ID | icp-managed `.icp/` data; `icp canister status <name> -i` | No; `.icp/` ignored |
+| Identity/PEM | `icp identity` | No |
+| Network/root key | `icp network status --json` | No |
+| Environment-specific constants such as endpoints | `icp.yaml` environments or canister environment variables | Yes, without secrets |
+| Runtime network, endpoints, and key ID | Controller-only canister setters; inspect with `get_environment` | No; set at deployment |
+| Production fund limits and fees | Confirmed business decisions | Yes, after confirmation |
 
-- ローカルのroot keyは明示的に選択したローカル環境でのみ使用する（`icp-cli` の原則）。
-- Canister間の連携先IDは、icp-cliが注入する環境変数（`PUBLIC_CANISTER_ID:<name>`）で渡し、ハードコードしない。
+Use the local root key only in an explicitly selected local environment, following icp-cli's principle. Pass inter-canister IDs through icp-cli-injected `PUBLIC_CANISTER_ID:<name>` environment variables rather than hardcoding them.
 
-## 6. 未確定事項
+## 6. Unresolved values
 
-| 項目 | 記録先 | 確定時期 |
+| Item | Record in | Confirmation stage |
 |---|---|---|
-| testnet/mainnet Canister ID | 本節の表 | Phase 1（払い出し後）／本番前 |
-| test用key ID名とsubnet | 本節の表 | Phase 1 |
-| HLのtestnet制限（最小額・手数料・確定イベント） | `money-and-units.md` 9節 | Phase 1 |
-| 本番の総預かり上限・ユーザー上限・取引上限 | 本節の表 | Phase 4〜5 |
-| 本番eligibility外部発行者 | 本節の表 | 契約・法務確認後 |
-| `icp.yaml` の environments 記法の確定 | `icp.yaml` | Phase 1（`icp project show` で検証） |
+| Testnet/mainnet canister IDs | This table | After allocation in Phase 1 / before production |
+| Test key ID and subnet | This table | Phase 1 |
+| HL testnet limits, minimum amounts, fees, and final events | `money-and-units.md` section 9 | Phase 1 |
+| Production total custody, user, and trading limits | This table | Phases 4–5 |
+| Production external eligibility issuer | This table | After contractual/legal review |
+| `icp.yaml` environments syntax | `icp.yaml` | Phase 1; verify with `icp project show` |

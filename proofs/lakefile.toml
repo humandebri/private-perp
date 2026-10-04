@@ -1,0 +1,6 @@
+name = "canister_proofs"
+version = "0.1.0"
+defaultTargets = ["CanisterProofs"]
+
+[[lean_lib]]
+name = "CanisterProofs"

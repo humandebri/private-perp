@@ -1,4 +1,5 @@
 import { resolveConfig } from './config'
+import { marketInfoUrl } from '../market-endpoint'
 
 export type BookLevel = { px: string; sz: string; n: number }
 export type PublicTrade = {
@@ -9,14 +10,31 @@ export type PublicTrade = {
   time: number
   tid: number
 }
-export type Candle = { t: number; o: string; h: string; l: string; c: string }
+export type Candle = {
+  t: number
+  o: string
+  h: string
+  l: string
+  c: string
+  s?: string
+  i?: string
+  n?: number
+  v?: string
+}
 export type MarketSnapshot = {
   connection: 'connecting' | 'live' | 'reconnecting' | 'offline'
   mids: Record<string, string>
   book: Record<string, [BookLevel[], BookLevel[]]>
   trades: Record<string, PublicTrade[]>
   candles: Record<string, Candle[]>
+  candleHistory?: Record<string, 'loading' | 'ready' | 'error'>
   observedAt?: number
+  midsObservedAt?: number
+  assets?: Record<string, { sizeDecimals: number; maxLeverage: number }>
+  assetContext?: Record<
+    string,
+    { markPx: string; funding: string; prevDayPx: string; dayNtlVlm: string }
+  >
 }
 
 const initial = (): MarketSnapshot => ({
@@ -27,12 +45,59 @@ const initial = (): MarketSnapshot => ({
   candles: {},
 })
 
+export function validCandle(value: unknown): value is Candle {
+  if (!value || typeof value !== 'object') return false
+  const candle = value as Candle
+  if (!Number.isSafeInteger(candle.t) || candle.t <= 0) return false
+  const prices = [candle.o, candle.h, candle.l, candle.c]
+  if (
+    prices.some(
+      (price) => typeof price !== 'string' || !Number.isFinite(Number(price)) || Number(price) <= 0,
+    )
+  )
+    return false
+  return (
+    Number(candle.h) >= Math.max(Number(candle.o), Number(candle.c)) &&
+    Number(candle.l) <= Math.min(Number(candle.o), Number(candle.c))
+  )
+}
+
+/** Refresh cached bars without overwriting a newer in-flight live update. */
+export function mergeCandleHistory(
+  existing: Candle[],
+  history: Candle[],
+  atRequest: Candle[],
+): Candle[] {
+  const before = new Map(atRequest.map((candle) => [candle.t, candle]))
+  const fetched = new Map(history.map((candle) => [candle.t, candle]))
+  const liveUpdates = existing.filter((candle) => {
+    if (before.get(candle.t) === candle) return false
+    const historical = fetched.get(candle.t)
+    // A later REST snapshot may contain more trades than an earlier WS update.
+    if (historical?.n !== undefined && candle.n !== undefined) return candle.n >= historical.n
+    return true
+  })
+  return [
+    ...new Map(
+      [...existing, ...history, ...liveUpdates].map((candle) => [candle.t, candle]),
+    ).values(),
+  ]
+    .sort((a, b) => a.t - b.t)
+    .slice(-5000)
+}
+
 export function reduceMarketMessage(snapshot: MarketSnapshot, message: unknown): MarketSnapshot {
   if (!message || typeof message !== 'object') return snapshot
   const payload = message as { channel?: string; data?: any }
   const next = { ...snapshot, connection: 'live' as const, observedAt: Date.now() }
+  if (payload.channel === 'activeAssetCtx' && payload.data?.coin && payload.data?.ctx) {
+    return {
+      ...next,
+      assetContext: { ...snapshot.assetContext, [payload.data.coin]: payload.data.ctx },
+    }
+  }
   if (payload.channel === 'allMids' && payload.data?.mids)
-    return { ...next, mids: { ...snapshot.mids, ...payload.data.mids } }
+    return { ...next, midsObservedAt: Date.now(), mids: { ...snapshot.mids, ...payload.data.mids } }
   if (payload.channel === 'l2Book' && payload.data?.coin && Array.isArray(payload.data.levels))
     return { ...next, book: { ...snapshot.book, [payload.data.coin]: payload.data.levels } }
   if (payload.channel === 'trades' && Array.isArray(payload.data)) {
@@ -46,18 +111,19 @@ export function reduceMarketMessage(snapshot: MarketSnapshot, message: unknown):
       },
     }
   }
-  if (payload.channel === 'candle' && payload.data?.s) {
-    const coin = payload.data.s as string
-    const candle = payload.data as Candle
-    const existing = snapshot.candles[coin] ?? []
-    const withoutSame = existing.filter((item) => item.t !== candle.t)
-    return {
-      ...next,
-      candles: {
-        ...snapshot.candles,
-        [coin]: [...withoutSame, candle].sort((a, b) => a.t - b.t).slice(-5000),
-      },
+  if (payload.channel === 'candle') {
+    const updates: unknown[] = Array.isArray(payload.data) ? payload.data : [payload.data]
+    const candles = { ...snapshot.candles }
+    let changed = false
+    for (const candle of updates) {
+      if (!validCandle(candle) || !candle.s || (candle.i && candle.i !== '1m')) continue
+      const existing = candles[candle.s] ?? []
+      candles[candle.s] = [...existing.filter((item) => item.t !== candle.t), candle]
+        .sort((a, b) => a.t - b.t)
+        .slice(-5000)
+      changed = true
     }
+    return changed ? { ...next, candles } : snapshot
   }
   return next
 }
@@ -78,6 +144,7 @@ export class MarketFeed {
   private isLeader = false
   private attemptingLeadership = false
   private lastReceivedAt = Date.now()
+  private historyAbort?: AbortController
 
   start(): void {
     if (this.channel) return
@@ -105,6 +172,7 @@ export class MarketFeed {
 
   stop(): void {
     this.stopped = true
+    this.historyAbort?.abort()
     if (this.reconnect) clearTimeout(this.reconnect)
     if (this.heartbeat) clearInterval(this.heartbeat)
     if (this.election) clearInterval(this.election)
@@ -142,9 +210,16 @@ export class MarketFeed {
   private openSocket(): void {
     if (this.stopped) return
     this.isLeader = true
-    const socket = new WebSocket(resolveConfig().marketWs)
+    const marketWs = resolveConfig().marketWs
+    const socket = new WebSocket(marketWs)
     this.socket = socket
+    this.historyAbort?.abort()
+    const controller = new AbortController()
+    this.historyAbort = controller
+    for (const coin of ['BTC', 'ETH']) void this.loadHistory(coin, marketWs, controller)
     socket.onopen = () => {
+      if (this.stopped || this.socket !== socket) return
+      void this.loadAssets(marketWs, controller)
       this.snapshot = { ...this.snapshot, connection: 'live' }
       for (const coin of ['BTC', 'ETH']) {
         for (const subscription of [
@@ -165,6 +240,7 @@ export class MarketFeed {
       this.publish()
     }
     socket.onmessage = (event) => {
+      if (this.stopped || this.socket !== socket) return
       try {
         this.snapshot = reduceMarketMessage(this.snapshot, JSON.parse(String(event.data)))
       } catch {
@@ -173,13 +249,64 @@ export class MarketFeed {
       this.publish()
     }
     socket.onclose = () => {
+      if (this.socket !== socket) return
       if (this.heartbeat) clearInterval(this.heartbeat)
+      controller.abort()
       if (this.stopped) return
       this.snapshot = { ...this.snapshot, connection: 'reconnecting' }
       this.publish()
       this.reconnect = setTimeout(() => this.openSocket(), 1000)
     }
     socket.onerror = () => socket.close()
+  }
+
+  private async loadHistory(
+    coin: string,
+    marketWs: string,
+    controller: AbortController,
+  ): Promise<void> {
+    const atRequest = this.snapshot.candles[coin] ?? []
+    this.snapshot = {
+      ...this.snapshot,
+      candleHistory: { ...this.snapshot.candleHistory, [coin]: 'loading' },
+    }
+    this.publish()
+    const endTime = Date.now()
+    try {
+      const response = await fetch(marketInfoUrl(marketWs), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'candleSnapshot',
+          req: { coin, interval: '1m', startTime: endTime - 24 * 60 * 60_000, endTime },
+        }),
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
+      })
+      if (!response.ok) throw new Error('Candle history request failed')
+      const data: unknown = await response.json()
+      if (
+        !Array.isArray(data) ||
+        data.some((candle) => !validCandle(candle) || candle.s !== coin || candle.i !== '1m')
+      )
+        throw new Error('Invalid candle history')
+      if (this.stopped || this.historyAbort !== controller || controller.signal.aborted) return
+      this.snapshot = {
+        ...this.snapshot,
+        candles: {
+          ...this.snapshot.candles,
+          [coin]: mergeCandleHistory(this.snapshot.candles[coin] ?? [], data, atRequest),
+        },
+        candleHistory: { ...this.snapshot.candleHistory, [coin]: 'ready' },
+      }
+      this.publish()
+    } catch {
+      if (this.stopped || this.historyAbort !== controller || controller.signal.aborted) return
+      this.snapshot = {
+        ...this.snapshot,
+        candleHistory: { ...this.snapshot.candleHistory, [coin]: 'error' },
+      }
+      this.publish()
+    }
   }
 
   private publish(): void {
@@ -189,5 +316,47 @@ export class MarketFeed {
 
   private emit(): void {
     for (const listener of this.listeners) listener(this.snapshot)
+  }
+
+  private async loadAssets(marketWs: string, controller: AbortController): Promise<void> {
+    try {
+      const response = await fetch(marketInfoUrl(marketWs), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'meta' }),
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
+      })
+      if (!response.ok) return
+      const data = (await response.json()) as {
+        universe?: { name: string; szDecimals: number; maxLeverage: number }[]
+      }
+      if (
+        !Array.isArray(data.universe) ||
+        this.stopped ||
+        this.historyAbort !== controller ||
+        controller.signal.aborted
+      )
+        return
+      const assets = Object.fromEntries(
+        data.universe
+          .filter(
+            (asset) =>
+              ['BTC', 'ETH'].includes(asset.name) &&
+              Number.isInteger(asset.szDecimals) &&
+              asset.szDecimals >= 0 &&
+              asset.szDecimals <= 6 &&
+              Number.isInteger(asset.maxLeverage) &&
+              asset.maxLeverage > 0,
+          )
+          .map((asset) => [
+            asset.name,
+            { sizeDecimals: asset.szDecimals, maxLeverage: asset.maxLeverage },
+          ]),
+      )
+      this.snapshot = { ...this.snapshot, assets }
+      this.publish()
+    } catch {
+      /* The ticket stays disabled until venue precision is available. */
+    }
   }
 }

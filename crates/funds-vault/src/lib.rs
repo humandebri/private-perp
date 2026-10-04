@@ -27,6 +27,9 @@ mod private_api;
 mod random;
 mod recovery;
 mod rest_budget;
+mod spot_deposits;
+#[cfg(feature = "test-venue")]
+mod test_atomicity;
 mod venue;
 
 /// HPKE封筒は共有クレートへ移設した（`trading_core`も同じ封筒を使う）。
@@ -61,7 +64,9 @@ async fn issue_challenge(request: ChallengeRequest) -> Result<ChallengeResponse,
 /// challengeを消費してセッションを発行する。
 #[scoped_entrypoint::update(scope = Vault, prefix = "vault_")]
 async fn open_session(request: OpenSessionRequest) -> Result<SessionHandle, ErrorCode> {
-    auth::open_session(request, ic_cdk::api::msg_caller()).await
+    let session = auth::open_session(request, ic_cdk::api::msg_caller()).await?;
+    spot_deposits::claim_for_session(&session).await?;
+    Ok(session)
 }
 
 /// セッションを失効させる。
