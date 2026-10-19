@@ -22,7 +22,7 @@
     "@icp-sdk/core": "6.1.0",
     "@tanstack/react-query": "5.103.1",
     "@tanstack/react-router": "1.170.38",
-    "@tanstack/react-start": "1.168.56",
+    "@tanstack/react-start": "1.168.60",
     "@tanstack/react-table": "8.21.3",
     "lightweight-charts": "5.2.1",
     "react": "19.3.0",
